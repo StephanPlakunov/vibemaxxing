@@ -509,10 +509,13 @@ def live_alias(root: Path, port: KeychainPort) -> str | None:
         return None
     if raw is None or not _holds_login(raw):
         return None
+    return _live_owner(root, prefer=read_active(root))
+
+
+def _live_owner(root: Path, *, prefer: str | None) -> str | None:
+    """The stored account ~/.claude.json says Claude Code is logged in as."""
     uuid = read_claude_identity(Path.home() / ".claude.json").account_uuid
-    if uuid is None:
-        return None
-    return _uuid_owner(root, uuid, prefer=read_active(root))
+    return None if uuid is None else _uuid_owner(root, uuid, prefer=prefer)
 
 
 def require_usable(account: Account) -> None:
@@ -534,20 +537,29 @@ def switch(root: Path, alias: str, port: KeychainPort) -> None:
     incoming = read_account(root, alias)  # an unknown alias must fail before the port is touched
 
     outgoing = read_active(root)
-    # Not for the account already active: its stored copy is replaced from the port by
-    # the resync below, and Claude Code may have extended what the old copy says.
-    if alias != outgoing:
+    # `active` is only what vibe last wrote. When ~/.claude.json names another stored
+    # account, that one owns the port's login: the resync must write into it, so its
+    # claim is held too.
+    # ponytail: read before the claims it joins, so a `claude /login` in the instant
+    # between resyncs into an account whose claim is not held. Re-read under the
+    # claims if that ever shows.
+    owner = _live_owner(root, prefer=outgoing)
+    # Not for an account whose copy the resync below replaces from the port: Claude
+    # Code may have extended what the old copy says.
+    if alias not in (outgoing, owner):
         require_usable(incoming)
-    with _claims(root, (alias, outgoing), f"vibe switch {alias}"):
+    with _claims(root, (alias, outgoing, owner), f"vibe switch {alias}"):
         # Re-read under the claims: a switch that finished between the read above
         # and the claims put a different account in the port, and resyncing it
         # into `outgoing` would write one account's tokens into another's file.
         if read_active(root) != outgoing:
             raise UsageError("another vibe switch just ran", f"vibe switch {alias}")
-        _switch_claimed(root, alias, outgoing, port)
+        _switch_claimed(root, alias, outgoing, owner, port)
 
 
-def _switch_claimed(root: Path, alias: str, outgoing: str | None, port: KeychainPort) -> None:
+def _switch_claimed(
+    root: Path, alias: str, outgoing: str | None, owner: str | None, port: KeychainPort
+) -> None:
     base_raw = port.read()
     base = parse_blob_members(base_raw) if base_raw is not None else None
     live = read_claude_identity(Path.home() / ".claude.json")
@@ -563,20 +575,30 @@ def _switch_claimed(root: Path, alias: str, outgoing: str | None, port: Keychain
             "vibe add",
         )
 
-    if base_raw is not None and outgoing is not None and account_path(root, outgoing).exists():
-        # Claude Code rotates the live token behind our back; without this resync
-        # the outgoing account is stranded on a token the server already killed.
-        #
-        # But the blob in the port is only the outgoing account's if nobody ran
-        # `claude /login` behind us. When they have, the port holds a DIFFERENT
-        # account and copying it here writes one account's tokens into another
-        # account's file, destroying the displaced refresh token. Identity is
-        # free to check, so check it: resync only when the live account uuid is
-        # unknown or agrees.
-        account = read_account(root, outgoing)
+    # Claude Code rotates the live token behind our back; without this resync the
+    # account that owns it is stranded on a token the server already killed.
+    #
+    # The blob in the port is the owner's: the account ~/.claude.json names, else
+    # the one `active` names. Copying it anywhere else writes one account's tokens
+    # into another account's file, destroying the displaced refresh token. Identity
+    # is free to check, so check it: resync only when the live account uuid is
+    # unknown or agrees.
+    holder = owner if owner is not None else outgoing
+    if base_raw is not None and holder is not None and account_path(root, holder).exists():
+        account = read_account(root, holder)
         stored_uuid = account.identity.account_uuid
         if live_uuid is None or stored_uuid is None or live_uuid == stored_uuid:
-            write_account(root, replace(account, credential=parse_blob(base_raw)))
+            # The port's login is live whatever the file recorded: a needs_login mark
+            # on this account is over once Claude Code holds a working login for it.
+            write_account(
+                root,
+                replace(
+                    account,
+                    credential=parse_blob(base_raw),
+                    state=AccountState.OK,
+                    message=None,
+                ),
+            )
 
     # Re-read: switching to the account that was already active must keep the
     # credential the resync just wrote, not the copy read before it.
@@ -585,7 +607,7 @@ def _switch_claimed(root: Path, alias: str, outgoing: str | None, port: Keychain
     # the live lineage, where the file holds its spent predecessor. It has to land
     # before the port, because once active the account is never refreshed and the
     # stash would never be consumed -- only overwritten on the way back out.
-    successor = read_stash(root, alias) if alias != outgoing else None
+    successor = read_stash(root, alias) if alias not in (outgoing, owner) else None
     if successor is not None:
         incoming = replace(incoming, credential=successor)
         write_account(root, incoming)
