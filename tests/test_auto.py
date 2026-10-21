@@ -20,8 +20,9 @@ from pathlib import Path
 import pytest
 
 from tests.fakes import FakeHttpClient, FakeKeychain, make_credential, seed_account
-from vibemaxxing import auto, cli, credentials, store, usage
+from vibemaxxing import auto, cli, credentials, oauth, store, usage
 from vibemaxxing.credentials import Identity, credential_to_blob
+from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, VibeError
 from vibemaxxing.httpclient import HTTPError
 from vibemaxxing.models import AccountState
 from vibemaxxing.pool import LastSwitch, Settings
@@ -327,6 +328,103 @@ def test_tick_never_switches_onto_a_stale_account(tmp_home: Path) -> None:
     assert w.tick().line == "stay: no account with headroom"
 
 
+def test_tick_never_switches_onto_an_account_it_could_not_identify_afterwards(
+    tmp_home: Path,
+) -> None:
+    w = world(tmp_home, {"a": (99, 30), "b": (0, 0)})
+    seed_account(w.root, "b", credential=make_credential(access="b-file"))  # no uuid stored
+
+    assert w.tick().line == "stay: no account with headroom"
+    assert store.read_active(w.root) == "a"
+
+
+def test_tick_stays_when_the_live_account_changes_while_it_checks(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # collect and the refresh can take seconds; a person who runs `vibe switch c` in that
+    # time must not be overridden by a decision made about a.
+    w = world(tmp_home, {"a": (99, 30), "b": (10, 10), "c": (50, 50)})
+    real = oauth.ensure_usable
+
+    def then_someone_switches(
+        root: Path, alias: str, client: FakeHttpClient, *, now_ms: int
+    ) -> None:
+        real(root, alias, client, now_ms=now_ms)
+        store.write_active(w.root, "c")
+
+    monkeypatch.setattr(oauth, "ensure_usable", then_someone_switches)
+    before = w.port.blob
+
+    result = w.tick()
+
+    assert result.switched is False
+    assert result.line.startswith("stay: the live account changed")
+    assert w.port.blob == before
+    assert store.read_active(w.root) == "c"
+    assert auto.read_last(w.root) is None and w.notes == []
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        NeedsLoginError('the refresh token for "b" was rejected', "vibe add b"),
+        NetworkError('could not confirm that "b" is usable right now (transient)', "vibe switch b"),
+    ],
+)
+def test_tick_stays_when_the_target_turns_out_dead_or_unconfirmable(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch, refusal: VibeError
+) -> None:
+    w = world(tmp_home, {"a": (99, 30), "b": (10, 10)})
+    asked: list[str] = []
+
+    def refuse(root: Path, alias: str, client: FakeHttpClient, *, now_ms: int) -> None:
+        asked.append(alias)
+        raise refusal
+
+    monkeypatch.setattr(oauth, "ensure_usable", refuse)
+    before = w.port.blob
+
+    result = w.tick()
+
+    assert asked == ["b"], "the tick proves the chosen target alive before it switches"
+    assert result.line == f"stay: {refusal.message}"
+    assert w.port.blob == before and "keychain.write" not in w.port.log
+    assert store.read_active(w.root) == "a"
+    assert auto.read_last(w.root) is None
+
+
+def test_tick_stays_when_the_target_was_removed_in_between(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = world(tmp_home, {"a": (99, 30), "b": (10, 10)})
+
+    def gone(*args: object, **kwargs: object) -> None:
+        raise NotFoundError('there is no account named "b"', "vibe list")
+
+    monkeypatch.setattr(store, "switch", gone)
+
+    assert w.tick().line == 'stay: there is no account named "b"'
+
+
+def test_tick_still_reports_a_switch_it_could_not_record(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = world(tmp_home, {"a": (99, 30), "b": (10, 10)})
+
+    def disk_full(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(auto, "write_last", disk_full)
+
+    result = w.tick()
+
+    # The switch landed; reporting a crash instead would hide that and lose the notification.
+    assert result.switched is True
+    assert result.line.startswith("switched a -> b")
+    assert "not recorded" in result.line
+    assert store.read_active(w.root) == "b" and w.notes == [result.line]
+
+
 def test_tick_respects_the_cooldown(tmp_home: Path) -> None:
     w = world(tmp_home, {"a": (99, 30), "b": (10, 10)})
     auto.write_last(w.root, LastSwitch("b", "a", NOW_S - 100.0, "earlier", None))
@@ -480,6 +578,73 @@ def test_on_off_exclude_include_edit_the_settings(
     assert "vibe list" in capsys.readouterr().err
 
 
+def test_editing_an_unreadable_settings_file_is_refused_not_overwritten(
+    tmp_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Reading it as the defaults is right for `vibe list`. Writing the defaults back over
+    # it is not: it would silently drop a hand-written exclusion and then switch on.
+    w = world(tmp_home, {"a": (10, 10), "b": (10, 10)}, on=False)
+    path = auto.settings_path(w.root)
+    path.write_text('{"schema": 1, "excluded": ["b"], "cooldown_s": "900"}')
+    before = path.read_bytes()
+
+    for argv in (["on"], ["off"], ["exclude", "a"], ["include", "b"]):
+        assert cli.main(["auto", *argv], context=w.context()) == 2, argv
+        err = capsys.readouterr().err
+        assert str(path) in err and f"rm {path}" in err, argv
+    assert path.read_bytes() == before
+    assert auto.read_settings(w.root) == Settings(), "and reading it is still the defaults"
+
+
+def test_renaming_an_account_keeps_it_excluded_and_remembers_its_switch(
+    tmp_home: Path,
+) -> None:
+    w = world(tmp_home, {"a": (99, 30), "b": (10, 10)})
+    auto.write_settings(w.root, Settings(auto_switch=True, excluded=("b",)))
+    auto.write_last(w.root, LastSwitch("b", "a", NOW_S - 5000.0, "b session at 99%", NOW_S + 3600))
+
+    assert cli.main(["alias", "b", "bee"], context=w.context()) == 0
+
+    assert auto.read_settings(w.root).excluded == ("bee",)
+    last = auto.read_last(w.root)
+    assert last is not None and (last.from_alias, last.to_alias) == ("bee", "a")
+    assert w.tick().line == "stay: no account with headroom", "the fence moved with the name"
+
+
+def test_a_last_switch_with_an_absurd_time_is_no_record_and_breaks_nothing(
+    tmp_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_home / ".vibemaxxing"
+    root.mkdir()
+    for at in ("1e12", "1e300", "-1e300"):
+        auto.last_path(root).write_text(
+            f'{{"schema": 1, "from": "a", "to": "b", "at": {at}, "reason": "r", "until": null}}'
+        )
+        assert auto.read_last(root) is None, at
+    auto.last_path(root).write_text(
+        '{"schema": 1, "from": "a", "to": "b", "at": 1757930000, "reason": "r", "until": 1e300}'
+    )
+    last = auto.read_last(root)
+    assert last is not None and last.until_s is None, "an unusable `until` is just unknown"
+
+    seed_account(root, "work", active=True)
+    auto.last_path(root).write_text(
+        '{"schema": 1, "from": "a", "to": "b", "at": 1e12, "reason": "r", "until": null}'
+    )
+    client = FakeHttpClient()
+    client.queue_json(200, payload(10, 10))
+    ctx = cli.Context(
+        root=root,
+        client=client,
+        port=FakeKeychain(),
+        now_s=NOW_S,
+        prompt=lambda _: "",
+        browser=lambda _: True,
+    )
+    assert cli.main(["--json", "list"], context=ctx) == 0
+    assert json.loads(capsys.readouterr().out)["auto_switch"]["last_switch"] is None
+
+
 def test_every_auto_command_speaks_json(tmp_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     w = world(tmp_home, {"a": (10, 10), "b": (40, 40)})
     ctx = w.context()
@@ -490,6 +655,22 @@ def test_every_auto_command_speaks_json(tmp_home: Path, capsys: pytest.CaptureFi
         out = json.loads(capsys.readouterr().out)
         assert out["schema"] == 1 and out["ok"] is True, argv
         assert out["action"] == f"auto {argv[0]}", argv
+
+
+def test_undo_install_and_uninstall_speak_json_too(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _no_subprocess(monkeypatch)
+    w = world(tmp_home, {"a": (10, 10), "b": (10, 10)})
+    auto.write_last(w.root, LastSwitch("b", "a", NOW_S - 5000.0, "b session at 99%", None))
+
+    for command in ("undo", "install", "uninstall"):
+        capsys.readouterr()
+        assert cli.main(["auto", command, "--json"], context=w.context()) == 0, command
+        out = json.loads(capsys.readouterr().out)
+        assert (out["schema"], out["ok"], out["action"]) == (1, True, f"auto {command}")
+    assert store.read_active(w.root) == "b", "undo went back to the account the record left"
 
 
 def test_status_says_who_is_live_and_where_a_switch_would_go(
@@ -514,8 +695,43 @@ def test_status_says_who_is_live_and_where_a_switch_would_go(
     capsys.readouterr()
     assert cli.main(["auto", "status"], context=w.context()) == 0
     text = capsys.readouterr().out
-    for fragment in ("on", "99%", "a", "c session at 99%", "next"):
-        assert fragment in text
+    assert text.startswith(
+        "auto-switch  on\nthreshold    99%  cooldown 900s\nexcluded     none\nlive         a\n"
+    )
+    assert "last switch  c -> a at " in text and "(c session at 99%)" in text
+    assert text.endswith("next         c\n")
+
+
+def test_status_exactly_when_nothing_has_happened(
+    tmp_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    w = world(tmp_home, {"a": (10, 10), "b": (40, 40), "c": (5, 5)})
+    auto.write_settings(w.root, Settings(auto_switch=True, excluded=("b",)))
+
+    assert cli.main(["auto", "status"], context=w.context()) == 0
+
+    assert capsys.readouterr().out == (
+        "auto-switch  on\n"
+        "threshold    99%  cooldown 900s\n"
+        "excluded     b\n"
+        "live         a\n"
+        "last switch  none\n"
+        "next         c\n"
+    )
+
+
+def test_status_says_how_to_repair_a_stale_pointer(
+    tmp_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    w = world(tmp_home, {"a": (10, 10), "b": (99, 99)}, live="b")
+    store.write_active(w.root, "a")
+
+    assert cli.main(["auto", "status"], context=w.context()) == 0
+
+    out = capsys.readouterr().out
+    assert "live         b  (vibe's active account is a - run: vibe switch b)\n" in out
+    assert out.endswith("next         none\n"), "it does not poll while the pointer is wrong"
+    assert w.client.requests == []
 
 
 def test_status_with_nothing_known_is_still_an_answer(

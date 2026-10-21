@@ -313,6 +313,25 @@ def test_switch_says_retry_when_it_cannot_confirm_the_target(
     assert store.read_account(root, "b").state is AccountState.OK
 
 
+def test_vibe_run_never_reposts_a_token_the_account_records_as_dead(
+    tmp_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "old", credential=make_credential(expires_at_ms=NOW_MS - 1))
+    stored = store.read_account(root, "old")
+    store.write_account(
+        root,
+        replace(stored, state=AccountState.NEEDS_LOGIN, message="rejected - run: vibe add old"),
+    )
+    client = FakeHttpClient()  # any request raises: the record is what stops it
+
+    code = cli.main(["run", "old", "--", "true"], context=_ctx(tmp_home, client, FakeKeychain()))
+
+    assert code == 3
+    assert "vibe add old" in capsys.readouterr().err
+    assert client.requests == []
+
+
 def test_a_stale_refresh_token_does_not_mark_a_newer_login_dead(tmp_home: Path) -> None:
     root = tmp_home / ".vibemaxxing"
     seed_account(root, "old", credential=make_credential(refresh="newer-rt"))
