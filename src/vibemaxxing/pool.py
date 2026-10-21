@@ -115,15 +115,17 @@ def _stay(reason: str) -> Decision:
     return Decision("stay", None, reason)
 
 
-def _reset_s(row: Row) -> float | None:
-    if row.resets_at is None:
-        return None
+def parse_stamp(stamp: str) -> float | None:
+    """A timestamp the server sent, as epoch seconds; None when it is not one."""
     try:
-        return datetime.fromisoformat(row.resets_at).timestamp()
+        return datetime.fromisoformat(stamp).timestamp()
     except (ValueError, OverflowError, OSError):
-        # The server owns this string's format; an unreadable one is an unknown reset,
-        # which callers treat as "has not happened yet".
         return None
+
+
+def _reset_s(row: Row) -> float | None:
+    # An unreadable reset is an unknown one, which callers treat as "has not happened yet".
+    return None if row.resets_at is None else parse_stamp(row.resets_at)
 
 
 def _over(rows: Iterable[Row], threshold: int) -> list[Row]:

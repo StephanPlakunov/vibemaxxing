@@ -22,7 +22,14 @@ from vibemaxxing.httpclient import HttpClient, HTTPError
 from vibemaxxing.keychain import KeychainPort
 from vibemaxxing.models import AccountState
 from vibemaxxing.poll import BACKOFF_S, POLL_FLOOR_S, USAGE_FRESH_S, USAGE_WAIT_CAP_S
-from vibemaxxing.pool import WEEKLY_ALL_KIND, AccountUsage, LastSwitch, pool_remaining
+from vibemaxxing.pool import (
+    WEEKLY_ALL_KIND,
+    AccountUsage,
+    LastSwitch,
+    Settings,
+    parse_stamp,
+    pool_remaining,
+)
 from vibemaxxing.redact import scrub
 from vibemaxxing.usage import Summary
 
@@ -476,16 +483,6 @@ def pool_weeks(views: Sequence[AccountView]) -> float:
     )
 
 
-def _epoch(stamp: str) -> float | None:
-    try:
-        return datetime.fromisoformat(stamp).timestamp()
-    except ValueError:
-        # An unparseable stamp drops that one reset off the list. The server owns
-        # this string's format, and guessing at a new one would place a marker at
-        # an invented moment rather than omit it.
-        return None
-
-
 def resets(views: Sequence[AccountView]) -> list[dict[str, object]]:
     """Each account's weekly rollover, soonest first.
 
@@ -500,15 +497,31 @@ def resets(views: Sequence[AccountView]) -> list[dict[str, object]]:
         for row in view.summary.rows:
             if row.kind != WEEKLY_ALL_KIND:
                 continue
-            at_s = _epoch(row.resets_at) if row.resets_at else None
+            # An unparseable stamp drops that one reset off the list. The server owns
+            # this string's format, and guessing at a new one would place a marker at
+            # an invented moment rather than omit it.
+            at_s = parse_stamp(row.resets_at) if row.resets_at else None
             if at_s is not None:
                 found.append((at_s, {"alias": view.alias, "at": _iso(at_s)}))
             break
     return [entry for _, entry in sorted(found, key=lambda pair: pair[0])]
 
 
+def auto_switch_entry(settings: Settings, last: LastSwitch | None) -> dict[str, object]:
+    return {
+        "enabled": settings.auto_switch,
+        "threshold": settings.threshold,
+        "last_switch": last_switch_entry(last),
+    }
+
+
 def build(
-    views: Sequence[AccountView], *, now_s: float, dry_in: timedelta | None = None
+    views: Sequence[AccountView],
+    *,
+    now_s: float,
+    dry_in: timedelta | None = None,
+    auto: Settings | None = None,
+    last_switch: LastSwitch | None = None,
 ) -> dict[str, object]:
     return {
         "schema": ENVELOPE_SCHEMA,
@@ -520,6 +533,7 @@ def build(
             "dry_in_seconds": None if dry_in is None else int(dry_in.total_seconds()),
         },
         "resets": resets(views),
+        "auto_switch": auto_switch_entry(auto if auto is not None else Settings(), last_switch),
     }
 
 

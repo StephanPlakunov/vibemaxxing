@@ -20,7 +20,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from vibemaxxing import history, store
+from vibemaxxing import auto, history, store
 from vibemaxxing.envelope import build, collect, dumps, error_payload, pool_weeks
 from vibemaxxing.errors import VibeError
 from vibemaxxing.poll import DASHBOARD_INTERVAL_S
@@ -154,7 +154,13 @@ def snapshot(ctx: Context, recorder: Recorder | None = None) -> dict[str, object
         if recorder is not None and complete
         else None
     )
-    return build(views, now_s=now_s, dry_in=forecast)
+    return build(
+        views,
+        now_s=now_s,
+        dry_in=forecast,
+        auto=auto.read_settings(ctx.root),
+        last_switch=auto.read_last(ctx.root),
+    )
 
 
 def serve(ctx: Context, *, port: int) -> int:
