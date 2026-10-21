@@ -447,6 +447,8 @@ def test_the_lapse_check_takes_the_clock_it_is_given(tmp_home: Path) -> None:
 
     store.switch(root, "b", FakeKeychain(blob=live), now_s=(expires_ms - 1000) / 1000)
     store.switch(root, "a", FakeKeychain(blob=live))
+    # Switching away resynced the port's credential into b; put the lapse back.
+    seed_account(root, "b", credential=make_credential(refresh_expires_at_ms=expires_ms))
     with pytest.raises(NeedsLoginError):
         store.switch(root, "b", FakeKeychain(blob=live), now_s=expires_ms / 1000)
     with pytest.raises(NeedsLoginError):

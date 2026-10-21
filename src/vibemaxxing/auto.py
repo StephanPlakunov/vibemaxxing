@@ -146,6 +146,7 @@ def _readings(views: Sequence[AccountView]) -> list[Reading]:
             view.state,
             view.summary.rows if view.summary is not None else None,
             view.updated_at,
+            identified=view.identity.account_uuid is not None,
         )
         for view in views
     ]
@@ -209,7 +210,7 @@ def tick(
 
     try:
         oauth.ensure_usable(root, target, client, now_ms=int(now_s * 1000))
-        store.switch(root, target, port)
+        store.switch(root, target, port, now_s=now_s)
     except (UsageError, NeedsLoginError, NetworkError) as exc:
         return _stay(exc.message)
 
@@ -235,7 +236,7 @@ def undo(root: Path, *, client: HttpClient, port: KeychainPort, now_s: float) ->
     if last is None:
         raise UsageError("there is no automatic switch to undo", "vibe auto status")
     oauth.ensure_usable(root, last.from_alias, client, now_ms=int(now_s * 1000))
-    store.switch(root, last.from_alias, port)
+    store.switch(root, last.from_alias, port, now_s=now_s)
     # Recorded as a switch of its own, so the cooldown starts again and the next tick
     # does not walk straight back out of the account the person just asked for.
     record = LastSwitch(last.to_alias, last.from_alias, now_s, "undo", None)

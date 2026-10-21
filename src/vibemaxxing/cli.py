@@ -284,7 +284,7 @@ def cmd_usage(args: argparse.Namespace, ctx: Context) -> int:
 
 def cmd_switch(args: argparse.Namespace, ctx: Context) -> int:
     oauth.ensure_usable(ctx.root, args.alias, ctx.client, now_ms=int(ctx.now_s * 1000))
-    store.switch(ctx.root, args.alias, ctx.port)
+    store.switch(ctx.root, args.alias, ctx.port, now_s=ctx.now_s)
     _emit(
         _action("switch", alias=args.alias),
         as_json=args.json,
