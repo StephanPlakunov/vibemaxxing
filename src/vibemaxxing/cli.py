@@ -11,15 +11,21 @@ import time
 import webbrowser
 from collections.abc import Callable, Sequence
 from contextlib import closing
-from dataclasses import dataclass, field
-from datetime import timedelta
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import __version__, credentials, envelope, history, oauth, store, tui, web
+from vibemaxxing import __version__, auto, credentials, envelope, history, oauth, store, tui, web
 from vibemaxxing.credentials import Credential
 from vibemaxxing.envelope import AccountView
-from vibemaxxing.errors import NeedsLoginError, NetworkError, UsageError, VibeError
+from vibemaxxing.errors import (
+    NeedsLoginError,
+    NetworkError,
+    NotFoundError,
+    UsageError,
+    VibeError,
+)
 from vibemaxxing.httpclient import HttpClient, UrllibClient
 from vibemaxxing.keychain import KeychainPort, default_port
 from vibemaxxing.models import AccountState
@@ -41,6 +47,9 @@ class Context:
     clock: Callable[[], float] = time.time
     prompt: Callable[[str], str] = input
     browser: Callable[[str], bool] = webbrowser.open
+    # What `vibe auto tick` tells the person after it switched. A field, not a call to
+    # auto.notify_macos, so a test that drives a switch never raises a real notification.
+    notify: Callable[[str], None] = auto.notify_macos
     argv0: str = field(default="vibe")
 
 
@@ -282,6 +291,141 @@ def cmd_switch(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
+def _toggle_auto(args: argparse.Namespace, ctx: Context, *, on: bool) -> int:
+    settings = replace(auto.read_settings(ctx.root), auto_switch=on)
+    auto.write_settings(ctx.root, settings)
+    word = "on" if on else "off"
+    _emit(
+        _action(f"auto {word}", enabled=on, threshold=settings.threshold),
+        as_json=args.json,
+        human=f"auto-switch is {word} (threshold {settings.threshold}%)\n",
+    )
+    return 0
+
+
+def cmd_auto_on(args: argparse.Namespace, ctx: Context) -> int:
+    return _toggle_auto(args, ctx, on=True)
+
+
+def cmd_auto_off(args: argparse.Namespace, ctx: Context) -> int:
+    return _toggle_auto(args, ctx, on=False)
+
+
+def cmd_auto_exclude(args: argparse.Namespace, ctx: Context) -> int:
+    if args.alias not in store.list_aliases(ctx.root):
+        raise NotFoundError(f'there is no account named "{args.alias}"', "vibe list")
+    settings = auto.read_settings(ctx.root)
+    excluded = tuple(dict.fromkeys((*settings.excluded, args.alias)))
+    auto.write_settings(ctx.root, replace(settings, excluded=excluded))
+    _emit(
+        _action("auto exclude", alias=args.alias, excluded=list(excluded)),
+        as_json=args.json,
+        human=f'auto-switch will not switch to "{args.alias}"\n',
+    )
+    return 0
+
+
+def cmd_auto_include(args: argparse.Namespace, ctx: Context) -> int:
+    settings = auto.read_settings(ctx.root)
+    excluded = tuple(alias for alias in settings.excluded if alias != args.alias)
+    auto.write_settings(ctx.root, replace(settings, excluded=excluded))
+    _emit(
+        _action("auto include", alias=args.alias, excluded=list(excluded)),
+        as_json=args.json,
+        human=f'auto-switch may switch to "{args.alias}" again\n',
+    )
+    return 0
+
+
+def _render_status(status: auto.Status) -> str:
+    settings = status.settings
+    live = status.live or "unknown"
+    if status.live is not None and status.active != status.live:
+        live += f"  (vibe's active account is {status.active or 'unset'}"
+        live += f" - run: vibe switch {status.live})"
+    last = "none"
+    if status.last is not None:
+        when = datetime.fromtimestamp(status.last.at_s).strftime("%Y-%m-%d %H:%M")
+        last = (
+            f"{status.last.from_alias} -> {status.last.to_alias} at {when}  ({status.last.reason})"
+        )
+    return (
+        f"auto-switch  {'on' if settings.auto_switch else 'off'}\n"
+        f"threshold    {settings.threshold}%  cooldown {settings.cooldown_s}s\n"
+        f"excluded     {', '.join(settings.excluded) or 'none'}\n"
+        f"live         {live}\n"
+        f"last switch  {last}\n"
+        f"next         {status.next_alias or 'none'}\n"
+    )
+
+
+def cmd_auto_status(args: argparse.Namespace, ctx: Context) -> int:
+    status = auto.status(ctx.root, client=ctx.client, port=ctx.port, now_s=ctx.now_s)
+    _emit(
+        _action(
+            "auto status",
+            enabled=status.settings.auto_switch,
+            threshold=status.settings.threshold,
+            cooldown_s=status.settings.cooldown_s,
+            excluded=list(status.settings.excluded),
+            live=status.live,
+            active=status.active,
+            last_switch=envelope.last_switch_entry(status.last),
+            next=status.next_alias,
+        ),
+        as_json=args.json,
+        human=_render_status(status),
+    )
+    return 0
+
+
+def cmd_auto_tick(args: argparse.Namespace, ctx: Context) -> int:
+    result = auto.tick(
+        ctx.root, client=ctx.client, port=ctx.port, now_s=ctx.now_s, notify=ctx.notify
+    )
+    _emit(
+        _action("auto tick", switched=result.switched, line=result.line),
+        as_json=args.json,
+        human=result.line + "\n",
+    )
+    return 0
+
+
+def cmd_auto_undo(args: argparse.Namespace, ctx: Context) -> int:
+    record = auto.undo(ctx.root, client=ctx.client, port=ctx.port, now_s=ctx.now_s)
+    _emit(
+        _action("auto undo", alias=record.to_alias),
+        as_json=args.json,
+        human=f'Claude Code is back on "{record.to_alias}"\n',
+    )
+    return 0
+
+
+def cmd_auto_install(args: argparse.Namespace, ctx: Context) -> int:
+    path = auto.install_plist()
+    command = auto.bootstrap_command(path)
+    _emit(
+        _action("auto install", plist=str(path), load=command),
+        as_json=args.json,
+        human=f"wrote {path}\nit is not loaded yet; to load it, run:\n  {command}\n",
+    )
+    return 0
+
+
+def cmd_auto_uninstall(args: argparse.Namespace, ctx: Context) -> int:
+    removed = auto.uninstall_plist()
+    command = auto.bootout_command()
+    _emit(
+        _action("auto uninstall", removed=removed, unload=command),
+        as_json=args.json,
+        human=(
+            (f"removed {auto.plist_path()}\n" if removed else "there was no job file to remove\n")
+            + f"if the job is loaded, unload it with:\n  {command}\n"
+        ),
+    )
+    return 0
+
+
 def cmd_remove(args: argparse.Namespace, ctx: Context) -> int:
     store.delete_account(ctx.root, args.alias)
     _emit(
@@ -376,6 +520,16 @@ Housekeeping
   vibe usage --once           fetch the numbers once and print them
   vibe --version              the installed version
 
+Automatic switching (off until you turn it on)
+  vibe auto on                leave the live account for the one with the most room once its
+                              session or week reaches 99%; `off` stops it
+  vibe auto status            the settings, who is live, the last switch, where one would go
+  vibe auto tick              check once and switch if it is due; a scheduler runs this
+  vibe auto install           macOS: write the launchd job that does that every minute, and
+                              print the one command that loads it
+  vibe auto exclude work      never switch to that account; `include` allows it again
+  vibe auto undo              go back to the account the last automatic switch left
+
 switch or run?
   `switch` is global and lasts: every shell, until you switch again. It swaps the
   credential Claude Code itself reads, so a session started afterwards is on the new
@@ -463,6 +617,35 @@ def build_parser() -> argparse.ArgumentParser:
     use.add_argument("--port", type=int, default=DEFAULT_PORT)
     _add_json(use)
     use.set_defaults(handler=cmd_usage)
+
+    automatic = subs.add_parser(
+        "auto", help="switch accounts by itself when the live one is nearly spent"
+    )
+    auto_subs = automatic.add_subparsers(
+        dest="auto_command",
+        required=True,
+        metavar="{on,off,status,exclude,include,undo,tick,install,uninstall}",
+    )
+    for name, handler, summary in (
+        ("on", cmd_auto_on, "turn automatic switching on"),
+        ("off", cmd_auto_off, "turn automatic switching off"),
+        ("status", cmd_auto_status, "show the settings, the live account and where a switch goes"),
+        ("undo", cmd_auto_undo, "go back to the account the last automatic switch left"),
+        ("tick", cmd_auto_tick, "check once and switch if it is due (what a scheduler runs)"),
+        ("install", cmd_auto_install, "macOS: write the launchd job that runs a tick a minute"),
+        ("uninstall", cmd_auto_uninstall, "macOS: remove that job's file"),
+    ):
+        auto_sub = auto_subs.add_parser(name, help=summary)
+        _add_json(auto_sub)
+        auto_sub.set_defaults(handler=handler)
+    for name, handler, summary in (
+        ("exclude", cmd_auto_exclude, "never switch automatically to this account"),
+        ("include", cmd_auto_include, "allow switching to this account again"),
+    ):
+        auto_sub = auto_subs.add_parser(name, help=summary)
+        auto_sub.add_argument("alias")
+        _add_json(auto_sub)
+        auto_sub.set_defaults(handler=handler)
 
     # `vibe help` is what people type; without it argparse answers an unhelpful
     # "invalid choice: 'help'" and lists the commands it just refused to explain.

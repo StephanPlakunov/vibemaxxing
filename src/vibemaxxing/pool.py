@@ -17,6 +17,9 @@ WEEKLY_ALL_KIND: Final = "weekly_all"
 # adds later are not known to mean "this account is spent", so neither moves anyone.
 TRIGGER_KINDS: Final = ("session", WEEKLY_ALL_KIND)
 
+REASON_OFF: Final = "auto-switch is off"
+REASON_LIVE_UNKNOWN: Final = "live account unknown"
+
 DEFAULT_THRESHOLD: Final = 99
 DEFAULT_COOLDOWN_S: Final = 900
 MIN_THRESHOLD: Final = 50
@@ -230,9 +233,9 @@ def decide(
     last: LastSwitch | None,
 ) -> Decision:
     if not settings.auto_switch:
-        return _stay("auto-switch is off")
+        return _stay(REASON_OFF)
     if live is None:
-        return _stay("live account unknown")
+        return _stay(REASON_LIVE_UNKNOWN)
     current = next((reading for reading in readings if reading.alias == live), None)
     if current is None or current.rows is None:
         return _stay(f"no fresh numbers for {live}")

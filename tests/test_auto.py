@@ -337,18 +337,33 @@ def test_tick_respects_the_cooldown(tmp_home: Path) -> None:
     assert store.read_active(w.root) == "a"
 
 
-def test_tick_does_not_retry_a_refused_switch_in_the_same_tick(tmp_home: Path) -> None:
-    # An unknown login in the port: the guard refuses and the tick says so once.
+def test_tick_does_not_retry_a_switch_the_guard_refuses(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Someone runs `claude /login` as an account vibe never stored in the instant after the
+    # tick decided who is live. The guard in store.switch refuses; the tick says so, once.
     w = world(tmp_home, {"a": (99, 30), "b": (10, 10)})
-    (tmp_home / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "ua"}}))
     stranger = credential_to_blob(make_credential(access="stranger", refresh="stranger-rt"))
-    w.port.blob = stranger
+    real = store.live_alias
+
+    def live_then_someone_logs_in(root: Path, port: FakeKeychain) -> str | None:
+        alias = real(root, port)
+        (tmp_home / ".claude.json").write_text(
+            json.dumps({"oauthAccount": {"accountUuid": "stranger"}})
+        )
+        port.blob = stranger
+        return alias
+
+    monkeypatch.setattr(store, "live_alias", live_then_someone_logs_in)
 
     result = w.tick()
 
     assert result.switched is False
-    assert w.port.blob == stranger
-    assert w.port.log.count("keychain.write") == 0
+    assert result.line.startswith("stay: Claude Code is logged in as stranger")
+    assert w.port.blob == stranger, "the stranger's login is still there"
+    assert "keychain.write" not in w.port.log
+    assert auto.read_last(w.root) is None
+    assert w.notes == []
 
 
 # --- faster polling of the live account -----------------------------------------

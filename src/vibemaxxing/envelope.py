@@ -22,7 +22,7 @@ from vibemaxxing.httpclient import HttpClient, HTTPError
 from vibemaxxing.keychain import KeychainPort
 from vibemaxxing.models import AccountState
 from vibemaxxing.poll import BACKOFF_S, POLL_FLOOR_S, USAGE_FRESH_S, USAGE_WAIT_CAP_S
-from vibemaxxing.pool import WEEKLY_ALL_KIND, AccountUsage, pool_remaining
+from vibemaxxing.pool import WEEKLY_ALL_KIND, AccountUsage, LastSwitch, pool_remaining
 from vibemaxxing.redact import scrub
 from vibemaxxing.usage import Summary
 
@@ -453,6 +453,17 @@ def account_entry(view: AccountView) -> dict[str, object]:
             {"label": row.label, "percent": row.percent}
             for row in (summary.breakdown if summary else ())
         ],
+    }
+
+
+def last_switch_entry(last: LastSwitch | None) -> dict[str, object] | None:
+    if last is None:
+        return None
+    return {
+        "from": last.from_alias,
+        "to": last.to_alias,
+        "at": _iso(last.at_s),
+        "reason": last.reason,
     }
 
 
