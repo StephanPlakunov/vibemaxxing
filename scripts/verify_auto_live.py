@@ -32,7 +32,7 @@ import tempfile
 from pathlib import Path
 
 from vibemaxxing import store
-from vibemaxxing.credentials import parse_blob, read_claude_identity
+from vibemaxxing.credentials import parse_blob, read_claude_identity, write_claude_identity
 from vibemaxxing.keychain import CLAUDE_CODE_KEYCHAIN_SERVICE, MacKeychain, default_port
 
 
@@ -48,12 +48,28 @@ def stored_digest(root: Path, alias: str) -> str:
     return digest(store.read_account(root, alias).credential.access_token.reveal())
 
 
-def restore(port: MacKeychain, backup: Path) -> None:
+def restore(root: Path, port: MacKeychain, backup: Path, live: str) -> bool:
+    """Put back what the Keychain, `active` and ~/.claude.json held before the script ran.
+
+    First the guarded way, a switch back to `live`, which restores all three and holds
+    the claims. Only if that does not bring the exact blob back is the backup written
+    straight into the Keychain, and then `active` and ~/.claude.json are repointed too,
+    since a bare Keychain write would leave them naming the other account.
+    """
     saved = backup.read_text()
-    port.write(saved)
+    try:
+        store.switch(root, live, port)
+    except Exception as exc:
+        print(f"  switching back failed ({type(exc).__name__}); writing the backup")
     back = port.read()
+    if back is None or json.loads(back) != json.loads(saved):
+        port.write(saved)
+        store.write_active(root, live)
+        write_claude_identity(Path.home() / ".claude.json", store.read_account(root, live).identity)
+        back = port.read()
     ok = back is not None and json.loads(back) == json.loads(saved)
-    print(f"  restored from {backup}: {'verified' if ok else 'FAILED TO VERIFY'}")
+    print(f"  restored: {'verified' if ok else 'FAILED TO VERIFY'}")
+    return ok
 
 
 def main() -> int:
@@ -124,7 +140,8 @@ def main() -> int:
         named = read_claude_identity(Path.home() / ".claude.json").account_uuid
         if wanted_uuid is not None and named != wanted_uuid:
             raise AssertionError(f"~/.claude.json does not name {target}")
-        if store.live_alias(root, port) != target:
+        # An account stored without a uuid cannot be named from ~/.claude.json at all.
+        if wanted_uuid is not None and store.live_alias(root, port) != target:
             raise AssertionError(f"live_alias does not answer {target}")
         print(f"  active     : {store.read_active(root)}   ~/.claude.json follows")
 
@@ -136,10 +153,14 @@ def main() -> int:
         if json.loads(after) != json.loads(before):
             raise AssertionError("the blob did not come back equal to the original")
         print(f"  blob equals the original: yes  (sha256 {digest(after)})")
-    except Exception as exc:
+    except BaseException as exc:
+        # BaseException: a ctrl-C between the two switches must put the Keychain back too.
         print(f"\nFAILED: {type(exc).__name__}: {exc}")
-        print("restoring the Keychain from the backup")
-        restore(port, backup)
+        print("restoring the Keychain, `active` and ~/.claude.json")
+        if restore(root, port, backup, live):
+            backup.unlink(missing_ok=True)  # it holds plaintext tokens
+        else:
+            print(f"the backup is still at {backup}; it holds plaintext tokens, delete it after")
         return 1
 
     backup.unlink(missing_ok=True)
