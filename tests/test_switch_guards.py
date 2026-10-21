@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.fakes import FakeHttpClient, FakeKeychain, make_credential, seed_account
-from vibemaxxing import envelope, oauth, store
+from tests.fakes import FakeHttpClient, FakeKeychain, fixture_usage, make_credential, seed_account
+from vibemaxxing import cli, credentials, envelope, oauth, store
 from vibemaxxing.credentials import Identity, credential_to_blob
 from vibemaxxing.errors import NeedsLoginError, UsageError, VibeError
 from vibemaxxing.httpclient import HTTPError
@@ -157,3 +157,115 @@ def test_dead_refresh_token_is_posted_once(tmp_home: Path) -> None:
     stored = store.read_account(root, "old")
     assert stored.state is AccountState.NEEDS_LOGIN
     assert stored.message is not None and "vibe add old" in stored.message
+
+
+def _ctx(tmp_home: Path, client: FakeHttpClient, port: FakeKeychain) -> cli.Context:
+    return cli.Context(
+        root=tmp_home / ".vibemaxxing",
+        client=client,
+        port=port,
+        now_s=NOW_S,
+        clock=lambda: NOW_S,
+        prompt=lambda _: "",
+        browser=lambda _: True,
+    )
+
+
+def _expired_target(tmp_home: Path) -> tuple[Path, FakeKeychain]:
+    """a is live, b is stored with an access token that has expired."""
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "a", identity=_identity("ua"), active=True)
+    seed_account(root, "b", credential=make_credential(expires_at_ms=NOW_MS - 1))
+    _claude_json(tmp_home, "ua")
+    return root, FakeKeychain(
+        blob=credential_to_blob(make_credential(access="cc", refresh="cc-rt"))
+    )
+
+
+def test_switch_refreshes_an_expired_target_before_the_port_is_written(tmp_home: Path) -> None:
+    root, port = _expired_target(tmp_home)
+    client = FakeHttpClient()
+    client.queue_json(
+        200, {"access_token": "fresh-access-token", "refresh_token": "fresh-rt", "expires_in": 3600}
+    )
+
+    assert cli.main(["switch", "b"], context=_ctx(tmp_home, client, port)) == 0
+
+    assert [request.url for request in client.requests] == [oauth.TOKEN_URL]
+    assert port.blob is not None
+    assert credentials.parse_blob(port.blob).access_token.reveal() == "fresh-access-token"
+    assert store.read_active(root) == "b"
+
+
+def test_switch_refuses_a_target_the_server_rejects(
+    tmp_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, port = _expired_target(tmp_home)
+    live = port.blob
+    client = FakeHttpClient()
+    client.queue(HTTPError(400, b'{"error":"invalid_grant"}'))
+
+    assert cli.main(["switch", "b"], context=_ctx(tmp_home, client, port)) == 3
+
+    assert "vibe add b" in capsys.readouterr().err
+    assert port.blob == live and port.log == [], "the port is never touched for a dead target"
+    assert store.read_active(root) == "a"
+    assert store.read_account(root, "b").state is AccountState.NEEDS_LOGIN
+
+    # The mark is what stops the next attempt posting the same dead token.
+    assert cli.main(["switch", "b"], context=_ctx(tmp_home, client, port)) == 3
+    assert len(client.requests) == 1
+
+
+def test_switch_says_retry_when_it_cannot_confirm_the_target(
+    tmp_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A 500 says nothing about the login, so `vibe add` would be the wrong advice.
+    root, port = _expired_target(tmp_home)
+    client = FakeHttpClient()
+    client.queue(HTTPError(500, b"upstream is having a day"))
+
+    assert cli.main(["switch", "b"], context=_ctx(tmp_home, client, port)) == 6
+
+    assert "vibe switch b" in capsys.readouterr().err
+    assert port.log == []
+    assert store.read_account(root, "b").state is AccountState.OK
+
+
+def test_a_stale_refresh_token_does_not_mark_a_newer_login_dead(tmp_home: Path) -> None:
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "old", credential=make_credential(refresh="newer-rt"))
+    stale = make_credential(refresh="stale-rt", expires_at_ms=NOW_MS - 1)
+    client = FakeHttpClient()
+    client.queue(HTTPError(400, b'{"error":"invalid_grant"}'))
+
+    outcome = oauth.refresh(root, "old", stale, client, now_ms=NOW_MS)
+
+    assert outcome.error == "invalid_grant"
+    assert store.read_account(root, "old").state is AccountState.OK, (
+        "a `vibe add` that landed meanwhile must not be marked dead for the old token's sins"
+    )
+
+
+def test_a_fresh_login_clears_needs_login(tmp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "old", credential=make_credential(expires_at_ms=NOW_MS - 1))
+    dead = FakeHttpClient()
+    dead.queue(HTTPError(400, b'{"error":"invalid_grant"}'))
+    envelope.collect(root, client=dead, port=FakeKeychain(), now_s=NOW_S)
+    assert store.read_account(root, "old").state is AccountState.NEEDS_LOGIN
+
+    monkeypatch.setattr(oauth, "new_state", lambda: "state-nonce")
+    login = FakeHttpClient()
+    login.queue_json(
+        200, {"access_token": "new-access-token", "refresh_token": "new-rt", "expires_in": 3600}
+    )
+    ctx = _ctx(tmp_home, login, FakeKeychain())
+    ctx.prompt = lambda _: "the-code#state-nonce"
+    assert cli.main(["add", "old"], context=ctx) == 0
+    assert store.read_account(root, "old").state is AccountState.OK
+
+    login.queue_json(200, fixture_usage())
+    (view,) = envelope.collect(root, client=login, port=FakeKeychain(), now_s=NOW_S)
+    assert view.state is AccountState.OK
+    assert view.summary is not None
