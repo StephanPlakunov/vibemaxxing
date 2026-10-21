@@ -29,8 +29,9 @@ def rows(
     scoped: int | None = None,
     *,
     reset_in_s: float | None = HOUR,
+    now: float = NOW,
 ) -> tuple[Row, ...]:
-    stamp = None if reset_in_s is None else _iso(NOW + reset_in_s)
+    stamp = None if reset_in_s is None else _iso(now + reset_in_s)
     found = [("session", "Session", session), ("weekly_all", "Weekly", weekly)]
     found.append(("weekly_scoped", "Weekly · Fable", scoped))
     return tuple(
@@ -49,12 +50,15 @@ def view(
     age_s: float = 10.0,
     state: AccountState = AccountState.OK,
     reset_in_s: float | None = HOUR,
+    now: float = NOW,
 ) -> Reading:
+    # `now` is the moment the reading was taken against: the age and the reset time
+    # are both measured from it, so a test that moves the clock moves them together.
     return Reading(
         alias=alias,
         state=state,
-        rows=rows(session, weekly, scoped, reset_in_s=reset_in_s),
-        updated_at=NOW - age_s,
+        rows=rows(session, weekly, scoped, reset_in_s=reset_in_s, now=now),
+        updated_at=now - age_s,
     )
 
 
@@ -192,11 +196,12 @@ def test_decide_respects_cooldown() -> None:
 
     assert decision.action == "stay"
     assert decision.reason.startswith("cooldown")
+    later = NOW + 800.0
     after = decide(
-        [view("a", session=100), view("b")],
+        [view("a", session=100, now=later), view("b", now=later)],
         settings=ON,
         live="a",
-        now_s=NOW + 800.0,
+        now_s=later,
         last=last,
     )
     assert after.target == "b", "900 s after the switch the cooldown is over"
@@ -223,12 +228,13 @@ def test_decide_never_returns_to_limited_account() -> None:
         now_s=NOW,
         last=last,
     )
+    reset = limited_until + 1.0
     after_reset = decide(
-        [view("a", session=1, weekly=1), view("c", weekly=99)],
+        [view("a", session=1, weekly=1, now=reset), view("c", weekly=99, now=reset)],
         settings=ON,
         live="c",
-        now_s=limited_until + 1.0,
-        last=LastSwitch("a", "c", at_s=NOW - 5_000.0, reason="x", until_s=limited_until),
+        now_s=reset,
+        last=last,
     )
 
     assert no_answer.action == "stay" and no_answer.reason == "no account with headroom"
