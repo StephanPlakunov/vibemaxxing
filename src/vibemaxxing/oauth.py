@@ -24,8 +24,15 @@ from typing import Final
 
 from vibemaxxing import store
 from vibemaxxing.credentials import EMPTY_IDENTITY, Credential, Identity
-from vibemaxxing.errors import NeedsLoginError, NetworkError, PasteFormatError, StateMismatchError
+from vibemaxxing.errors import (
+    NeedsLoginError,
+    NetworkError,
+    PasteFormatError,
+    StateMismatchError,
+    VibeError,
+)
 from vibemaxxing.httpclient import HttpClient, HTTPError
+from vibemaxxing.models import AccountState
 from vibemaxxing.redact import Secret
 
 AUTHORIZE_URL: Final = "https://claude.ai/oauth/authorize"
@@ -164,6 +171,42 @@ def _post_token(client: HttpClient, body: Mapping[str, object]) -> Mapping[str, 
     return response.json()
 
 
+def _recorded_dead(root: Path, alias: str, credential: Credential) -> bool:
+    """True when the account records this very refresh token as rejected."""
+    try:
+        stored = store.read_account(root, alias)
+    except VibeError:
+        return False  # no record is readable, so the attempt is worth one request
+    return (
+        stored.state is AccountState.NEEDS_LOGIN
+        and stored.credential.refresh_token == credential.refresh_token
+    )
+
+
+def _mark_dead(root: Path, alias: str, credential: Credential) -> None:
+    """Record on the account that ``credential``'s refresh token is dead.
+
+    Only while the stored credential still is that one: a `vibe add` that replaced it
+    has a live lineage and is not what the server just refused.
+    ponytail: compare-then-write with no lock, so a `vibe add` landing in the
+    microseconds between the two is overwritten; a claim in `vibe add` is the upgrade.
+    """
+    try:
+        stored = store.read_account(root, alias)
+        if stored.credential.refresh_token != credential.refresh_token:
+            return
+        store.write_account(
+            root,
+            replace(
+                stored,
+                state=AccountState.NEEDS_LOGIN,
+                message=f'the refresh token for "{alias}" was rejected - run: vibe add {alias}',
+            ),
+        )
+    except (VibeError, OSError):
+        return  # an unwritable mark costs the next poll one more request, nothing else
+
+
 def refresh(
     root: Path,
     alias: str,
@@ -186,7 +229,12 @@ def refresh(
 
     if successor is None:
         if not credential.refresh_token:
+            _mark_dead(root, alias, credential)
             return RefreshOutcome(None, "no_refresh_token")
+        # The server already called this token dead. Every poll used to post it
+        # again for as long as the account existed, one request a minute for nothing.
+        if _recorded_dead(root, alias, credential):
+            return RefreshOutcome(None, "invalid_grant")
         if not store.claim_refresh(root, alias, now_s=now_ms / 1000):
             return RefreshOutcome(None, "busy")
         # Again under the claim: `vibe switch` takes the same claim before it
@@ -207,8 +255,12 @@ def refresh(
             )
             successor = _credential_from_token(payload, now_ms=now_ms, previous=credential)
         except HTTPError as exc:
+            error = classify_refresh_error(exc)
+            if error == "invalid_grant":
+                # Before the release: the claim is still ours while the mark lands.
+                _mark_dead(root, alias, credential)
             store.release_refresh(root, alias)
-            return RefreshOutcome(None, classify_refresh_error(exc))
+            return RefreshOutcome(None, error)
         except NetworkError:
             store.release_refresh(root, alias)
             return RefreshOutcome(None, "transient")
@@ -227,7 +279,12 @@ def refresh(
                 store.write_stash(root, alias, successor)
                 stashed = True
             account = store.read_account(root, alias)
-            store.write_account(root, replace(account, credential=successor))
+            # A new credential is a new lineage: whatever was recorded about the old
+            # one (needs_login, after an interrupted refresh left this stash) is over.
+            store.write_account(
+                root,
+                replace(account, credential=successor, state=AccountState.OK, message=None),
+            )
         except OSError:
             # The caller may use the credential but must not be told the account
             # file holds it. `stashed` says whether it survived anywhere at all.

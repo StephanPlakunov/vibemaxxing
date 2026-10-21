@@ -265,6 +265,8 @@ def test_a_fresh_login_clears_needs_login(tmp_home: Path, monkeypatch: pytest.Mo
     assert cli.main(["add", "old"], context=ctx) == 0
     assert store.read_account(root, "old").state is AccountState.OK
 
+    # A login made here has no plan yet, so the first poll asks the profile endpoint too.
+    login.queue_json(200, {"organization": {"organization_type": "claude_max"}})
     login.queue_json(200, fixture_usage())
     (view,) = envelope.collect(root, client=login, port=FakeKeychain(), now_s=NOW_S)
     assert view.state is AccountState.OK
