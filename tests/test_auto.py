@@ -439,17 +439,22 @@ def test_tick_does_not_retry_a_switch_the_guard_refuses(
     tmp_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Someone runs `claude /login` as an account vibe never stored in the instant after the
-    # tick decided who is live. The guard in store.switch refuses; the tick says so, once.
+    # tick's last look at who is live (its first look is before it collects, its second just
+    # before it switches). The guard in store.switch refuses; the tick says so, once.
     w = world(tmp_home, {"a": (99, 30), "b": (10, 10)})
     stranger = credential_to_blob(make_credential(access="stranger", refresh="stranger-rt"))
     real = store.live_alias
+    looks = 0
 
     def live_then_someone_logs_in(root: Path, port: FakeKeychain) -> str | None:
+        nonlocal looks
         alias = real(root, port)
-        (tmp_home / ".claude.json").write_text(
-            json.dumps({"oauthAccount": {"accountUuid": "stranger"}})
-        )
-        port.blob = stranger
+        looks += 1
+        if looks == 2:
+            (tmp_home / ".claude.json").write_text(
+                json.dumps({"oauthAccount": {"accountUuid": "stranger"}})
+            )
+            port.blob = stranger
         return alias
 
     monkeypatch.setattr(store, "live_alias", live_then_someone_logs_in)

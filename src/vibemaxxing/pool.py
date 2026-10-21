@@ -250,8 +250,11 @@ def decide(
     blocked = blocking(current.rows, settings.threshold, now_s)
     if not blocked:
         return _stay(f"no fresh numbers for {live}")
-    if last is not None and now_s - last.at_s < settings.cooldown_s:
-        return _stay(f"cooldown: last switch {int(now_s - last.at_s)}s ago")
+    # abs: a few seconds of clock skew still counts as just switched, while a record that
+    # names a time far ahead (a hand edit, a wrong clock) is no cooldown rather than one
+    # that lasts until then.
+    if last is not None and abs(now_s - last.at_s) < settings.cooldown_s:
+        return _stay(f"cooldown: last switch {int(abs(now_s - last.at_s))}s ago")
     ranked = _ranked(readings, settings=settings, live=live, now_s=now_s, last=last)
     if not ranked:
         return _stay("no account with headroom")
