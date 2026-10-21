@@ -328,3 +328,22 @@ def test_a_fresh_login_clears_needs_login(tmp_home: Path, monkeypatch: pytest.Mo
     (view,) = envelope.collect(root, client=login, port=FakeKeychain(), now_s=NOW_S)
     assert view.state is AccountState.OK
     assert view.summary is not None
+
+
+def test_a_recorded_dead_login_reads_needs_login_whatever_its_token_says(tmp_home: Path) -> None:
+    # store.switch refuses such an account, so a poll must not call it ok and hand it to
+    # something that would try to switch onto it.
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "old")
+    stored = store.read_account(root, "old")
+    store.write_account(
+        root,
+        replace(stored, state=AccountState.NEEDS_LOGIN, message="rejected - run: vibe add old"),
+    )
+    client = FakeHttpClient()
+
+    (view,) = envelope.collect(root, client=client, port=FakeKeychain(), now_s=NOW_S)
+
+    assert view.state is AccountState.NEEDS_LOGIN
+    assert "vibe add old" in str(view.message)
+    assert client.requests == []
