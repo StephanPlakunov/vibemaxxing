@@ -28,7 +28,7 @@ from vibemaxxing.credentials import (
     read_claude_identity,
     write_claude_identity,
 )
-from vibemaxxing.errors import NotFoundError, StoreError, UsageError
+from vibemaxxing.errors import NotFoundError, StoreError, UsageError, VibeError
 from vibemaxxing.fsutil import private_dir, write_private
 from vibemaxxing.keychain import KeychainPort
 from vibemaxxing.models import AccountState
@@ -450,6 +450,54 @@ def _claims(root: Path, names: Iterable[str | None], recovery: str) -> Iterator[
     finally:
         for name in claimed:
             release_refresh(root, name)
+
+
+def _stored_uuid(root: Path, alias: str) -> str | None:
+    try:
+        return read_account(root, alias).identity.account_uuid
+    except VibeError:
+        return None  # one broken account file must not hide the others
+
+
+def _uuid_owner(root: Path, uuid: str, *, prefer: str | None) -> str | None:
+    """The stored account carrying ``uuid``; None for no match or an ambiguous few.
+
+    Two aliases can hold the same Anthropic account (two logins of it). ``prefer``
+    breaks that tie; without it, naming either one would be a guess.
+    """
+    matches = [alias for alias in list_aliases(root) if _stored_uuid(root, alias) == uuid]
+    if prefer in matches:
+        return prefer
+    return matches[0] if len(matches) == 1 else None
+
+
+def _holds_login(blob: str) -> bool:
+    # `{"claudeAiOauth": {}}` is a blob and not a login: there is no token in it to lose.
+    try:
+        parse_blob(blob)
+    except StoreError:
+        return False
+    return True
+
+
+def live_alias(root: Path, port: KeychainPort) -> str | None:
+    """The account Claude Code is logged in as right now, or None when that cannot be told.
+
+    `active` is only what vibe last wrote. A `claude /login` since then moves the
+    real login without touching it (measured: `active` said one account while
+    Claude Code ran as another), so anything that acts on "the account in use"
+    asks the port and ~/.claude.json instead.
+    """
+    try:
+        raw = port.read()
+    except VibeError:
+        return None
+    if raw is None or not _holds_login(raw):
+        return None
+    uuid = read_claude_identity(Path.home() / ".claude.json").account_uuid
+    if uuid is None:
+        return None
+    return _uuid_owner(root, uuid, prefer=read_active(root))
 
 
 def switch(root: Path, alias: str, port: KeychainPort) -> None:
