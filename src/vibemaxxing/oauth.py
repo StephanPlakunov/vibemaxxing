@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Final
 
 from vibemaxxing import store
-from vibemaxxing.credentials import EMPTY_IDENTITY, Credential, Identity
+from vibemaxxing.credentials import EMPTY_IDENTITY, Credential, Identity, is_expired
 from vibemaxxing.errors import (
     NeedsLoginError,
     NetworkError,
@@ -294,6 +294,33 @@ def refresh(
     finally:
         if claimed:
             store.release_refresh(root, alias)
+
+
+def ensure_usable(root: Path, alias: str, client: HttpClient, *, now_ms: int) -> None:
+    """Prove ``alias`` can be written to the port without logging Claude Code out.
+
+    store.switch refuses what can be told offline. An access token that has expired
+    needs a request: the account is not active, so this is the one refresher of its
+    lineage and may refresh it. A lineage the server rejects is refused with the
+    command that fixes it; one that merely could not be confirmed says to retry.
+    """
+    if store.read_active(root) == alias:
+        return  # Claude Code holds that lineage; there is nothing here to prove
+    account = store.read_account(root, alias)
+    store.require_usable(account)
+    if not is_expired(account.credential, now_ms=now_ms):
+        return
+    outcome = refresh(root, alias, account.credential, client, now_ms=now_ms)
+    if outcome.credential is not None or outcome.error == "active":
+        return
+    if outcome.error in ("invalid_grant", "no_refresh_token"):
+        raise NeedsLoginError(f'the refresh token for "{alias}" was rejected', f"vibe add {alias}")
+    # transient, busy, invalid_client: the login may be fine, so a browser login
+    # would be the wrong advice.
+    raise NetworkError(
+        f'could not confirm that "{alias}" is usable right now ({outcome.error})',
+        f"vibe switch {alias}",
+    )
 
 
 def _identity_from_token(payload: Mapping[str, object]) -> Identity:
