@@ -10,20 +10,24 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - **`vibe auto`: switch accounts by itself.** With `vibe auto on`, a check
   (`vibe auto tick`, the unit a scheduler calls) leaves the live account for the one with
   the most room once its session or weekly row reaches 99%. It only acts on numbers it has,
-  never switches onto a dead or stale account or one at its limit, waits 15 minutes between
-  switches, never overwrites a login vibe does not know, and prints one line (`stay: …` or
-  `switched a -> b: …`) with exit 0 either way. Also `status`, `exclude`/`include`, `undo`,
+  does not switch onto an account whose login lapsed or was rejected, or onto a stale one
+  or one at its limit, waits 15 minutes between switches, does not overwrite a login vibe
+  does not know (while every stored account has an account id), stays while `active` and
+  the live login disagree, and prints one line (`stay: …` or `switched a -> b: …`) with
+  exit 0 either way. Also `status`, `exclude`/`include`, `undo`,
   `off`, and on macOS `install`/`uninstall`, which write and remove the launchd job and
   print the `launchctl` line instead of running it. Settings live in
   `~/.vibemaxxing/settings.json`; an invalid file means the defaults and never stops
   `vibe list`. `docs/CONTRACT.md` §17.
-- The live account is polled every minute, not every three, once a session or weekly row is
-  at 90%, and only while no backoff is running.
+- The live account is polled about every one to two minutes, not every three, once a session
+  or weekly row is at 90%, and only while no backoff is running. That can exceed the ~28-30
+  requests an hour measured for one account; a 429 is obeyed.
 - A `auto_switch` block in the `--json` envelope (`enabled`, `threshold`, `last_switch`),
   and a line in the TUI footer and on the web page, both read-only. Additive; the schema is
   still 1.
 - `scripts/verify_auto_live.py`: a real switch between two throwaway accounts on a real
-  Keychain, refusing to run without `VIBE_LIVE_OK=1`. Never run from pytest.
+  Keychain, refusing to run without `VIBE_LIVE_OK=1`, restoring the Keychain, `active` and
+  `~/.claude.json` on any failure. Never run from pytest.
 
 ### Fixed
 
