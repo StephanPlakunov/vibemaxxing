@@ -22,13 +22,14 @@ from vibemaxxing.credentials import (
     Identity,
     credential_to_blob,
     credential_to_disk,
+    login_lapsed,
     parse_blob,
     parse_blob_members,
     parse_credential,
     read_claude_identity,
     write_claude_identity,
 )
-from vibemaxxing.errors import NotFoundError, StoreError, UsageError, VibeError
+from vibemaxxing.errors import NeedsLoginError, NotFoundError, StoreError, UsageError, VibeError
 from vibemaxxing.fsutil import private_dir, write_private
 from vibemaxxing.keychain import KeychainPort
 from vibemaxxing.models import AccountState
@@ -514,10 +515,29 @@ def live_alias(root: Path, port: KeychainPort) -> str | None:
     return _uuid_owner(root, uuid, prefer=read_active(root))
 
 
+def _require_usable(account: Account) -> None:
+    """Refuse a target that would log Claude Code out the moment it reaches the port.
+
+    Only what can be told without a request: a login whose refresh token has lapsed,
+    or one the server already rejected (oauth.refresh records that on the account).
+    An access token that merely expired is Claude Code's to refresh once it is active,
+    so `oauth.ensure_usable` proves the lineage alive first, where there is a client.
+    """
+    recovery = f"vibe add {account.alias}"
+    if account.state is AccountState.NEEDS_LOGIN:
+        raise NeedsLoginError(f'the refresh token for "{account.alias}" was rejected', recovery)
+    if login_lapsed(account.credential, now_ms=int(time.time() * 1000)):
+        raise NeedsLoginError(f'the login for "{account.alias}" has lapsed', recovery)
+
+
 def switch(root: Path, alias: str, port: KeychainPort) -> None:
-    read_account(root, alias)  # an unknown alias must fail before the port is touched
+    incoming = read_account(root, alias)  # an unknown alias must fail before the port is touched
 
     outgoing = read_active(root)
+    # Not for the account already active: its stored copy is replaced from the port by
+    # the resync below, and Claude Code may have extended what the old copy says.
+    if alias != outgoing:
+        _require_usable(incoming)
     with _claims(root, (alias, outgoing), f"vibe switch {alias}"):
         # Re-read under the claims: a switch that finished between the read above
         # and the claims put a different account in the port, and resyncing it
