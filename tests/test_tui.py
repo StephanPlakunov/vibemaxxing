@@ -9,15 +9,17 @@ import tracemalloc
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from textual.binding import Binding
 from textual.content import Content
 from textual.widgets import Static
 
 from tests.fakes import FakeHttpClient, FakeKeychain, fixture_usage, make_credential, seed_account
-from vibemaxxing import cli, tui
+from vibemaxxing import auto, cli, tui
 from vibemaxxing.credentials import EMPTY_IDENTITY, Identity
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.httpclient import HTTPError
 from vibemaxxing.models import AccountState
+from vibemaxxing.pool import LastSwitch, Settings
 from vibemaxxing.usage import Row, Summary
 
 NOW_S = 1_757_930_000.0
@@ -129,6 +131,47 @@ def test_who_falls_back_from_email_to_display_name_to_alias() -> None:
     assert "jan@intra-ai.de" in tui.account_content(_view(identity=both), now_s=NOW_S).plain
     assert "Jan" in tui.account_content(_view(identity=named), now_s=NOW_S).plain
     assert "work" in tui.account_content(_view(identity=EMPTY_IDENTITY), now_s=NOW_S).plain
+
+
+def test_auto_line_says_whether_it_is_on_and_what_it_last_did() -> None:
+    assert tui.auto_line(Settings(), None) == "auto-switch off"
+    assert tui.auto_line(Settings(auto_switch=True, threshold=95), None) == "auto-switch on at 95%"
+    last = LastSwitch("a", "b", NOW_S, "a session at 99%", None)
+    line = tui.auto_line(Settings(auto_switch=True), last)
+    assert line.startswith("auto-switch on at 99%  ·  last a -> b ")
+    # Off with a record: it still says what happened last, because that is news either way.
+    assert "last a -> b" in tui.auto_line(Settings(), last)
+
+
+def test_footer_carries_the_auto_line_only_when_given_one() -> None:
+    plain = tui.footer_content(
+        weeks=2.58, accounts=5, forecast=None, auto_line="auto-switch off"
+    ).plain
+    bare = tui.footer_content(weeks=2.58, accounts=5, forecast=None).plain
+
+    assert plain.endswith("auto-switch off")
+    assert "auto-switch" not in bare
+
+
+async def test_the_dashboard_footer_shows_auto_switch_and_has_no_control_for_it(
+    tmp_home: Path,
+) -> None:
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "one", active=True)
+    auto.write_settings(root, Settings(auto_switch=True))
+    client = FakeHttpClient()
+    _queue(client, 1)
+
+    app = tui.Dashboard(_context(root, client))
+    async with app.run_test() as pilot:
+        await asyncio.wait_for(app.first_paint.wait(), timeout=10)
+        await pilot.pause()
+        assert "auto-switch on at 99%" in _text(app.query_one("#footer", Static))
+
+    assert {binding.key for binding in tui.Dashboard.BINDINGS if isinstance(binding, Binding)} == {
+        "q",
+        "r",
+    }, "read-only: no key turns auto-switch on or off"
 
 
 def test_footer_shows_pool_accounts_and_forecast() -> None:

@@ -12,6 +12,7 @@ import re
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -25,12 +26,13 @@ from tests.fakes import (
     make_credential,
     seed_account,
 )
-from vibemaxxing import cli, envelope, store, usage, web
+from vibemaxxing import auto, cli, envelope, store, usage, web
 from vibemaxxing.envelope import ENVELOPE_SCHEMA
 from vibemaxxing.errors import VibeError
 from vibemaxxing.httpclient import HTTPError
 from vibemaxxing.models import AccountState
 from vibemaxxing.poll import USAGE_FRESH_S
+from vibemaxxing.pool import LastSwitch, Settings
 from vibemaxxing.redact import REDACTED, Secret
 
 NOW_S = 1_757_930_000.0
@@ -234,7 +236,40 @@ def test_the_page_is_a_ledger_beside_a_week() -> None:
     assert "toLocaleDateString" in page and "toLocaleTimeString" in page
 
 
+def test_the_page_shows_auto_switch_and_has_nothing_to_change_it_with() -> None:
+    page = web.page()
+
+    assert "auto_switch" in page
+    # Read-only on purpose: turning it on or off is `vibe auto on|off`, a decision made
+    # at a terminal and not from a page that has no authentication.
+    for control in ("<button", "<input", "<select", "<textarea", "<form"):
+        assert control not in page, control
+    assert "POST" not in page and "PUT" not in page and "DELETE" not in page
+
+
 # --- the entry point the CLI calls -------------------------------------------
+
+
+def test_snapshot_carries_the_auto_switch_block(tmp_home: Path) -> None:
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "work", active=True)
+    auto.write_settings(root, Settings(auto_switch=True))
+    auto.write_last(root, LastSwitch("work", "side", NOW_S - 30.0, "work session at 99%", None))
+    ctx = context(tmp_home)
+    assert isinstance(ctx.client, FakeHttpClient)
+    ctx.client.queue_json(200, fixture_usage())
+
+    payload = web.snapshot(ctx)
+
+    block = payload["auto_switch"]
+    assert isinstance(block, dict)
+    assert block["enabled"] is True and block["threshold"] == 99
+    assert block["last_switch"] == {
+        "from": "work",
+        "to": "side",
+        "at": datetime.fromtimestamp(NOW_S - 30.0, UTC).isoformat(timespec="seconds"),
+        "reason": "work session at 99%",
+    }
 
 
 def test_snapshot_is_the_section_10_envelope(tmp_home: Path) -> None:
