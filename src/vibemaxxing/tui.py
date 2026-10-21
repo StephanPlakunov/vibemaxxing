@@ -27,10 +27,10 @@ from textual.containers import VerticalScroll
 from textual.content import Content
 from textual.widgets import Static
 
-from vibemaxxing import envelope, history, store
+from vibemaxxing import auto, envelope, history, store
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.poll import DASHBOARD_INTERVAL_S
-from vibemaxxing.pool import dry_in
+from vibemaxxing.pool import LastSwitch, Settings, dry_in
 from vibemaxxing.redact import scrub
 from vibemaxxing.usage import Row
 
@@ -118,10 +118,23 @@ def _shape(view: AccountView) -> tuple[str, bool, tuple[str, ...] | None]:
     )
 
 
-def footer_content(*, weeks: float, accounts: int, forecast: timedelta | None) -> Content:
+def auto_line(settings: Settings, last: LastSwitch | None) -> str:
+    """Whether auto-switch is on and what it last did. Read-only: no key changes it."""
+    text = f"auto-switch on at {settings.threshold}%" if settings.auto_switch else "auto-switch off"
+    if last is not None:
+        when = datetime.fromtimestamp(last.at_s).strftime("%H:%M")
+        text += f"  ·  last {last.from_alias} -> {last.to_alias} {when}"
+    return text
+
+
+def footer_content(
+    *, weeks: float, accounts: int, forecast: timedelta | None, auto_line: str | None = None
+) -> Content:
     text = f"pool {weeks} account-weeks  ·  {accounts} accounts"
     if forecast is not None:
         text += f"  ·  dry in {forecast.total_seconds() / 3600:.1f}h"
+    if auto_line is not None:
+        text += f"  ·  {auto_line}"
     return Content(text)
 
 
@@ -229,7 +242,13 @@ class Dashboard(App[None]):
         for view in views:
             self.panels[view.alias].update(account_content(view, now_s=now_s), layout=rebuilt)
         self.query_one("#footer", Static).update(
-            footer_content(weeks=weeks, accounts=len(views), forecast=forecast), layout=False
+            footer_content(
+                weeks=weeks,
+                accounts=len(views),
+                forecast=forecast,
+                auto_line=auto_line(auto.read_settings(ctx.root), auto.read_last(ctx.root)),
+            ),
+            layout=False,
         )
 
     async def _reshape(self, views: Sequence[AccountView]) -> bool:

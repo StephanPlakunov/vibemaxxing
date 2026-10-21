@@ -240,6 +240,8 @@ def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
             views,
             now_s=ctx.now_s,
             dry_in=None if dry is None else timedelta(seconds=dry),
+            auto=auto.read_settings(ctx.root),
+            last_switch=auto.read_last(ctx.root),
         ),
         as_json=args.json,
         human=_render_accounts(views, now_s=ctx.now_s, dry=dry),
