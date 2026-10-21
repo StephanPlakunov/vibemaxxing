@@ -515,7 +515,7 @@ def live_alias(root: Path, port: KeychainPort) -> str | None:
     return _uuid_owner(root, uuid, prefer=read_active(root))
 
 
-def _require_usable(account: Account) -> None:
+def require_usable(account: Account) -> None:
     """Refuse a target that would log Claude Code out the moment it reaches the port.
 
     Only what can be told without a request: a login whose refresh token has lapsed,
@@ -537,7 +537,7 @@ def switch(root: Path, alias: str, port: KeychainPort) -> None:
     # Not for the account already active: its stored copy is replaced from the port by
     # the resync below, and Claude Code may have extended what the old copy says.
     if alias != outgoing:
-        _require_usable(incoming)
+        require_usable(incoming)
     with _claims(root, (alias, outgoing), f"vibe switch {alias}"):
         # Re-read under the claims: a switch that finished between the read above
         # and the claims put a different account in the port, and resyncing it
