@@ -3,6 +3,56 @@
 Notable changes per release. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - Unreleased
+
+### Added
+
+- **`vibe auto`: switch accounts by itself.** With `vibe auto on`, a check
+  (`vibe auto tick`, the unit a scheduler calls) leaves the live account for the one with
+  the most room once its session or weekly row reaches 99%. It only acts on numbers it has,
+  never switches onto a dead or stale account or one at its limit, waits 15 minutes between
+  switches, never overwrites a login vibe does not know, and prints one line (`stay: …` or
+  `switched a -> b: …`) with exit 0 either way. Also `status`, `exclude`/`include`, `undo`,
+  `off`, and on macOS `install`/`uninstall`, which write and remove the launchd job and
+  print the `launchctl` line instead of running it. Settings live in
+  `~/.vibemaxxing/settings.json`; an invalid file means the defaults and never stops
+  `vibe list`. `docs/CONTRACT.md` §17.
+- The live account is polled every minute, not every three, once a session or weekly row is
+  at 90%, and only while no backoff is running.
+- A `auto_switch` block in the `--json` envelope (`enabled`, `threshold`, `last_switch`),
+  and a line in the TUI footer and on the web page, both read-only. Additive; the schema is
+  still 1.
+- `scripts/verify_auto_live.py`: a real switch between two throwaway accounts on a real
+  Keychain, refusing to run without `VIBE_LIVE_OK=1`. Never run from pytest.
+
+### Fixed
+
+- **`vibe switch` could overwrite a login vibe did not know and lose it.** When
+  `~/.claude.json` named an account vibe had never stored (someone ran `claude /login`), the
+  resync was skipped but the Keychain was still written. It now refuses, with `vibe add`,
+  which adopts that login.
+- **`vibe switch` could put a dead account in the Keychain and log Claude Code out.** It
+  now refuses an account whose login has lapsed or was rejected, with `vibe add <name>`, and
+  refreshes an expired access token first to be sure.
+- **A stale `active` pointer lost the live account's rotated token.** `active` is only what
+  vibe last wrote; when Claude Code ran as another stored account, the switch skipped its
+  resync and overwrote it. The resync now goes to the account that owns the login, and
+  `vibe switch <that account>` repairs the pointer without loss.
+- **A dead refresh token was posted on every poll.** `invalid_grant` was never kept, so a
+  dashboard left open spent a request a minute on each dead account. It is now recorded on
+  the account and not posted again; a fresh `vibe add` clears it.
+
+### Changed
+
+- `vibe switch` to an account whose access token has expired makes one request, so that case
+  no longer works offline.
+
+### Not verified
+
+- What a switch does to a `claude` session that is already running, and whether an old
+  session refreshing its own token overwrites the Keychain afterwards.
+- A real Keychain switch (`scripts/verify_auto_live.py` is the check) and a loaded launchd job.
+
 ## [0.2.2] - 2026-09-17
 
 ### Fixed

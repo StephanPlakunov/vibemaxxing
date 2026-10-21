@@ -43,6 +43,7 @@ vibe switch <name>            change the active account
 vibe run <name> -- <cmd>      run one command as one account
 vibe remove <name>            forget an account
 vibe alias <old> <new>        rename one
+vibe auto on|off|status       switch accounts by itself, see below
 vibe help                     what each command is for
 ```
 
@@ -58,6 +59,47 @@ alone. Two terminals can hold two different accounts at once:
 vibe run work -- claude          # this window is "work"
 vibe run side -- claude          # that window is "side"
 ```
+
+### Switch automatically
+
+```
+vibe auto on              # off until you say so
+vibe auto status          # who is live, the last switch, where the next one would go
+vibe auto install         # macOS: writes the launchd job and prints the line that loads it
+```
+
+With it on, a check (`vibe auto tick`, which the launchd job runs every minute) leaves the
+live account for the one with the most room as soon as its **session** or **weekly** row
+reaches 99%. It prints one line and exits 0 whether or not it switched, so a scheduler can
+call it freely.
+
+It is deliberately timid:
+
+- It only acts on numbers it has. A live account with no fresh answer, or an unknown live
+  login, is a `stay`, never a guess.
+- It never switches onto an account that is dead, or whose numbers are older than about
+  three minutes, or that has a row at the limit. The account it just left stays out until
+  the row that limited it has reset.
+- It never overwrites a login vibe does not know. If you ran `claude /login` as an account
+  you have not stored, it stops and tells you to `vibe add` it first.
+- 15 minutes between switches, and `vibe auto undo` goes back.
+
+`vibe auto exclude <name>` keeps an account out of the running; `include` lets it back in.
+The 99% and the 15 minutes live in `~/.vibemaxxing/settings.json`. The dashboards show
+whether it is on and the last switch, and cannot change it.
+
+`vibe auto install` only **writes** `~/Library/LaunchAgents/de.intra-ai.vibemaxxing-auto.plist`.
+Loading it is yours to do, with the one `launchctl bootstrap` line it prints, so nothing
+starts running behind your back. Anywhere else, run `vibe auto tick` from cron or a systemd
+timer every minute.
+
+**Not verified: what a switch does to a `claude` session that is already running.** Like
+`vibe switch`, it changes the credential Claude Code reads and makes no attempt to signal a
+live process, so a running session is not guaranteed to pick the new account up. And a
+session that stays on the old account and later refreshes its own token may overwrite the
+Keychain with it. Both are untested. `scripts/verify_auto_live.py` is the check for the part
+that can be tested by hand: it does a real switch between two throwaway accounts and asserts
+the Keychain holds the incoming credential.
 
 ### See what is left
 
@@ -139,7 +181,14 @@ child only, which is what lets two shells hold two accounts, but a session outli
 access token needs a re-run. Every grandchild inherits the variable.
 
 **Switching does not reach a running session.** `vibe switch` makes no attempt to signal
-a live Claude Code process. Restart it, or use `vibe run`.
+a live Claude Code process. Restart it, or use `vibe run`. Automatic switching has the same
+limit, and the untested caveat above it.
+
+**`vibe switch` can now refuse.** It will not write an account whose login has lapsed or
+was rejected by the server (`vibe add <name>` fixes it), and it will not overwrite a Claude
+Code login vibe has not stored (`vibe add` adopts it). Switching to an account whose access
+token has expired makes one request to confirm it is alive, so that one case no longer
+works offline.
 
 **Usage numbers can be a few minutes old.** Anthropic's usage endpoint allows roughly 30
 requests per account per hour, shared by everything that asks. Every `vibe` process
@@ -161,6 +210,7 @@ refuse while a token refresh or another switch is under way; run them again, or 
 ## Uninstall
 
 ```
+vibe auto uninstall         # only if you ran `vibe auto install`; also run the bootout line it prints
 uv tool uninstall vibemaxxing
 rm -rf ~/.vibemaxxing
 ```
