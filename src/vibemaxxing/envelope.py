@@ -382,8 +382,8 @@ def _view(
     if account.state is AccountState.NEEDS_LOGIN:
         # oauth.refresh recorded the server's verdict on this lineage. Not looked at for
         # the active account: its credential is Claude Code's, and a resync clears it.
-        message = account.message or _needs_login(alias)
-        return AccountView(alias, active, account.state, message, identity, plan, None, None)
+        recorded = account.message or _needs_login(alias)
+        return AccountView(alias, active, account.state, recorded, identity, plan, None, None)
 
     try:
         # Inside the guard: read_stash on an unreadable or unknown-schema stash
