@@ -509,10 +509,10 @@ def live_alias(root: Path, port: KeychainPort) -> str | None:
         return None
     if raw is None or not _holds_login(raw):
         return None
-    return _live_owner(root, prefer=read_active(root))
+    return live_owner(root, prefer=read_active(root))
 
 
-def _live_owner(root: Path, *, prefer: str | None) -> str | None:
+def live_owner(root: Path, *, prefer: str | None) -> str | None:
     """The stored account ~/.claude.json says Claude Code is logged in as."""
     uuid = read_claude_identity(Path.home() / ".claude.json").account_uuid
     return None if uuid is None else _uuid_owner(root, uuid, prefer=prefer)
@@ -543,7 +543,7 @@ def switch(root: Path, alias: str, port: KeychainPort) -> None:
     # ponytail: read before the claims it joins, so a `claude /login` in the instant
     # between resyncs into an account whose claim is not held. Re-read under the
     # claims if that ever shows.
-    owner = _live_owner(root, prefer=outgoing)
+    owner = live_owner(root, prefer=outgoing)
     # Not for an account whose copy the resync below replaces from the port: Claude
     # Code may have extended what the old copy says.
     if alias not in (outgoing, owner):
