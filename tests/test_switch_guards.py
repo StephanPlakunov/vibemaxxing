@@ -16,7 +16,7 @@ import pytest
 from tests.fakes import FakeHttpClient, FakeKeychain, make_credential, seed_account
 from vibemaxxing import envelope, oauth, store
 from vibemaxxing.credentials import Identity, credential_to_blob
-from vibemaxxing.errors import NeedsLoginError, UsageError
+from vibemaxxing.errors import NeedsLoginError, UsageError, VibeError
 from vibemaxxing.httpclient import HTTPError
 from vibemaxxing.models import AccountState
 
@@ -85,6 +85,37 @@ def test_live_alias_follows_claude_identity(tmp_home: Path) -> None:
 
     assert store.live_alias(root, port) == "b"
     assert store.read_active(root) == "a", "read_active keeps meaning what it always meant"
+
+
+def test_live_alias_is_none_whenever_it_cannot_be_told(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "a", identity=_identity("shared"))
+    seed_account(root, "b", identity=_identity("shared"))
+    seed_account(root, "c", identity=_identity("uc"))
+    blob = credential_to_blob(make_credential(access="live", refresh="live-rt"))
+
+    assert store.live_alias(root, FakeKeychain(blob=blob)) is None, "no ~/.claude.json"
+    _claude_json(tmp_home, "stranger")
+    assert store.live_alias(root, FakeKeychain(blob=blob)) is None, "a login nobody stored"
+    _claude_json(tmp_home, "uc")
+    assert store.live_alias(root, FakeKeychain(blob=None)) is None, "no login in the port"
+    assert store.live_alias(root, FakeKeychain(blob='{"claudeAiOauth": {}}')) is None
+    assert store.live_alias(root, FakeKeychain(blob=blob)) == "c"
+
+    unreadable = FakeKeychain(blob=blob)
+
+    def refuse() -> str | None:
+        raise VibeError("the macOS Keychain refused to read it", "vibe add")
+
+    monkeypatch.setattr(unreadable, "read", refuse)
+    assert store.live_alias(root, unreadable) is None, "an unreadable port is unknown, not an error"
+
+    _claude_json(tmp_home, "shared")
+    assert store.live_alias(root, FakeKeychain(blob=blob)) is None, "two aliases, neither active"
+    store.write_active(root, "b")
+    assert store.live_alias(root, FakeKeychain(blob=blob)) == "b", "the pointer breaks the tie"
 
 
 def test_dead_refresh_token_is_posted_once(tmp_home: Path) -> None:
