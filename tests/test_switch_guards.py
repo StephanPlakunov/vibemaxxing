@@ -57,6 +57,29 @@ def test_switch_refuses_unknown_live_login(tmp_home: Path) -> None:
     assert store.claim_refresh(root, "b", now_s=NOW_S)
 
 
+def test_switch_only_refuses_a_login_it_can_prove_is_unknown(tmp_home: Path) -> None:
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "a", active=True)  # stored without a uuid: it might be the live one
+    seed_account(root, "b", identity=_identity("ub"))
+    _claude_json(tmp_home, "somebody")
+    live = credential_to_blob(make_credential(access="live-access", refresh="live-rt"))
+
+    store.switch(root, "b", FakeKeychain(blob=live))
+
+    assert store.read_active(root) == "b"
+    assert store.read_account(root, "a").credential.refresh_token.reveal() == "live-rt"
+
+    # And a blob with no token in it is not a login anyone could lose.
+    seed_account(root, "c", identity=_identity("uc"), active=True)
+    seed_account(root, "a", identity=_identity("ua"))
+    port = FakeKeychain(blob='{"claudeAiOauth": {}, "mcpOAuth": {"kept": true}}')
+    _claude_json(tmp_home, "stranger")
+
+    store.switch(root, "b", port)
+
+    assert port.blob is not None and json.loads(port.blob)["mcpOAuth"] == {"kept": True}
+
+
 def test_switch_refuses_lapsed_target(tmp_home: Path) -> None:
     root = tmp_home / ".vibemaxxing"
     seed_account(root, "a", identity=_identity("ua"), active=True)

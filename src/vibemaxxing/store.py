@@ -480,6 +480,20 @@ def _holds_login(blob: str) -> bool:
     return True
 
 
+def _is_stranger(root: Path, blob: str, live_uuid: str | None) -> bool:
+    """True when the port holds a login whose account no stored account is.
+
+    ponytail: an account stored without a uuid might be the live one, so any such
+    account (or an unreadable one) makes this False and the old resync-or-skip rule
+    applies. A token response that names no account is how that happens; `vibe add`
+    from `claude /login` fills the uuid in.
+    """
+    if live_uuid is None or not _holds_login(blob):
+        return False
+    uuids = [_stored_uuid(root, alias) for alias in list_aliases(root)]
+    return None not in uuids and live_uuid not in uuids
+
+
 def live_alias(root: Path, port: KeychainPort) -> str | None:
     """The account Claude Code is logged in as right now, or None when that cannot be told.
 
@@ -516,6 +530,18 @@ def switch(root: Path, alias: str, port: KeychainPort) -> None:
 def _switch_claimed(root: Path, alias: str, outgoing: str | None, port: KeychainPort) -> None:
     base_raw = port.read()
     base = parse_blob_members(base_raw) if base_raw is not None else None
+    live = read_claude_identity(Path.home() / ".claude.json")
+    live_uuid = live.account_uuid
+
+    if base_raw is not None and _is_stranger(root, base_raw, live_uuid):
+        # Nobody stored this login, so the port holds the only copy of its refresh
+        # token. Skipping the resync was not enough: the write below would still
+        # replace it, and `claude /login` is the only way back.
+        raise UsageError(
+            f"Claude Code is logged in as {live.email or live_uuid}, an account vibe has not "
+            "stored, and switching would overwrite that login",
+            "vibe add",
+        )
 
     if base_raw is not None and outgoing is not None and account_path(root, outgoing).exists():
         # Claude Code rotates the live token behind our back; without this resync
@@ -528,7 +554,6 @@ def _switch_claimed(root: Path, alias: str, outgoing: str | None, port: Keychain
         # free to check, so check it: resync only when the live account uuid is
         # unknown or agrees.
         account = read_account(root, outgoing)
-        live_uuid = read_claude_identity(Path.home() / ".claude.json").account_uuid
         stored_uuid = account.identity.account_uuid
         if live_uuid is None or stored_uuid is None or live_uuid == stored_uuid:
             write_account(root, replace(account, credential=parse_blob(base_raw)))
