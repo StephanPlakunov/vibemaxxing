@@ -17,13 +17,14 @@ import plistlib
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
 from vibemaxxing import envelope, oauth, pool, store, usage
 from vibemaxxing.envelope import AccountView
-from vibemaxxing.errors import NeedsLoginError, NetworkError, UsageError
+from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, UsageError
 from vibemaxxing.fsutil import private_dir, write_private
 from vibemaxxing.httpclient import HttpClient
 from vibemaxxing.keychain import KeychainPort
@@ -66,20 +67,26 @@ def _number(value: object) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
-def read_settings(root: Path) -> Settings:
-    """The settings file, or the defaults for a file that is missing or wrong anywhere.
+def _time(value: object) -> float | None:
+    """A timestamp every surface can format; None for one that no clock could have written."""
+    seconds = _number(value)
+    if seconds is None:
+        return None
+    try:
+        datetime.fromtimestamp(seconds, UTC)
+    except (ValueError, OverflowError, OSError):
+        return None
+    return seconds
 
-    All of it, not the valid half: a hand-edited file that is wrong in one place must
-    leave auto-switch off rather than switch on a guess about what was meant. A bad
-    file is never an error, so `vibe list` keeps working. This is the one place the
-    file is validated.
-    """
+
+def _parse_settings(root: Path) -> Settings | None:
+    """The settings, or None when the file is missing or wrong anywhere."""
     try:
         parsed: object = json.loads(settings_path(root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return Settings()
+        return None
     if not isinstance(parsed, dict) or parsed.get("schema") != SCHEMA_VERSION:
-        return Settings()
+        return None
     enabled = parsed.get("auto_switch", False)
     threshold = _int(parsed.get("threshold", DEFAULT_THRESHOLD))
     cooldown = _int(parsed.get("cooldown_s", DEFAULT_COOLDOWN_S))
@@ -93,8 +100,40 @@ def read_settings(root: Path) -> Settings:
         or not isinstance(excluded, list)
         or not all(isinstance(alias, str) and store.valid_alias(alias) for alias in excluded)
     ):
-        return Settings()
+        return None
     return Settings(enabled, threshold, cooldown, tuple(dict.fromkeys(str(a) for a in excluded)))
+
+
+def read_settings(root: Path) -> Settings:
+    """The settings file, or the defaults for a file that is missing or wrong anywhere.
+
+    All of it, not the valid half: a hand-edited file that is wrong in one place must
+    leave auto-switch off rather than switch on a guess about what was meant. A bad
+    file is never an error, so `vibe list` keeps working. This is the one place the
+    file is validated.
+    """
+    settings = _parse_settings(root)
+    return settings if settings is not None else Settings()
+
+
+def settings_for_edit(root: Path) -> Settings:
+    """The settings a command is about to change and write back.
+
+    Reading a bad file as the defaults is right for `vibe list`; writing the defaults
+    back over it is not, since that silently drops what someone wrote by hand. A file
+    that exists and cannot be read is refused instead.
+    """
+    settings = _parse_settings(root)
+    if settings is not None:
+        return settings
+    path = settings_path(root)
+    if path.exists():
+        raise UsageError(
+            f"{path} is not valid settings (a wrong or missing member), and saving a change "
+            "would overwrite it with the defaults. Fix it, or delete it to start over",
+            f"rm {path}",
+        )
+    return Settings()
 
 
 def write_settings(root: Path, settings: Settings) -> None:
@@ -118,12 +157,14 @@ def read_last(root: Path) -> LastSwitch | None:
     if not isinstance(parsed, dict) or parsed.get("schema") != SCHEMA_VERSION:
         return None
     origin, target, reason = parsed.get("from"), parsed.get("to"), parsed.get("reason")
-    at = _number(parsed.get("at"))
+    # Both times are checked against what a clock can write: `vibe list`, the TUI and
+    # the web page all format `at`, and one absurd value would stop every one of them.
+    at = _time(parsed.get("at"))
     if not (isinstance(origin, str) and isinstance(target, str) and isinstance(reason, str)):
         return None
     if at is None:
         return None
-    return LastSwitch(origin, target, at, reason, _number(parsed.get("until")))
+    return LastSwitch(origin, target, at, reason, _time(parsed.get("until")))
 
 
 def write_last(root: Path, last: LastSwitch) -> None:
@@ -137,6 +178,24 @@ def write_last(root: Path, last: LastSwitch) -> None:
         "until": last.until_s,
     }
     write_private(last_path(root), json.dumps(document, indent=2) + "\n")
+
+
+def rename(root: Path, old: str, new: str) -> None:
+    """Follow `vibe alias`: an exclusion and the last-switch record name accounts by alias."""
+    settings = _parse_settings(root)
+    if settings is not None and old in settings.excluded:
+        excluded = tuple(new if alias == old else alias for alias in settings.excluded)
+        write_settings(root, replace(settings, excluded=excluded))
+    last = read_last(root)
+    if last is not None and old in (last.from_alias, last.to_alias):
+        write_last(
+            root,
+            replace(
+                last,
+                from_alias=new if last.from_alias == old else last.from_alias,
+                to_alias=new if last.to_alias == old else last.to_alias,
+            ),
+        )
 
 
 def _readings(views: Sequence[AccountView]) -> list[Reading]:
@@ -210,22 +269,32 @@ def tick(
 
     try:
         oauth.ensure_usable(root, target, client, now_ms=int(now_s * 1000))
+        # collect and the refresh can take seconds, and a person may have run `vibe
+        # switch` in that time. The decision was about `live`; if that is no longer the
+        # account in use, it is stale and the person's choice stands.
+        if store.live_alias(root, port) != live or store.read_active(root) != live:
+            return _stay(f"the live account changed while checking, so {target} was left alone")
         store.switch(root, target, port, now_s=now_s)
-    except (UsageError, NeedsLoginError, NetworkError) as exc:
+    except (UsageError, NeedsLoginError, NetworkError, NotFoundError) as exc:
         return _stay(exc.message)
 
     rows = next((v.summary.rows for v in views if v.alias == live and v.summary is not None), ())
-    write_last(
-        root,
-        LastSwitch(
-            live,
-            target,
-            now_s,
-            decision.reason,
-            pool.limited_until(rows, settings.threshold, now_s),
-        ),
-    )
     line = f"switched {live} -> {target}: {decision.reason}"
+    try:
+        write_last(
+            root,
+            LastSwitch(
+                live,
+                target,
+                now_s,
+                decision.reason,
+                pool.limited_until(rows, settings.threshold, now_s),
+            ),
+        )
+    except OSError as exc:
+        # The switch landed. Raising here would hide that and skip the notification; the
+        # cost of the missing record is a cooldown and a memory of why `live` was left.
+        line += f" (not recorded: {exc.__class__.__name__})"
     notify(line)
     return TickResult(line, switched=True)
 

@@ -294,7 +294,7 @@ def cmd_switch(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def _toggle_auto(args: argparse.Namespace, ctx: Context, *, on: bool) -> int:
-    settings = replace(auto.read_settings(ctx.root), auto_switch=on)
+    settings = replace(auto.settings_for_edit(ctx.root), auto_switch=on)
     auto.write_settings(ctx.root, settings)
     word = "on" if on else "off"
     _emit(
@@ -316,7 +316,7 @@ def cmd_auto_off(args: argparse.Namespace, ctx: Context) -> int:
 def cmd_auto_exclude(args: argparse.Namespace, ctx: Context) -> int:
     if args.alias not in store.list_aliases(ctx.root):
         raise NotFoundError(f'there is no account named "{args.alias}"', "vibe list")
-    settings = auto.read_settings(ctx.root)
+    settings = auto.settings_for_edit(ctx.root)
     excluded = tuple(dict.fromkeys((*settings.excluded, args.alias)))
     auto.write_settings(ctx.root, replace(settings, excluded=excluded))
     _emit(
@@ -328,7 +328,7 @@ def cmd_auto_exclude(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def cmd_auto_include(args: argparse.Namespace, ctx: Context) -> int:
-    settings = auto.read_settings(ctx.root)
+    settings = auto.settings_for_edit(ctx.root)
     excluded = tuple(alias for alias in settings.excluded if alias != args.alias)
     auto.write_settings(ctx.root, replace(settings, excluded=excluded))
     _emit(
@@ -440,6 +440,7 @@ def cmd_remove(args: argparse.Namespace, ctx: Context) -> int:
 
 def cmd_alias(args: argparse.Namespace, ctx: Context) -> int:
     store.rename_account(ctx.root, args.old, args.new)
+    auto.rename(ctx.root, args.old, args.new)
     _emit(
         _action("alias", old=args.old, new=args.new),
         as_json=args.json,
