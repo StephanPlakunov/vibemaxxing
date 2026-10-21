@@ -45,7 +45,7 @@ def make_credential(
         access_token=Secret(access),
         refresh_token=Secret(refresh),
         expires_at_ms=1757930000000,
-        refresh_token_expires_at_ms=1760522000000,
+        refresh_token_expires_at_ms=4_102_444_800_000,
         scopes=("user:profile",),
         subscription_type="max",
         rate_limit_tier="default_claude_max_20x",
