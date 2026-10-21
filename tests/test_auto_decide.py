@@ -207,6 +207,21 @@ def test_decide_respects_cooldown() -> None:
     assert after.target == "b", "900 s after the switch the cooldown is over"
 
 
+def test_decide_a_record_from_far_in_the_future_is_no_cooldown() -> None:
+    # A hand-edited or mis-clocked record must not hold auto-switch off until the year it
+    # names; a few seconds of clock skew still counts as just switched.
+    future = LastSwitch("x", "a", at_s=NOW + 10 * 86_400.0, reason="r", until_s=None)
+    skewed = LastSwitch("x", "a", at_s=NOW + 30.0, reason="r", until_s=None)
+
+    far = decide([view("a", session=100), view("b")], settings=ON, live="a", now_s=NOW, last=future)
+    near = decide(
+        [view("a", session=100), view("b")], settings=ON, live="a", now_s=NOW, last=skewed
+    )
+
+    assert far.target == "b"
+    assert near.reason.startswith("cooldown")
+
+
 def test_decide_never_returns_to_limited_account() -> None:
     # a was left while its week was at 99% and resets in two days. c is now at 99%.
     limited_until = NOW + 2 * 86_400.0
