@@ -17,9 +17,10 @@ from tests.fakes import (
     make_credential,
     seed_account,
 )
-from vibemaxxing import cli, credentials, store
+from vibemaxxing import auto, cli, credentials, store
 from vibemaxxing.credentials import Identity
 from vibemaxxing.envelope import ENVELOPE_SCHEMA
+from vibemaxxing.pool import LastSwitch, Settings
 
 NOW_S = 1_757_930_000.0
 NOW_MS = int(NOW_S * 1000)
@@ -68,7 +69,14 @@ def test_list_json_envelope_is_stable(tmp_home: Path, capsys: pytest.CaptureFixt
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["schema"] == ENVELOPE_SCHEMA
-    assert set(payload) == {"schema", "generated_at", "accounts", "pool", "resets"}
+    assert set(payload) == {
+        "schema",
+        "generated_at",
+        "accounts",
+        "pool",
+        "resets",
+        "auto_switch",
+    }
     assert set(payload["pool"]) == {"accounts", "remaining_account_weeks", "dry_in_seconds"}
     assert payload["pool"]["accounts"] == 2
 
@@ -102,6 +110,44 @@ def test_list_json_envelope_is_stable(tmp_home: Path, capsys: pytest.CaptureFixt
     assert lapsed["updated_at"] is None
     # An unusable account contributes nothing but is still counted.
     assert payload["pool"]["remaining_account_weeks"] == pytest.approx(0.44)
+
+
+def test_envelope_has_auto_switch_block(tmp_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "work", active=True)
+    client = FakeHttpClient()
+    client.queue_json(200, fixture_usage())
+
+    assert cli.main(["--json", "list"], context=context(tmp_home, client)) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == ENVELOPE_SCHEMA == 1
+    assert payload["auto_switch"] == {"enabled": False, "threshold": 99, "last_switch": None}
+
+    auto.write_settings(root, Settings(auto_switch=True, threshold=95))
+    auto.write_last(root, LastSwitch("a", "b", NOW_S - 60.0, "a session at 99%", NOW_S + 3600.0))
+    assert cli.main(["--json", "list"], context=context(tmp_home, client)) == 0
+
+    block = json.loads(capsys.readouterr().out)["auto_switch"]
+    assert block["enabled"] is True and block["threshold"] == 95
+    assert set(block["last_switch"]) == {"from", "to", "at", "reason"}, "`until` stays internal"
+    assert (block["last_switch"]["from"], block["last_switch"]["to"]) == ("a", "b")
+    assert block["last_switch"]["reason"] == "a session at 99%"
+
+
+def test_bad_settings_do_not_break_list(tmp_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "work", active=True)
+    auto.settings_path(root).write_text('{"threshold": "x"}')
+    client = FakeHttpClient()
+    client.queue_json(200, fixture_usage())
+
+    assert cli.main(["--json", "list"], context=context(tmp_home, client)) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["auto_switch"] == {"enabled": False, "threshold": 99, "last_switch": None}
+    assert cli.main(["list"], context=context(tmp_home, client)) == 0
+    assert "work" in capsys.readouterr().out
 
 
 def test_unknown_alias_exits_four_and_names_the_recovery(
