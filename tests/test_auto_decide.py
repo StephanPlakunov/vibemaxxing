@@ -333,6 +333,19 @@ def test_decide_only_ok_accounts_with_known_percentages_are_candidates() -> None
     assert decision.reason == "no account with headroom"
 
 
+def test_decide_never_picks_an_account_it_could_not_identify_afterwards() -> None:
+    # An account stored without a uuid leaves ~/.claude.json naming the account just left,
+    # so after landing on it vibe cannot tell who is live and the next resync is a guess.
+    nameless = Reading("b", AccountState.OK, rows(0, 0), NOW - 10.0, identified=False)
+
+    decision = decide(
+        [view("a", session=99), nameless], settings=ON, live="a", now_s=NOW, last=None
+    )
+
+    assert decision.reason == "no account with headroom"
+    assert next_candidate([nameless], settings=ON, live="a", now_s=NOW, last=None) is None
+
+
 def test_decide_ties_break_by_alias() -> None:
     decision = decide(
         [view("a", session=99), view("c", session=20), view("b", session=20)],

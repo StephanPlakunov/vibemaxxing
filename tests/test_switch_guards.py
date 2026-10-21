@@ -17,7 +17,7 @@ import pytest
 from tests.fakes import FakeHttpClient, FakeKeychain, fixture_usage, make_credential, seed_account
 from vibemaxxing import cli, credentials, envelope, oauth, store
 from vibemaxxing.credentials import Identity, credential_to_blob
-from vibemaxxing.errors import NeedsLoginError, UsageError, VibeError
+from vibemaxxing.errors import NeedsLoginError, NetworkError, UsageError, VibeError
 from vibemaxxing.httpclient import HTTPError
 from vibemaxxing.models import AccountState
 
@@ -371,3 +371,83 @@ def test_a_recorded_dead_login_reads_needs_login_whatever_its_token_says(tmp_hom
     assert view.state is AccountState.NEEDS_LOGIN
     assert "vibe add old" in str(view.message)
     assert client.requests == []
+
+
+def test_a_switch_onto_an_account_with_no_uuid_does_not_misname_the_next_resync(
+    tmp_home: Path,
+) -> None:
+    # b was stored without an account uuid, so after switching to it ~/.claude.json still
+    # names a (vibe cannot write what it does not have). Trusting that file to say whose
+    # login the port holds would write b's rotated tokens into a's file on the way back.
+    root = tmp_home / ".vibemaxxing"
+    seed_account(
+        root, "a", identity=_identity("ua"), active=True, credential=make_credential(access="a-f")
+    )
+    seed_account(root, "b", credential=make_credential(access="b-file", refresh="b-rt"))
+    _claude_json(tmp_home, "ua")
+    port = FakeKeychain(blob=credential_to_blob(make_credential(access="a-live", refresh="a-lrt")))
+    store.switch(root, "b", port)
+    assert store.read_active(root) == "b"
+    port.blob = credential_to_blob(make_credential(access="b-rot", refresh="b-rot-rt"))
+    a_before = store.account_path(root, "a").read_bytes()
+
+    assert store.live_alias(root, port) is None, "active has no uuid to compare, so it cannot say"
+    store.switch(root, "a", port)
+
+    assert store.account_path(root, "a").read_bytes() == a_before
+    assert store.read_account(root, "b").credential.refresh_token.reveal() == "b-rot-rt"
+    assert port.blob is not None
+    assert credentials.parse_blob(port.blob).refresh_token.reveal() == "a-lrt"
+
+
+def test_switching_to_the_stale_active_account_still_checks_it_is_alive(tmp_home: Path) -> None:
+    # `active` says a but Claude Code runs b, so a is not the account whose stored copy the
+    # resync replaces: a dead a must be refused like any other dead target.
+    root, port = _pointer_is_stale(tmp_home)
+    stored = store.read_account(root, "a")
+    store.write_account(root, replace(stored, state=AccountState.NEEDS_LOGIN, message="dead"))
+
+    with pytest.raises(NeedsLoginError) as excinfo:
+        store.switch(root, "a", port)
+    assert excinfo.value.recovery == "vibe add a"
+    assert port.log == []
+    with pytest.raises(NeedsLoginError):
+        oauth.ensure_usable(root, "a", FakeHttpClient(), now_ms=NOW_MS)
+
+
+def test_ensure_usable_refuses_a_successor_that_never_reached_the_disk(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The server rotated the token and the stash write failed: the file still holds the
+    # spent predecessor, and a switch would put that in the Keychain.
+    root, _port = _expired_target(tmp_home)
+    client = FakeHttpClient()
+    client.queue_json(
+        200, {"access_token": "fresh-access-token", "refresh_token": "fresh-rt", "expires_in": 3600}
+    )
+
+    def disk_full(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "write_stash", disk_full)
+
+    with pytest.raises(NetworkError) as excinfo:
+        oauth.ensure_usable(root, "b", client, now_ms=NOW_MS)
+
+    assert excinfo.value.recovery == "vibe switch b"
+
+
+def test_the_lapse_check_takes_the_clock_it_is_given(tmp_home: Path) -> None:
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "a", identity=_identity("ua"), active=True)
+    expires_ms = 1_757_930_005_000
+    seed_account(root, "b", credential=make_credential(refresh_expires_at_ms=expires_ms))
+    _claude_json(tmp_home, "ua")
+    live = credential_to_blob(make_credential(access="cc", refresh="cc-rt"))
+
+    store.switch(root, "b", FakeKeychain(blob=live), now_s=(expires_ms - 1000) / 1000)
+    store.switch(root, "a", FakeKeychain(blob=live))
+    with pytest.raises(NeedsLoginError):
+        store.switch(root, "b", FakeKeychain(blob=live), now_s=expires_ms / 1000)
+    with pytest.raises(NeedsLoginError):
+        oauth.ensure_usable(root, "b", FakeHttpClient(), now_ms=expires_ms)
