@@ -9,6 +9,7 @@ posted once, not once per poll (D4).
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,62 @@ def test_switch_only_refuses_a_login_it_can_prove_is_unknown(tmp_home: Path) -> 
     store.switch(root, "b", port)
 
     assert port.blob is not None and json.loads(port.blob)["mcpOAuth"] == {"kept": True}
+
+
+def _pointer_is_stale(tmp_home: Path) -> tuple[Path, FakeKeychain]:
+    """`active` says a, but Claude Code is logged in as b and has rotated b's token."""
+    root = tmp_home / ".vibemaxxing"
+    seed_account(root, "a", identity=_identity("ua"), active=True)
+    seed_account(root, "b", identity=_identity("ub"), credential=make_credential(refresh="b-spent"))
+    seed_account(root, "c", identity=_identity("uc"), credential=make_credential(access="c-file"))
+    _claude_json(tmp_home, "ub")
+    rotated = make_credential(access="b-rotated", refresh="b-rotated-rt")
+    return root, FakeKeychain(blob=credential_to_blob(rotated))
+
+
+def test_switch_saves_the_rotation_of_the_account_that_is_really_live(tmp_home: Path) -> None:
+    # The old rule skipped the resync when the pointer disagreed with the live uuid and
+    # wrote the port anyway, so b's only live refresh token was lost and b read
+    # "login lapsed" the next morning.
+    root, port = _pointer_is_stale(tmp_home)
+    a_before = store.account_path(root, "a").read_bytes()
+
+    store.switch(root, "c", port)
+
+    assert store.read_account(root, "b").credential.refresh_token.reveal() == "b-rotated-rt"
+    assert store.account_path(root, "a").read_bytes() == a_before
+    assert port.blob is not None
+    assert credentials.parse_blob(port.blob).access_token.reveal() == "c-file"
+    assert store.read_active(root) == "c"
+
+
+def test_switch_holds_the_claim_of_the_account_it_resyncs_into(tmp_home: Path) -> None:
+    root, port = _pointer_is_stale(tmp_home)
+    assert store.claim_refresh(root, "b", now_s=1e12)  # a refresh of b is in flight
+
+    with pytest.raises(UsageError):
+        store.switch(root, "c", port)
+
+    assert port.log == [], "refused before the port is read, so nothing is half done"
+    assert store.read_active(root) == "a"
+
+
+def test_switching_to_the_live_account_repairs_a_stale_pointer_without_loss(
+    tmp_home: Path,
+) -> None:
+    root, port = _pointer_is_stale(tmp_home)
+    # b's stored copy is dead; the port's login is the live one and must win.
+    stored = store.read_account(root, "b")
+    store.write_account(root, replace(stored, state=AccountState.NEEDS_LOGIN, message="dead"))
+
+    store.switch(root, "b", port)
+
+    assert store.read_active(root) == "b"
+    assert port.blob is not None
+    assert credentials.parse_blob(port.blob).refresh_token.reveal() == "b-rotated-rt"
+    repaired = store.read_account(root, "b")
+    assert repaired.credential.refresh_token.reveal() == "b-rotated-rt"
+    assert repaired.state is AccountState.OK, "the port's login is live, whatever the file said"
 
 
 def test_switch_refuses_lapsed_target(tmp_home: Path) -> None:
