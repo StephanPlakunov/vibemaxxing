@@ -102,6 +102,10 @@ class Reading:
     state: AccountState
     rows: tuple[Row, ...] | None
     updated_at: float | None
+    # False for an account stored without an uuid. After landing on one, ~/.claude.json
+    # still names the account that was left, so vibe could not tell who is live; it is
+    # never chosen as a target on its own.
+    identified: bool = True
 
 
 @dataclass(frozen=True)
@@ -177,7 +181,7 @@ def _fullness(
     State ok is what makes the credential usable: envelope.collect has already refused
     a lapsed login and refreshed an expired token before it hands over a reading.
     """
-    if reading.alias == live or reading.alias in settings.excluded:
+    if reading.alias == live or reading.alias in settings.excluded or not reading.identified:
         return None
     if reading.state is not AccountState.OK or reading.rows is None or reading.updated_at is None:
         return None

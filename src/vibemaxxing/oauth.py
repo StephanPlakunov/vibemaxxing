@@ -305,14 +305,23 @@ def ensure_usable(root: Path, alias: str, client: HttpClient, *, now_ms: int) ->
     command that fixes it; one that merely could not be confirmed says to retry.
     """
     active = store.read_active(root)
-    if alias in (active, store.live_owner(root, prefer=active)):
-        return  # Claude Code holds that lineage; there is nothing here to prove
+    owner = store.live_owner(root, prefer=active)
+    if alias == (owner if owner is not None else active):
+        # Claude Code holds that lineage and the switch resync replaces the stored copy
+        # from the port: there is nothing here to prove. `active` alone is not enough
+        # when Claude Code runs another account; then nothing resyncs it.
+        return
     account = store.read_account(root, alias)
-    store.require_usable(account)
+    store.require_usable(account, now_ms=now_ms)
     if not is_expired(account.credential, now_ms=now_ms):
         return
     outcome = refresh(root, alias, account.credential, client, now_ms=now_ms)
-    if outcome.credential is not None or outcome.error == "active":
+    if outcome.error == "active":
+        return
+    # A successor that is in neither the account file nor the stash exists only in this
+    # process; the file still holds the spent predecessor, and that is what a switch
+    # would write.
+    if outcome.credential is not None and (outcome.error is None or outcome.stashed):
         return
     if outcome.error in ("invalid_grant", "no_refresh_token"):
         raise NeedsLoginError(f'the refresh token for "{alias}" was rejected', f"vibe add {alias}")

@@ -513,12 +513,20 @@ def live_alias(root: Path, port: KeychainPort) -> str | None:
 
 
 def live_owner(root: Path, *, prefer: str | None) -> str | None:
-    """The stored account ~/.claude.json says Claude Code is logged in as."""
+    """The stored account ~/.claude.json says Claude Code is logged in as.
+
+    None when the file cannot be trusted to say: no uuid in it, or `prefer` (the account
+    `active` names) was stored without one. vibe writes ~/.claude.json from what it
+    has, so after a switch onto an account with no uuid the file still names the
+    account that was left, and reading it then would name the wrong owner.
+    """
     uuid = read_claude_identity(Path.home() / ".claude.json").account_uuid
-    return None if uuid is None else _uuid_owner(root, uuid, prefer=prefer)
+    if uuid is None or (prefer is not None and _stored_uuid(root, prefer) is None):
+        return None
+    return _uuid_owner(root, uuid, prefer=prefer)
 
 
-def require_usable(account: Account) -> None:
+def require_usable(account: Account, *, now_ms: int) -> None:
     """Refuse a target that would log Claude Code out the moment it reaches the port.
 
     Only what can be told without a request: a login whose refresh token has lapsed,
@@ -529,11 +537,11 @@ def require_usable(account: Account) -> None:
     recovery = f"vibe add {account.alias}"
     if account.state is AccountState.NEEDS_LOGIN:
         raise NeedsLoginError(f'the refresh token for "{account.alias}" was rejected', recovery)
-    if login_lapsed(account.credential, now_ms=int(time.time() * 1000)):
+    if login_lapsed(account.credential, now_ms=now_ms):
         raise NeedsLoginError(f'the login for "{account.alias}" has lapsed', recovery)
 
 
-def switch(root: Path, alias: str, port: KeychainPort) -> None:
+def switch(root: Path, alias: str, port: KeychainPort, *, now_s: float | None = None) -> None:
     incoming = read_account(root, alias)  # an unknown alias must fail before the port is touched
 
     outgoing = read_active(root)
@@ -544,10 +552,12 @@ def switch(root: Path, alias: str, port: KeychainPort) -> None:
     # between resyncs into an account whose claim is not held. Re-read under the
     # claims if that ever shows.
     owner = live_owner(root, prefer=outgoing)
-    # Not for an account whose copy the resync below replaces from the port: Claude
-    # Code may have extended what the old copy says.
-    if alias not in (outgoing, owner):
-        require_usable(incoming)
+    # Not for the account whose stored copy the resync below replaces from the port:
+    # Claude Code may have extended what the old copy says. That is the owner, else
+    # the account `active` names; `active` alone is not enough when Claude Code runs
+    # another account, because then nothing resyncs it.
+    if alias != (owner if owner is not None else outgoing):
+        require_usable(incoming, now_ms=int((time.time() if now_s is None else now_s) * 1000))
     with _claims(root, (alias, outgoing, owner), f"vibe switch {alias}"):
         # Re-read under the claims: a switch that finished between the read above
         # and the claims put a different account in the port, and resyncing it
@@ -607,7 +617,7 @@ def _switch_claimed(
     # the live lineage, where the file holds its spent predecessor. It has to land
     # before the port, because once active the account is never refreshed and the
     # stash would never be consumed -- only overwritten on the way back out.
-    successor = read_stash(root, alias) if alias not in (outgoing, owner) else None
+    successor = read_stash(root, alias) if alias != holder else None
     if successor is not None:
         incoming = replace(incoming, credential=successor)
         write_account(root, incoming)
