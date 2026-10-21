@@ -137,6 +137,30 @@ def test_switching_to_the_live_account_repairs_a_stale_pointer_without_loss(
     assert repaired.state is AccountState.OK, "the port's login is live, whatever the file said"
 
 
+def test_vibe_switch_to_the_live_account_is_not_blocked_by_its_dead_stored_copy(
+    tmp_home: Path,
+) -> None:
+    # The repair for a stale pointer is `vibe switch <live>`; refusing it because the
+    # old stored copy is marked dead would leave nothing that fixes the pointer.
+    root, port = _pointer_is_stale(tmp_home)
+    stored = store.read_account(root, "b")
+    store.write_account(root, replace(stored, state=AccountState.NEEDS_LOGIN, message="dead"))
+    ctx = cli.Context(
+        root=root,
+        client=FakeHttpClient(),
+        port=port,
+        now_s=NOW_S,
+        clock=lambda: NOW_S,
+        prompt=lambda _: "",
+        browser=lambda _: True,
+    )
+
+    assert cli.main(["switch", "b"], context=ctx) == 0
+
+    assert store.read_active(root) == "b"
+    assert store.read_account(root, "b").state is AccountState.OK
+
+
 def test_switch_refuses_lapsed_target(tmp_home: Path) -> None:
     root = tmp_home / ".vibemaxxing"
     seed_account(root, "a", identity=_identity("ua"), active=True)

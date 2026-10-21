@@ -304,7 +304,8 @@ def ensure_usable(root: Path, alias: str, client: HttpClient, *, now_ms: int) ->
     lineage and may refresh it. A lineage the server rejects is refused with the
     command that fixes it; one that merely could not be confirmed says to retry.
     """
-    if store.read_active(root) == alias:
+    active = store.read_active(root)
+    if alias in (active, store.live_owner(root, prefer=active)):
         return  # Claude Code holds that lineage; there is nothing here to prove
     account = store.read_account(root, alias)
     store.require_usable(account)
