@@ -526,9 +526,11 @@ stdout pipe, never in argv.
 -1. (0.3.0) Refuse a dead target before anything else, with `NeedsLoginError` and recovery
    `vibe add <alias>`: `store.require_usable` raises for an account whose refresh token
    has lapsed (`login_lapsed`, against the real clock) or whose file records state
-   `needs_login`. It touches neither the port nor a claim. Exempt: the account `active`
-   names and the account that owns the live login (below), because the resync in step 2
-   replaces their stored copy from the port. An access token that has merely expired is
+   `needs_login`. It touches neither the port nor a claim. Exempt: the one account whose
+   stored copy the resync in step 2 replaces from the port, the owner of the live login
+   (below) when one is named, else the account `active` names. A stale `active` is not
+   exempt while another account owns the login: its stored copy is not replaced, so a dead
+   one would reach the port. An access token that has merely expired is
    not refused here — `store` cannot refresh, since `oauth` imports it — and is Claude
    Code's to refresh once active; `oauth.ensure_usable` (below) proves the lineage alive
    first, wherever there is an `HttpClient`.
@@ -623,10 +625,20 @@ anything it cannot tell (no uuid, a login nobody stored, an unreadable port, two
 for one uuid with neither `active`). `read_active` keeps its meaning for every existing
 caller.
 
+`store.live_owner(root, prefer=active)` is the owner the switch resync writes into. It is
+`None` when `~/.claude.json` names no uuid, **or when the active account was stored without
+one**: vibe writes `~/.claude.json` from what it has, so after a switch onto an account with
+no uuid the file still names the account that was left, and reading it would name the wrong
+owner. `store.switch` takes `now_s` so a caller that already holds a clock reading checks
+the lapse against the same instant.
+
 `oauth.ensure_usable(root, alias, client, now_ms=...)` is the half of the usability check
-that needs a request. For an account that is neither active nor the live owner it applies
-`require_usable`, then refreshes an access token inside the expiry buffer (the account is
-not active, so vibe is the one refresher of its lineage). A lineage the server rejects
+that needs a request. The account the resync replaces from the port (the owner, else
+`active`) is exempt: Claude Code holds that lineage. Any other account gets
+`require_usable`, then a refresh of an access token inside the expiry buffer (vibe is the
+one refresher of that lineage). A successor that was neither written to the account file
+nor stashed exists only in this process, so the switch would still write the spent
+predecessor; that counts as a failure, not a success. A lineage the server rejects
 raises `NeedsLoginError` with `vibe add <alias>`; a refresh that merely could not be
 confirmed (a 5xx, a busy claim, `invalid_client`) raises `NetworkError` with
 `vibe switch <alias>`, because a browser login is the wrong advice for an upstream
@@ -1195,11 +1207,19 @@ inside `envelope.collect`, so the CLI, the TUI and the web dashboard all obey it
   already fetching usage.
 - (0.3.0) **Faster polling of the live account.** The auto-switch tick (§17) names the live
   account to `envelope.collect(..., fast=...)` when its cached answer already has a
-  `session` or `weekly_all` row at 90% or more whose reset is still ahead. For that account
-  only, an answer is reused for `POLL_FLOOR_S` (60 s) instead of `USAGE_FRESH_S`, so it is
-  asked at most once a minute. This is one parameter (`fresh_s`) on the existing
-  `_usage_view` path, not a second fetcher, and the backoff check still comes before any
-  fetch, so a 429 outranks it. Every other surface passes nothing and behaves as before.
+  `session` or `weekly_all` row at 90% or more whose reset is still ahead or unknown. For
+  that account only, an answer is reused for `POLL_FLOOR_S` (60 s) instead of
+  `USAGE_FRESH_S`, so it is asked at most once a minute. This is one parameter (`fresh_s`)
+  on the existing `_usage_view` path, not a second fetcher, and the backoff check still
+  comes before any fetch, so a 429 outranks it. Every other surface passes nothing and
+  behaves as before.
+  **Effective cadence is 60 to 120 s, not 60 s.** An answer is reused while `age < 60`, so
+  a tick that a scheduler fires even slightly early reuses it and the next request waits
+  for the tick after: between one and two intervals, by scheduler jitter. Up to 60
+  requests an hour for the hot account at the fast end, against the ~28-30 an hour measured
+  for one identity (above), for as long as it stays at 90% or more. A 429 puts it on the
+  backoff ladder, which is obeyed. This is a known cost of being fast where it matters,
+  not a guarantee that the budget holds; it was not measured against the live endpoint.
 
 ---
 
@@ -1311,6 +1331,13 @@ the one place the file is validated, and a file that is missing, unreadable, of 
 cannot stop `vibe list`, and never the valid half, so a hand-edit that is wrong in one
 place leaves auto-switch off rather than on. A missing member takes its default.
 
+Reading a bad file as the defaults is right for a read and wrong for a write: `on`, `off`,
+`exclude` and `include` go through `auto.settings_for_edit`, which refuses a file that
+exists but is invalid (`UsageError`, recovery `rm <path>`) instead of saving the defaults
+over what someone wrote by hand. `vibe alias` renames an alias inside `excluded` and inside
+`auto.json` (`from`, `to`) with the account, so an exclusion does not silently stop
+applying.
+
 ### `auto.json`
 
 ```json
@@ -1321,7 +1348,11 @@ place leaves auto-switch off rather than on. A missing member takes its default.
 The last switch, made by a tick or by `vibe auto undo`. `until` is when the rows that
 limited `from` have all reset, or `null` when that was not known; the account just left
 stays out of the running until then, whatever a fresh reading of it says. An unreadable
-file is no record. `history.db` holds only the pooled series (§13) and has no place for a
+file is no record, and so is one whose `at` is not a time a clock could have written
+(`auto.read_last` validates both times, because `vibe list`, the TUI and the web page all
+format `at` and one absurd value would stop every one of them). `until` that is absurd is
+read as unknown. An `at` far in the future is no cooldown at all, rather than one that
+lasts until then; a few seconds of clock skew still counts as just switched. `history.db` holds only the pooled series (§13) and has no place for a
 switch without a schema change, so it records nothing.
 
 ### The decision — `pool.decide`
@@ -1334,8 +1365,11 @@ decide(readings: Sequence[Reading], *, settings: Settings, live: str | None,
 next_candidate(...) -> str | None          # where a switch would go, trigger or not
 ```
 
-`Reading` is `(alias, state, rows | None, updated_at)`; `rows` is `None` when there is no
-usable answer. Rules, in order; the first that applies wins:
+`Reading` is `(alias, state, rows | None, updated_at, identified)`; `rows` is `None` when
+there is no usable answer. `identified` is false for an account stored without a uuid:
+after landing on one, `~/.claude.json` still names the account that was left, so vibe could
+not tell who is live. Such an account is never chosen as a target. Rules, in order; the
+first that applies wins:
 
 1. `auto_switch` is false: stay, `auto-switch is off`.
 2. The live alias is unknown: stay, `live account unknown`.
@@ -1349,7 +1383,7 @@ usable answer. Rules, in order; the first that applies wins:
 4. Within `cooldown_s` of the last switch: stay, `cooldown: last switch <n>s ago`.
 5. A candidate is state `ok` (for a non-active account, `collect` has already refused a
    lapsed login and refreshed an expiring token, so `ok` is the usability check), not
-   excluded, not the live account, with an answer fetched within `USAGE_FRESH_S` and not
+   excluded, `identified`, not the live account, with an answer fetched within `USAGE_FRESH_S` and not
    from the future, with a known percentage on every `session`/`weekly_all` row and none
    at or above the threshold, and not the account just left before its `until`.
 6. The candidate with the lowest `max(session, weekly_all)` wins, ties by alias; none:
@@ -1364,8 +1398,9 @@ tick(root, *, client, port, now_s, notify) -> TickResult        # line, switched
 
 Order: settings (off: stay, before anything is fetched) → `store.live_alias` (unknown:
 stay) → the pointer check → `collect` with the live account `fast` when its cached answer
-is at 90% on a trigger row (§14) → `pool.decide` → `oauth.ensure_usable` →
-`store.switch` → `auto.json` → the notification. It prints one line, `stay: <reason>` or
+is at 90% on a trigger row (§14) → `pool.decide` → `oauth.ensure_usable` → a re-check that
+the live account and `active` are still the ones decided about → `store.switch` →
+`auto.json` → the notification. It prints one line, `stay: <reason>` or
 `switched <from> -> <to>: <reason>`, and exits 0 in every case that is not a bug.
 
 - **The pointer check.** If `active` is not the live account the tick stays, `Claude Code
@@ -1373,10 +1408,20 @@ is at 90% on a trigger row (§14) → `pool.decide` → `oauth.ensure_usable` �
   would treat `active` as the account in use and the live one as any other, whose expired
   token it would then refresh behind Claude Code's back (§8). `vibe switch <live>` repairs
   the pointer without losing the live login.
-- **A refused switch is a stay.** `UsageError`, `NeedsLoginError` and `NetworkError` from
-  `ensure_usable` or `store.switch` — a claim held, a login vibe does not know, a target
-  that turned out dead — become `stay: <message>` and are not retried in the same tick.
-  Anything else is a bug and propagates.
+- **A refused switch is a stay.** `UsageError`, `NeedsLoginError`, `NetworkError` and
+  `NotFoundError` from `ensure_usable` or `store.switch` — a claim held, a login vibe does
+  not know, a target that turned out dead or was removed — become `stay: <message>` and are
+  not retried in the same tick. A `StoreError`, or the plain `VibeError` the Keychain port
+  raises when `security` fails, is not caught here: it reaches `cli.main`'s handler, which
+  prints the message and its recovery and exits non-zero, so a scheduler sees a port or
+  store that is broken rather than a quiet stay. Anything else is a bug and propagates.
+- **The live account is re-checked before the write.** `collect` and a refresh can take
+  seconds, and a person may have run `vibe switch` meanwhile. If `store.live_alias` or
+  `active` no longer names the account the decision was about, the tick stays
+  (`the live account changed while checking, so <target> was left alone`).
+- **A switch that landed but could not be recorded** still notifies and still counts as
+  switched; the line ends `(not recorded: <ErrorClass>)`, and the cost is that no cooldown
+  or `until` exists for it.
 - **The Keychain** is written only by `store.switch`, which holds the claims (§8). There is
   no other writer.
 - **The notification** runs only after a switch landed: `/usr/bin/osascript`, the message
@@ -1417,6 +1462,20 @@ refreshing its own token afterwards overwrites the Keychain with the outgoing ac
   in that instant resyncs into an account whose claim is not held.
 - Marking a lineage dead (§9) is a compare-then-write with no lock; a `vibe add` landing in
   the microseconds between the two is overwritten.
-- The unknown-login check abstains when any stored account has no uuid (§8, step 1b).
+- The unknown-login check abstains when any stored account has no uuid (§8, step 1b). So
+  "never overwrites a login vibe does not know" holds only while every stored account has a
+  uuid.
+- Auto-switch needs the active account's stored uuid: without it `store.live_owner`, and so
+  `store.live_alias`, cannot name the live account and every tick stays at `live account
+  unknown`. It is also never switched onto an account stored without one.
+- "Never switches onto a dead account" is proven for a lapsed login, one the server already
+  rejected, and an expired access token that fails to refresh. A refresh token the server
+  would reject but has not been asked about passes until it is.
+- A tick stays while `active` disagrees with the live account (`vibe switch <live>`
+  repairs it). Until then no automatic switch happens.
+- Polls (`collect`, so `vibe list`, the TUI and the web page) treat the account `active`
+  names as the active one. If Claude Code runs another account, that account's expired
+  token can still be refreshed by one of those polls. The tick stays rather than poll in
+  that state; the other surfaces do not.
 - A refresh whose response is lost (a POST that times out after the server rotated the
   token) still loses its successor. Auto-switch neither causes nor fixes that.

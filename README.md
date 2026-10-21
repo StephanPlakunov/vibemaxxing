@@ -77,12 +77,23 @@ It is deliberately timid:
 
 - It only acts on numbers it has. A live account with no fresh answer, or an unknown live
   login, is a `stay`, never a guess.
-- It never switches onto an account that is dead, or whose numbers are older than about
-  three minutes, or that has a row at the limit. The account it just left stays out until
-  the row that limited it has reset.
-- It never overwrites a login vibe does not know. If you ran `claude /login` as an account
-  you have not stored, it stops and tells you to `vibe add` it first.
+- It does not switch onto an account whose login has lapsed, whose refresh token the server
+  already rejected, or whose expired access token will not refresh, nor onto one whose
+  numbers are older than about three minutes or that has a row at the limit. A refresh token
+  the server would reject but has not been asked about passes until it is. The account it
+  just left stays out until the row that limited it has reset.
+- It does not overwrite a login vibe does not know. If you ran `claude /login` as an account
+  you have not stored, it stops and tells you to `vibe add` it first. That check needs every
+  account you stored to have an account id: if one has none, vibe cannot tell and falls back
+  to the old behaviour.
+- It stays, and says so, while vibe's active account and the live login disagree. Run
+  `vibe switch <the live account>` once and it carries on. It also stays when the live
+  account is stored without an account id, and never switches onto such an account.
 - 15 minutes between switches, and `vibe auto undo` goes back.
+- While the live account is at 90% or more, it is asked for fresh numbers about every one to
+  two minutes instead of three. That is a lot of requests against a budget measured at about
+  28 to 30 an hour for one account, and has not been measured against the live endpoint; a
+  429 is obeyed and slows it down.
 
 `vibe auto exclude <name>` keeps an account out of the running; `include` lets it back in.
 The 99% and the 15 minutes live in `~/.vibemaxxing/settings.json`. The dashboards show
