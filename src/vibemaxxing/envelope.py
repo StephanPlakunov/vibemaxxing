@@ -21,7 +21,7 @@ from vibemaxxing.errors import StoreError, VibeError
 from vibemaxxing.httpclient import HttpClient, HTTPError
 from vibemaxxing.keychain import KeychainPort
 from vibemaxxing.models import AccountState
-from vibemaxxing.poll import BACKOFF_S, USAGE_FRESH_S, USAGE_WAIT_CAP_S
+from vibemaxxing.poll import BACKOFF_S, POLL_FLOOR_S, USAGE_FRESH_S, USAGE_WAIT_CAP_S
 from vibemaxxing.pool import WEEKLY_ALL_KIND, AccountUsage, pool_remaining
 from vibemaxxing.redact import scrub
 from vibemaxxing.usage import Summary
@@ -154,6 +154,7 @@ def _usage_view(
     base: AccountView,
     *,
     can_fetch_why: str = "",
+    fresh_s: float = USAGE_FRESH_S,
 ) -> AccountView:
     """Serve an account's usage from the shared cache, the endpoint, or the last answer.
 
@@ -162,6 +163,10 @@ def _usage_view(
     60/120/240/480 s ladder of CONTRACT section 14, or Retry-After if longer,
     never past USAGE_WAIT_CAP_S) and, when an answer under USAGE_WAIT_CAP_S old
     exists, still shows it rather than blanking the account.
+
+    ``fresh_s`` is how old an answer may be and still be served without a request.
+    The auto-switch tick shortens it to POLL_FLOOR_S for the live account while that
+    account is close to its limit; the backoff check below still comes first.
     """
     alias = account.alias
     cached = store.read_usage_cache(root, alias)
@@ -185,7 +190,7 @@ def _usage_view(
             updated_at=kept_at,
         )
 
-    if kept is not None and age_s is not None and 0 <= age_s < USAGE_FRESH_S:
+    if kept is not None and age_s is not None and 0 <= age_s < fresh_s:
         return replace(base, summary=usage.summarize(kept), updated_at=kept_at)
     wait_until = cached.retry_at if cached is not None else None
     # A retry_at past the cap was not written by this code, so it is not obeyed.
@@ -336,6 +341,7 @@ def _view(
     port: KeychainPort,
     now_s: float,
     fetch: bool,
+    fresh_s: float = USAGE_FRESH_S,
 ) -> AccountView:
     now_ms = int(now_s * 1000)
     try:
@@ -356,8 +362,21 @@ def _view(
         if not fetch:
             return base
         return _usage_view(
-            root, account, token or account.credential, client, now_s, base, can_fetch_why=problem
+            root,
+            account,
+            token or account.credential,
+            client,
+            now_s,
+            base,
+            can_fetch_why=problem,
+            fresh_s=fresh_s,
         )
+
+    if account.state is AccountState.NEEDS_LOGIN:
+        # oauth.refresh recorded the server's verdict on this lineage. Not looked at for
+        # the active account: its credential is Claude Code's, and a resync clears it.
+        message = account.message or _needs_login(alias)
+        return AccountView(alias, active, account.state, message, identity, plan, None, None)
 
     try:
         # Inside the guard: read_stash on an unreadable or unknown-schema stash
@@ -377,12 +396,21 @@ def _view(
         return AccountView(alias, active, AccountState.OK, None, identity, plan, None, None)
 
     base = AccountView(alias, active, AccountState.OK, None, identity, plan, None, None)
-    return _usage_view(root, account, credential, client, now_s, base)
+    return _usage_view(root, account, credential, client, now_s, base, fresh_s=fresh_s)
 
 
 def collect(
-    root: Path, *, client: HttpClient, port: KeychainPort, now_s: float, fetch: bool = True
+    root: Path,
+    *,
+    client: HttpClient,
+    port: KeychainPort,
+    now_s: float,
+    fetch: bool = True,
+    fast: frozenset[str] = frozenset(),
 ) -> list[AccountView]:
+    """Every account's view. ``fast`` names the accounts whose usage answer may be
+    reused for POLL_FLOOR_S instead of USAGE_FRESH_S: an account close to its limit,
+    where three minutes is too long to find out that it is there."""
     active = store.read_active(root)
     return [
         _view(
@@ -393,6 +421,7 @@ def collect(
             port=port,
             now_s=now_s,
             fetch=fetch,
+            fresh_s=POLL_FLOOR_S if alias in fast else USAGE_FRESH_S,
         )
         for alias in store.list_aliases(root)
     ]
