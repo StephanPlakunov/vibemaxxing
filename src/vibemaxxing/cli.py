@@ -16,7 +16,18 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import __version__, auto, credentials, envelope, history, oauth, store, tui, web
+from vibemaxxing import (
+    __version__,
+    auto,
+    credentials,
+    envelope,
+    history,
+    keychain,
+    oauth,
+    store,
+    tui,
+    web,
+)
 from vibemaxxing.credentials import Credential
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.errors import (
@@ -50,6 +61,9 @@ class Context:
     # What `vibe auto tick` tells the person after it switched. A field, not a call to
     # auto.notify_macos, so a test that drives a switch never raises a real notification.
     notify: Callable[[str], None] = auto.notify_macos
+    # The store Claude Code keeps a second config dir's login in, for `vibe add
+    # --from-config-dir`. Read only; a field so a test hands it a fake.
+    port_for: Callable[[Path], KeychainPort] = keychain.config_dir_port
     argv0: str = field(default="vibe")
 
 
@@ -218,7 +232,85 @@ def _login(ctx: Context, alias: str, as_json: bool) -> int:
     return 0
 
 
+def _import(ctx: Context, wanted: str | None, given: Path, as_json: bool) -> int:
+    """Take over the login Claude Code keeps for another config dir. No browser, no request.
+
+    Claude Code started with CLAUDE_CONFIG_DIR=<dir> keeps its credential in an item of
+    its own and its profile in <dir>/.claude.json. Nothing is refreshed and nothing is
+    written but the account file: `active` stays, since this login is not the live one.
+    """
+    directory = keychain.resolve_config_dir(given)
+    blob = ctx.port_for(directory).read()
+    if blob is None:
+        raise NeedsLoginError(
+            f"Claude Code has no login for {directory} "
+            f"(looked in {keychain.config_dir_location(directory)})",
+            f"CLAUDE_CONFIG_DIR={directory} claude /login",
+        )
+    credential = credentials.parse_blob(blob)
+    identity = credentials.read_claude_identity(directory / ".claude.json")
+    if identity.account_uuid is None:
+        # Stored without one, vibe could never tell this account from the live one, and
+        # auto-switch never switches onto it (CONTRACT section 17).
+        raise UsageError(
+            f"{directory / '.claude.json'} names no account (oauthAccount.accountUuid)",
+            f"CLAUDE_CONFIG_DIR={directory} claude",
+        )
+    existing = _already_stored(ctx.root, credential)
+    if existing is not None:
+        _emit(
+            _action("add", alias=existing, adopted=True, config_dir=str(directory)),
+            as_json=as_json,
+            human=f'that login is already stored as "{existing}"\n',
+        )
+        return 0
+    base = identity.email or identity.display_name or "account"
+    alias = wanted if wanted is not None else _free_alias(ctx.root, _slug(base.split("@", 1)[0]))
+    if not store.valid_alias(alias):
+        raise UsageError(
+            f'"{alias}" is not a usable alias: lower-case letters, digits, dot, dash, underscore',
+            f"vibe add extra --from-config-dir {directory}",
+        )
+    if store.read_active(ctx.root) == alias:
+        # The port holds the active account's login; its file must keep matching it.
+        raise UsageError(
+            f'"{alias}" is the active account, and importing another login over it would '
+            "leave its file and Claude Code's login disagreeing",
+            f"vibe add <another name> --from-config-dir {directory}",
+        )
+    if alias in store.list_aliases(ctx.root):
+        held = store.read_account(ctx.root, alias).identity.account_uuid
+        if held != identity.account_uuid:
+            # Its refresh token would be gone for good, with only a browser login to undo it.
+            raise UsageError(f'"{alias}" already holds another account', f"vibe remove {alias}")
+    # A stash from the previous lineage would be consumed as a successor by the next
+    # refresh, destroying the credential this import just stored.
+    store.delete_stash(ctx.root, alias)
+    store.write_account(
+        ctx.root,
+        store.Account(
+            alias=alias,
+            credential=credential,
+            identity=identity,
+            state=AccountState.OK,
+            message=None,
+            added_at=ctx.now_s,
+        ),
+    )
+    _emit(
+        _action("add", alias=alias, adopted=True, config_dir=str(directory)),
+        as_json=as_json,
+        human=(
+            f'imported the login in {directory} as "{alias}"\n'
+            f"vibe now refreshes it; stop using that dir, or the two copies log each other out\n"
+        ),
+    )
+    return 0
+
+
 def cmd_add(args: argparse.Namespace, ctx: Context) -> int:
+    if args.from_config_dir is not None:
+        return _import(ctx, args.alias, args.from_config_dir, args.json)
     if args.alias is None:
         return _adopt(ctx, args.json)
     return _login(ctx, args.alias, args.json)
@@ -541,6 +633,8 @@ HELP: Final = """vibe — several Claude Code accounts, one pooled view of the p
 Getting started
   vibe add                    adopt the login Claude Code already has here (no browser)
   vibe add work               log in to another account; opens a browser, you paste a code
+  vibe add work --from-config-dir ~/.claude-work
+                              import the login Claude Code keeps for that config dir
   vibe switch work            point Claude Code at that account, then run `claude` normally
 
 Every day
@@ -612,6 +706,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     add = subs.add_parser("add", help="adopt the current Claude Code login, or log in fresh")
     add.add_argument("alias", nargs="?", help="omit to adopt the login already in Claude Code")
+    add.add_argument(
+        "--from-config-dir",
+        type=Path,
+        metavar="DIR",
+        help="import the login Claude Code keeps for CLAUDE_CONFIG_DIR=DIR (no browser)",
+    )
     _add_json(add)
     add.set_defaults(handler=cmd_add)
 

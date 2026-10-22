@@ -3,14 +3,20 @@
 ``CLAUDE_CONFIG_DIR`` is never read, never set and never honoured. With it set
 Claude Code scopes the item to a hashed service name and ``NO_KEYCHAIN=1`` does
 not reliably produce a plaintext file — measured. We swap credentials, we do not
-isolate config directories, so only the fixed-name item matters.
+isolate config directories, so only the fixed-name item is ever written.
+
+The one exception is a read: `vibe add --from-config-dir <dir>` takes over a login
+Claude Code keeps for a config dir the person names, from that dir's own item.
 """
 
 from __future__ import annotations
 
 import getpass
+import hashlib
+import os
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -32,6 +38,9 @@ class KeychainPort(Protocol):
 
 
 class MacKeychain:
+    def __init__(self, service: str = CLAUDE_CODE_KEYCHAIN_SERVICE) -> None:
+        self.service = service
+
     def read(self) -> str | None:
         result = self._run(
             [
@@ -41,14 +50,14 @@ class MacKeychain:
                 getpass.getuser(),
                 "-w",
                 "-s",
-                CLAUDE_CODE_KEYCHAIN_SERVICE,
+                self.service,
             ]
         )
         if result.returncode == SECURITY_ABSENT_CODE:
             return None
         if result.returncode != 0:
             raise VibeError(
-                f"the macOS Keychain refused to read {CLAUDE_CODE_KEYCHAIN_SERVICE!r} "
+                f"the macOS Keychain refused to read {self.service!r} "
                 f"(security exit {result.returncode})",
                 _RECOVERY,
             )
@@ -70,14 +79,14 @@ class MacKeychain:
                 "-a",
                 getpass.getuser(),
                 "-s",
-                CLAUDE_CODE_KEYCHAIN_SERVICE,
+                self.service,
                 "-w",
                 blob,
             ]
         )
         if result.returncode != 0:
             raise VibeError(
-                f"the macOS Keychain refused to write {CLAUDE_CODE_KEYCHAIN_SERVICE!r} "
+                f"the macOS Keychain refused to write {self.service!r} "
                 f"(security exit {result.returncode})",
                 _RECOVERY,
             )
@@ -105,8 +114,11 @@ class MacKeychain:
 
 
 class FileKeychain:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path
+
     def _path(self) -> Path:
-        return Path.home() / ".claude" / ".credentials.json"
+        return self.path if self.path is not None else Path.home() / ".claude" / ".credentials.json"
 
     def read(self) -> str | None:
         try:
@@ -144,3 +156,40 @@ def default_port() -> KeychainPort:
     if platform == "darwin":
         return MacKeychain()
     return FileKeychain()
+
+
+def config_dir_service(config_dir: Path) -> str:
+    """The Keychain item Claude Code keeps its login in when CLAUDE_CONFIG_DIR is ``config_dir``.
+
+    Claude Code appends "-" and the first 8 hex digits of the sha256 of the dir, NFC
+    normalised. Checked against the item Claude Code created on this fork's machine for
+    an ASCII path; the NFC step is what Claude Code's source does, not something measured.
+    """
+    path = unicodedata.normalize("NFC", str(config_dir))
+    return f"{CLAUDE_CODE_KEYCHAIN_SERVICE}-{hashlib.sha256(path.encode()).hexdigest()[:8]}"
+
+
+def resolve_config_dir(config_dir: Path) -> Path:
+    """The dir as the hash must see it: absolute, `~` expanded, no trailing slash.
+
+    Symlinks are not resolved; Claude Code hashes the path it was given.
+    """
+    return Path(os.path.abspath(os.path.expanduser(config_dir)))
+
+
+def config_dir_location(config_dir: Path) -> str:
+    """Where Claude Code keeps the login for ``config_dir``, for a message that names it."""
+    platform: str = sys.platform
+    if platform == "darwin":
+        return f"the Keychain item {config_dir_service(config_dir)!r}"
+    return str(config_dir / ".credentials.json")
+
+
+def config_dir_port(config_dir: Path) -> KeychainPort:
+    """The store Claude Code keeps the login for ``config_dir`` in. Only ever read."""
+    platform: str = sys.platform
+    if platform == "win32":
+        return default_port()  # raises: there is no Windows store
+    if platform == "darwin":
+        return MacKeychain(config_dir_service(config_dir))
+    return FileKeychain(config_dir / ".credentials.json")
