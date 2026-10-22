@@ -442,7 +442,7 @@ def _decide_ordered(
     if not own:
         # A person put Claude Code on an account the policy does not name; that is theirs.
         return _stay(f"{live} is not in the policy")
-    # The limits of its own steps that the live account is over, with the row that says so.
+    # The limits of its own steps the live account is over: floors, true however old.
     over = [limit for limit in own if blocking(current.rows, limit, now_s, models=models)]
     total = len(policy.steps)
     for index, step in enumerate(policy.steps):
