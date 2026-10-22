@@ -30,8 +30,8 @@ Repository = "https://github.com/jskarbecki/vibemaxxing"
 Issues = "https://github.com/jskarbecki/vibemaxxing/issues"
 
 [project.scripts]
-vibemaxxing = "vibemaxxing.cli:main"
-vibe = "vibemaxxing.cli:main"
+vibemaxxing = "vibemaxxing.entry:main"
+vibe = "vibemaxxing.entry:main"
 
 [build-system]
 requires = ["hatchling"]

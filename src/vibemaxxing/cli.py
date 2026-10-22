@@ -24,6 +24,7 @@ from vibemaxxing import (
     history,
     keychain,
     oauth,
+    statusline,
     store,
     tui,
     web,
@@ -318,6 +319,7 @@ def cmd_add(args: argparse.Namespace, ctx: Context) -> int:
 
 def _collect_and_record(ctx: Context) -> tuple[list[AccountView], float | None]:
     views = envelope.collect(ctx.root, client=ctx.client, port=ctx.port, now_s=ctx.now_s)
+    auto.publish(ctx.root, port=ctx.port, now_s=ctx.now_s)
     with closing(history.connect(store.history_path(ctx.root))) as conn:
         history.record(conn, at_s=ctx.now_s, pool=envelope.pool_weeks(views))
         window = history.samples(conn, since_s=ctx.now_s - history.RETENTION_DAYS * 86_400.0)
@@ -552,6 +554,13 @@ def cmd_auto_uninstall(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
+def cmd_statusline(args: argparse.Namespace, ctx: Context) -> int:
+    # The console script answers this before it imports cli (entry.py); this is the same
+    # line for `python -m vibemaxxing statusline` and the tests.
+    out(statusline.render(statusline.read(ctx.root), now_s=ctx.now_s) + "\n")
+    return 0
+
+
 def cmd_remove(args: argparse.Namespace, ctx: Context) -> int:
     store.delete_account(ctx.root, args.alias)
     _emit(
@@ -642,6 +651,11 @@ Every day
   vibe list                   each account's limits and the pooled headroom
   vibe run work -- claude     one command on one account; the active login is untouched
   vibe usage web              the same dashboard in a browser, http://127.0.0.1:8787
+
+Status line
+  vibe statusline             one line: who is live and each account's limits, from the
+                              numbers the last command or tick saw (no request); for
+                              Claude Code's statusLine setting
 
 Housekeeping
   vibe alias old new          rename an account
@@ -781,6 +795,11 @@ def build_parser() -> argparse.ArgumentParser:
         auto_sub.add_argument("alias")
         _add_json(auto_sub)
         auto_sub.set_defaults(handler=handler)
+
+    line = subs.add_parser(
+        "statusline", help="one line for Claude Code's status line, from the last numbers"
+    )
+    line.set_defaults(handler=cmd_statusline)
 
     # `vibe help` is what people type; without it argparse answers an unhelpful
     # "invalid choice: 'help'" and lists the commands it just refused to explain.

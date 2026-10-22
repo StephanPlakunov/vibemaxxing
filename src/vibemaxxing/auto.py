@@ -10,6 +10,7 @@ know or an account that is dead.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -22,9 +23,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import envelope, oauth, pool, store, usage
+from vibemaxxing import envelope, oauth, pool, statusline, store, usage
 from vibemaxxing.envelope import AccountView
-from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, UsageError
+from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, UsageError, VibeError
 from vibemaxxing.fsutil import private_dir, write_private
 from vibemaxxing.httpclient import HttpClient
 from vibemaxxing.keychain import KeychainPort
@@ -315,14 +316,29 @@ def tick(
 
     Everything that is not a bug is a `stay` with its reason: a claim held, a login
     vibe does not know, a target that turned out dead. None of them is retried in the
-    same tick, and none is an exit code.
+    same tick, and none is an exit code. Every tick that returns leaves status.json
+    behind, so the status line is never older than the scheduler's interval.
     """
+    result, live = _tick(root, client=client, port=port, now_s=now_s, notify=notify)
+    publish_status(root, live=live, now_s=now_s)
+    return result
+
+
+def _tick(
+    root: Path,
+    *,
+    client: HttpClient,
+    port: KeychainPort,
+    now_s: float,
+    notify: Callable[[str], None],
+) -> tuple[TickResult, str | None]:
+    """The tick, and the account Claude Code runs as after it when that is known."""
     settings = read_settings(root)
     if not settings.auto_switch:
-        return _stay(pool.REASON_OFF)
+        return _stay(pool.REASON_OFF), None
     live = store.live_alias(root, port)
     if live is None:
-        return _stay(pool.REASON_LIVE_UNKNOWN)
+        return _stay(pool.REASON_LIVE_UNKNOWN), None
     active = store.read_active(root)
     if active != live:
         # Polling would treat `active` as the account in use and the live one as any other,
@@ -331,7 +347,7 @@ def tick(
         return _stay(
             f"Claude Code runs as {live} but vibe's active account is {active or 'unset'}"
             f" - run: vibe switch {live}"
-        )
+        ), live
 
     last = read_last(root)
     hot = _is_hot(root, live, now_s, settings)
@@ -339,7 +355,7 @@ def tick(
     views = envelope.collect(root, client=client, port=port, now_s=now_s, fast=fast)
     decision = pool.decide(_readings(views), settings=settings, live=live, now_s=now_s, last=last)
     if decision.action == "stay" or decision.target is None:
-        return _stay(decision.reason)
+        return _stay(decision.reason), live
     target = decision.target
 
     try:
@@ -348,10 +364,11 @@ def tick(
         # switch` in that time. The decision was about `live`; if that is no longer the
         # account in use, it is stale and the person's choice stands.
         if store.live_alias(root, port) != live or store.read_active(root) != live:
-            return _stay(f"the live account changed while checking, so {target} was left alone")
+            stale = f"the live account changed while checking, so {target} was left alone"
+            return _stay(stale), None
         store.switch(root, target, port, now_s=now_s)
     except (UsageError, NeedsLoginError, NetworkError, NotFoundError) as exc:
-        return _stay(exc.message)
+        return _stay(exc.message), live
 
     rows = next((v.summary.rows for v in views if v.alias == live and v.summary is not None), ())
     limit = decision.limit if decision.limit is not None else settings.threshold
@@ -376,7 +393,7 @@ def tick(
         unrecorded = f" (not recorded: {exc.__class__.__name__})"
         line, notice = line + unrecorded, notice + unrecorded
     notify(notice)
-    return TickResult(line, switched=True)
+    return TickResult(line, switched=True), target
 
 
 def undo(root: Path, *, client: HttpClient, port: KeychainPort, now_s: float) -> LastSwitch:
@@ -416,12 +433,68 @@ def status(root: Path, *, client: HttpClient, port: KeychainPort, now_s: float) 
     if live is None or live != active:
         return Status(settings, live, active, last, None)
     views = envelope.collect(root, client=client, port=port, now_s=now_s)
+    publish_status(root, live=live, now_s=now_s)
     readings = _readings(views)
     next_alias = pool.next_candidate(readings, settings=settings, live=live, now_s=now_s, last=last)
     step, next_step = pool.ordered_steps(
         readings, settings=settings, live=live, now_s=now_s, last=last
     )
     return Status(settings, live, active, last, next_alias, step, next_step)
+
+
+def _row_entry(row: usage.Row) -> dict[str, object]:
+    return {
+        "kind": row.kind,
+        "label": row.label,
+        "percent": row.percent,
+        "resets_at": None if row.resets_at is None else pool.parse_stamp(row.resets_at),
+    }
+
+
+def _status_account(root: Path, alias: str) -> dict[str, object]:
+    try:
+        account = store.read_account(root, alias)
+    except VibeError:
+        return {"alias": alias, "state": "error", "fetched_at": None, "rows": []}
+    cached = store.read_usage_cache(root, alias)
+    # Another login under the same alias has another added_at; its numbers are not ours.
+    if cached is None or cached.added_at != account.added_at or cached.payload is None:
+        return {"alias": alias, "state": str(account.state), "fetched_at": None, "rows": []}
+    return {
+        "alias": alias,
+        "state": str(account.state),
+        "fetched_at": cached.fetched_at,
+        "rows": [_row_entry(row) for row in usage.summarize(cached.payload).rows],
+    }
+
+
+def publish_status(root: Path, *, live: str | None, now_s: float) -> None:
+    """Write status.json for `vibe statusline`: who is live, every account's rows, the policy.
+
+    The rows come from the shared usage caches, not from one command's views: every
+    surface leaves its answers there, so the file says the same whichever command wrote
+    it last. ``live`` is None when the caller did not look at the Keychain. Best effort:
+    a status that cannot be written costs the status line its freshness, not the command.
+    """
+    settings, last = read_settings(root), read_last(root)
+    document: dict[str, object] = {
+        "schema": statusline.SCHEMA_VERSION,
+        "written_at": now_s,
+        "live": live,
+        "active": store.read_active(root),
+        "accounts": [_status_account(root, alias) for alias in store.list_aliases(root)],
+        "policy": policy_document(settings.policy),
+        "last_switch": None
+        if last is None
+        else {"from": last.from_alias, "to": last.to_alias, "at": last.at_s, "reason": last.reason},
+    }
+    with contextlib.suppress(OSError):
+        statusline.write(root, document)
+
+
+def publish(root: Path, *, port: KeychainPort, now_s: float) -> None:
+    """`publish_status` for a surface that has not asked who is live: it asks the port."""
+    publish_status(root, live=store.live_alias(root, port), now_s=now_s)
 
 
 def notify_macos(message: str) -> None:
