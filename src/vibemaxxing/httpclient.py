@@ -127,11 +127,14 @@ class UrllibClient:
             with _OPENER.open(request, timeout=timeout_s) as response:
                 return HttpResponse(int(response.status), response.read())
         except urllib.error.HTTPError as exc:
-            # `from None`: the suppressed context holds the request object, whose
-            # headers carry the bearer token.
-            raise HTTPError(
-                int(exc.code), exc.read(), _retry_after_s(exc.headers.get("Retry-After"))
-            ) from None
+            # Closed here: it holds the response body open, and Python 3.14 warns when
+            # the collector has to do it, which the suite turns into a failure.
+            with exc:
+                # `from None`: the suppressed context holds the request object, whose
+                # headers carry the bearer token.
+                raise HTTPError(
+                    int(exc.code), exc.read(), _retry_after_s(exc.headers.get("Retry-After"))
+                ) from None
         except OSError as exc:
             raise NetworkError(
                 f"could not reach {host}: {exc.__class__.__name__}",
