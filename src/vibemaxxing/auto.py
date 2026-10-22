@@ -53,6 +53,9 @@ FAST_POLL_MARGIN: Final = DEFAULT_THRESHOLD - FAST_POLL_PERCENT
 ORDERED: Final = "ordered"
 OSASCRIPT_BIN: Final = "/usr/bin/osascript"
 OSASCRIPT_TIMEOUT_S: Final = 5.0
+# Preferred when installed (Homebrew's path): its notifications carry their own title and
+# do not show up as Script Editor's.
+TERMINAL_NOTIFIER_BIN: Final = "/opt/homebrew/bin/terminal-notifier"
 
 
 def settings_path(root: Path) -> Path:
@@ -497,10 +500,26 @@ def publish(root: Path, *, port: KeychainPort, now_s: float) -> None:
     publish_status(root, live=store.live_alias(root, port), now_s=now_s)
 
 
+def _notified(argv: list[str]) -> bool:
+    try:
+        done = subprocess.run(argv, capture_output=True, timeout=OSASCRIPT_TIMEOUT_S, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0
+
+
 def notify_macos(message: str) -> None:
-    """Tell the person a switch happened. Best effort: a failed one is not a failed switch."""
+    """Tell the person a switch happened. Best effort: a failed one is not a failed switch.
+
+    terminal-notifier when it is installed, osascript when it is not or it failed.
+    """
     platform: str = sys.platform
     if platform != "darwin":
+        return
+    notifier = TERMINAL_NOTIFIER_BIN
+    if os.access(notifier, os.X_OK) and _notified(
+        [notifier, "-title", "vibemaxxing", "-message", message]
+    ):
         return
     # The message is an argument of the script, never part of its text: it names accounts
     # and a limit kind the server chose, and none of that belongs inside AppleScript source.
@@ -512,10 +531,7 @@ def notify_macos(message: str) -> None:
     ):
         argv += ["-e", line]
     argv.append(message)
-    try:
-        subprocess.run(argv, capture_output=True, timeout=OSASCRIPT_TIMEOUT_S, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return
+    _notified(argv)
 
 
 def plist_path() -> Path:
