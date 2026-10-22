@@ -3,6 +3,57 @@
 Notable changes per release. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - fork `stephan/ordered-failover`
+
+### Added
+
+- **An ordered failover policy.** An optional `policy` in `~/.vibemaxxing/settings.json`
+  (`{"mode": "ordered", "steps": [{"account", "until"}...], "then": "earliest_reset"}`)
+  replaces "the most room at 99%": each tick puts Claude Code on the first step whose
+  account has every session and weekly row below that step's limit, on fresh numbers and a
+  usable login, and on the account that gets room back first when no step has any. Model
+  rows block only when named in `block_models`. The cooldown holds only a switch to an
+  account that outranks one where the live account still has room; leaving an account at or
+  over a limit is never delayed. Every existing stay still holds, and an account outside the
+  policy is left alone. The fence records the limit an account was left at (`auto.json`
+  `limit`), so an account left at 85% can still be used at 99%. The live account is polled
+  every minute within 9 points below each of its own limits. `vibe auto status` shows the
+  policy, the step and the next step (`--json`: `policy`, `step`, `next_step`); `vibe alias`
+  renames steps. Without a `policy` nothing changes. `docs/CONTRACT.md` §18.
+- **`vibe add [alias] --from-config-dir DIR`** imports the login Claude Code keeps for
+  `CLAUDE_CONFIG_DIR=DIR` (its Keychain item `Claude Code-credentials-<8 hex of
+  sha256(DIR)>`, or `DIR/.credentials.json` off macOS) and the `oauthAccount` in
+  `DIR/.claude.json`. No browser, no request, no refresh, no Keychain write; `active` does
+  not move.
+- **`~/.vibemaxxing/status.json` and `vibe statusline`.** Every command that collects usage
+  and every tick writes the live account, each account's rows (percent, reset), when they
+  were fetched, the policy and the last switch. `vibe statusline` prints one line from that
+  file alone, for Claude Code's `statusLine`: `▶ extra · main: 5h 100% (resets 19:30) wk 93%
+  (resets Mon 00:00) · extra: 5h 28% (resets 23:10)`. About 25 ms: the console scripts start
+  in `vibemaxxing.entry`, which answers it before the CLI imports anything heavy.
+- **terminal-notifier.** The notification on every automatic switch goes through
+  `/opt/homebrew/bin/terminal-notifier` when it is installed (title "vibemaxxing"), and through
+  `osascript` when it is not or fails.
+
+### Changed
+
+- The switch notification reads `Switched to <to>: <reason>` instead of the tick's line.
+- `vibemaxxing.__version__` is looked up on first use instead of at import.
+
+### Fixed
+
+- Two tests failed on Python 3.14, which warns when the collector closes an unclosed
+  `HTTPError`; the client and the test now close it.
+
+### Not verified
+
+- Everything in "Not verified" under 0.3.0 still holds, and an ordered policy switches more
+  often than the default rule.
+- The Keychain item name for a config dir was checked against one ASCII path on one machine,
+  not against Claude Code's source; the NFC step for non-ASCII paths is from memory of it.
+- No real Keychain, running `claude`, loaded launchd job or real terminal-notifier
+  notification was exercised.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added

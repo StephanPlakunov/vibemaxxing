@@ -5,7 +5,9 @@ Every writer reads this file before touching code. The integrator resolves confl
 not frozen; ask the integrator rather than inventing one.
 
 Version: 1 (frozen 2026-09-15, Phase A). 0.3.0 (2026-10-21) adds §17 and amends §2, §6,
-§8, §9, §10, §14 and §15 for automatic switching; each amendment says "(0.3.0)".
+§8, §9, §10, §14 and §15 for automatic switching; each amendment says "(0.3.0)". The fork
+`stephan/ordered-failover` (2026-10-22) adds §18 and amends §2, §5, §6, §8, §10, §15 and
+§17; each amendment says "(fork)".
 
 ---
 
@@ -52,8 +54,10 @@ License MIT, author `Jan Skarbecki <jan@intra-ai.de>`.
 
 ```
 src/vibemaxxing/
-  __init__.py      B   __version__ from importlib.metadata
+  __init__.py      B   __version__ from importlib.metadata, looked up on first use (fork)
   __main__.py      B   python -m vibemaxxing
+  entry.py         F   the console scripts; answers `statusline` before importing cli (fork)
+  statusline.py    F   status.json's path and shape, and the one line it prints (fork)
   models.py        B   AccountState, Sample      [shared, frozen]
   errors.py        B   error taxonomy, exit codes [shared, frozen]
   redact.py        B   Secret, scrub, excepthook  [shared, frozen]
@@ -84,7 +88,7 @@ scripts/
 
 Letters are phases: **B** solo skeleton, **C1/C2/C3** the three Phase-C writers,
 **D** solo CLI, **E1/E2** the two Phase-E writers, **G** solo hardening, **H**
-automatic switching (0.3.0).
+automatic switching (0.3.0), **F** the fork (§18).
 
 **A writer touches only the files its slice owns.** Phase-B files are frozen: a
 writer that needs a change there asks the integrator.
@@ -104,6 +108,10 @@ credentials -> keychain -> store -> oauth
                  ^
          cli -> tui, web
 ```
+
+(fork) `statusline` imports only `fsutil` and the standard library, so the status line
+loads nothing else; `auto` writes the file through it. `entry` imports `statusline` or
+`cli`, never both.
 
 `auto` (0.3.0) sits above `envelope`, which it asks for the numbers, and below `cli`,
 `tui` and `web`, which only read its settings and its last-switch record. The decision
@@ -198,6 +206,9 @@ Rules, in force everywhere:
    - `usage._get()` — the `Authorization` header of both OAuth API GETs
    - `oauth.refresh()` and `oauth.exchange_code()` — the POST body
    - `cli` — the `CLAUDE_CODE_OAUTH_TOKEN` value in the child env of `vibe run`
+   (fork) `vibe add --from-config-dir` and `status.json` add none: the import parses the
+   blob into `Secret`s and writes it through `credential_to_disk`, and the status holds no
+   token.
    The Phase-F credential-leak lens greps for every other `.reveal(`.
 4. `scrub()` is applied at **every** output boundary: the stdout/stderr writer, the
    `--json` dumper, `VibeError.render()`, the excepthook, and every history write.
@@ -271,6 +282,7 @@ Root is `Path.home() / ".vibemaxxing"`. No environment override: tests set `HOME
   active                        0600   one line: the alias whose credential is live
   settings.json                 0600   automatic switching: on/off, threshold, cooldown, exclusions
   auto.json                     0600   the last switch, whoever made it (§17)
+  status.json                   0600   what the status line prints, rewritten by every collect (§18)
   history.db                    0600   the sample series
 ```
 
@@ -519,7 +531,9 @@ stdout pipe, never in argv.
 - `CLAUDE_CONFIG_DIR` is never read, never set, never honoured. With it set Claude Code
   scopes the item to a hashed service name and `NO_KEYCHAIN=1` does not reliably
   produce a plaintext file — measured. We swap credentials, we do not isolate config
-  dirs, so only the fixed-name item matters.
+  dirs, so only the fixed-name item matters. (fork) The one exception is a **read**:
+  `vibe add --from-config-dir DIR` reads the item Claude Code keeps for a dir the person
+  names (§18). Nothing ever writes any item but the fixed-name one.
 
 **Switch order is fixed** (AC10), and every step is load-bearing:
 
@@ -895,7 +909,9 @@ network round trip the command did not need:
 adds `switched` and `line`, `auto status` adds `enabled`, `threshold`, `cooldown_s`,
 `excluded`, `live`, `active`, `last_switch` and `next`, `auto install` adds `plist` and
 `load`, `auto uninstall` adds `removed` and `unload`, and `auto exclude|include` add
-`alias` and `excluded`.
+`alias` and `excluded`. (fork) `auto status` also adds `policy` (the settings member, or
+`null`), `step` and `next_step` (1-based, or `null`), and `add --from-config-dir` adds
+`config_dir`. `vibe statusline` prints its line and has no envelope.
 
 `envelope.py` also owns `collect()`, which does the reads, the refreshes and the usage
 fetches and returns `AccountView`s, and `pool_weeks()`, which is the single place the
@@ -1245,6 +1261,8 @@ vibe auto undo [--json]
 vibe auto tick [--json]
 vibe auto install [--json]               macOS only
 vibe auto uninstall [--json]             macOS only
+vibe add [alias] --from-config-dir DIR [--json]   (fork, §18)
+vibe statusline                                   (fork, §18)
 ```
 
 `web` is a positional, which is what AC13 is literally written against. `--json` on `run`
@@ -1427,6 +1445,11 @@ the live account and `active` are still the ones decided about → `store.switch
 - **The notification** runs only after a switch landed: `/usr/bin/osascript`, the message
   passed as an argument of the script and never inside its text, a timeout, every failure
   swallowed, silent off macOS. `cli.Context.notify` carries it so a test never raises one.
+  (fork) `/opt/homebrew/bin/terminal-notifier` first when it is executable, with `-title
+  vibemaxxing -message <message>`, and osascript when it is absent or fails. The message is
+  `Switched to <to>: <reason>`.
+- (fork) **Every tick writes status.json** (§18) on the way out, whatever it decided; an off
+  tick does so without reading the port.
 
 ### The other commands
 
@@ -1479,3 +1502,114 @@ refreshing its own token afterwards overwrites the Keychain with the outgoing ac
   that state; the other surfaces do not.
 - A refresh whose response is lost (a POST that times out after the server rotated the
   token) still loses its successor. Auto-switch neither causes nor fixes that.
+
+---
+
+## 18. The fork: ordered policy, config-dir import, status line (fork)
+
+### The ordered policy — `settings.json` `policy`, `pool.decide`
+
+```json
+{"mode": "ordered",
+ "steps": [{"account": "main", "until": 85}, {"account": "extra", "until": 99},
+           {"account": "main", "until": 99}],
+ "then": "earliest_reset", "block_models": ["Fable"]}
+```
+
+Optional. Absent (or `null`) is the §17 rule, unchanged, and `write_settings` then writes no
+`policy` member, so a file without one round-trips byte for byte. `mode` must be `ordered`,
+`steps` a non-empty list of `{account: valid alias, until: integer 1..100}`, `then`
+`earliest_reset` or absent, `block_models` a list of non-empty strings or absent. Anything
+else is a wrong member, so the whole file reads as the defaults (§17). `pool.Policy` holds
+the steps and the models; `Settings.policy` defaults to the empty one.
+
+Rows that count: `session`, `weekly_all`, and a `weekly_scoped` row whose model (its label
+after `Weekly · `, case-insensitive) is in `block_models`. `decide` with steps, in order:
+
+1. Off: stay. Live unknown: stay (§17 rules 1-2).
+2. No usable answer for the live account: stay, `no fresh numbers for <live>`.
+3. The live account is in no step: stay, `<live> is not in the policy`.
+4. Walk the steps. At a step of the live account: over its `until` on a counted row whose
+   reset is ahead or unknown (a floor, any age), go on; else below it on fresh numbers
+   (`USAGE_FRESH_S`, every counted row known): stay, `<live> is below <until>% (step i of
+   n)`; else stay, `no fresh numbers for <live>`. At a step of another account: it
+   qualifies when it is usable (§17 rule 5: `ok`, identified, not excluded, not live), not
+   fenced at this `until`, and fresh numbers put every counted row below `until`.
+5. The first account that qualifies is the target. If the live account is over the limit
+   of any of its own steps, switch now, whatever the cooldown: `<live> at <n>% <session |
+   weekly | weekly Model>`. Otherwise the target outranks a step where the live account
+   still has room, and the cooldown applies: `<target> is at <n>%, below its <until>% step`.
+6. No step qualifies: each policy account that is the live one or usable is ready when
+   every counted row over its highest `until` has reset (`limited_until`), or at its fence,
+   whichever is later; unknown is not a candidate. The soonest wins, ties in step order. It
+   is the live account: stay; another: switch; nothing: stay, `no account with headroom`.
+   The reason is `every account is at its limit; <account> resets first`.
+
+`Decision.limit` is the limit the live account is left at (the highest of its own limits it
+is over, the threshold under §17), and the tick stores it as `auto.json` `limit` with
+`until` computed at it. **The fence holds at that limit and below**: an account left at 85%
+cannot come back at an 85% step before what limited it resets, but its 99% step is open. A
+record without `limit` (0.3.0, an undo) fences every limit.
+
+A `vibe switch` is not recorded, so a person who switches to an account the policy would
+not choose is switched back by the next tick (after the cooldown, when one applies).
+`vibe auto off` holds an account by hand.
+
+Fast polling (§14): with a policy, the live account is `fast` while a counted row is within
+`FAST_POLL_MARGIN` (9) below one of its own step limits and not over it.
+
+`vibe auto status` with a policy prints `policy`, `cooldown`, `step` and `next step` in
+place of `threshold`; the step is the first one that qualifies now (for the live account,
+being below its limit), the next step the first one on another account. Both are `unknown`
+while the pointer disagrees, since nothing is collected then.
+
+### `vibe add [alias] --from-config-dir DIR`
+
+Claude Code started with `CLAUDE_CONFIG_DIR=DIR` keeps its login in the Keychain item
+`Claude Code-credentials-` + the first 8 hex digits of `sha256(NFC(DIR))`, and its profile in
+`DIR/.claude.json`. `DIR` is made absolute and `~`-expanded with no trailing slash, and
+symlinks are not resolved: Claude Code hashes the path it was given. Off macOS the login is
+`DIR/.credentials.json`. `keychain.config_dir_port` returns a `MacKeychain` or
+`FileKeychain` on that item or file, and the import only ever calls `read` on it;
+`cli.Context.port_for` carries it so tests pass a `FakeKeychain`.
+
+The import parses the blob, reads `oauthAccount`, and writes an `ok` account, as a bare
+`vibe add` does, with the alias given or one derived from the email. No request, no refresh,
+no Keychain write, `active` unchanged, and the alias's stash deleted. It refuses: no login
+(`NeedsLoginError`, `CLAUDE_CONFIG_DIR=DIR claude /login`), no `accountUuid`
+(`UsageError`), the active account's alias, and an alias that holds another uuid. A login
+whose refresh token is already stored is reported as that account. Measured once: the item
+for `/Users/stephanplakunov/.claude-extra` is `Claude Code-credentials-702813c4`.
+
+### `status.json` and `vibe statusline`
+
+```json
+{"schema": 1, "written_at": 1757930000.0, "live": "extra", "active": "extra",
+ "accounts": [{"alias": "main", "state": "ok", "fetched_at": 1757929990.0,
+               "rows": [{"kind": "session", "label": "Session", "percent": 100,
+                         "resets_at": 1757937000.0}]}],
+ "policy": {…} | null,
+ "last_switch": {"from": "main", "to": "extra", "at": 1757929000.0, "reason": "…"} | null}
+```
+
+`auto.publish_status` builds it from the account files and the shared usage caches (§14),
+never from one command's views, and writes it with `write_private`. Times are epoch
+seconds; `live` is `store.live_alias` when the writer looked, else `null`. Writers: `vibe
+list`, `usage --once`, `vibe --json`, `auto status`, every `auto tick`, every TUI cycle and
+every web snapshot. A failed write is swallowed.
+
+`vibe statusline` reads that file and nothing else, and prints `▶ <live or active>` and one
+`<alias>: <rows>` per account, joined by ` · `. Rows are `5h` (session), `wk` (weekly_all)
+and a counted model's own row, each `<percent>%` plus `(resets HH:MM)` in local time today or
+`(resets Mon HH:MM)` on another day. A row with no percent, or whose reset has passed, is
+left out; an account with none left reads `<alias>: -`, a `needs_login` one
+`<alias>: needs login`. Numbers fetched more than `STALE_S` (15 min) ago, or in the future,
+get a `?`. A missing or unreadable file prints `vibe: no status yet`. Exit 0 always. No
+emoji.
+
+The console scripts start in `entry.main`, which hands `statusline` with no other argument
+to `statusline.main` before importing `cli`, and `__version__` is resolved on first use:
+measured 25 ms median for `vibe statusline` against 173 ms for `vibe --version` on the
+fork's machine. `tests/test_statusline.py` pins that a child process answering it never
+loads `vibemaxxing.cli`, `textual`, `urllib.request` or `importlib.metadata`.
+

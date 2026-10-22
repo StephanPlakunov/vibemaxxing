@@ -33,6 +33,27 @@ vibe switch side          # Claude Code is now that account
 `vibe add` with no name takes the login already in Claude Code, no browser and no
 network. That is the fastest way in: one command and you have your first account stored.
 
+### Import a login from a second config dir
+
+If you already run a second account under its own Claude Code config dir
+(`CLAUDE_CONFIG_DIR=~/.claude-work claude`), take that login over without a browser:
+
+```
+vibe add work --from-config-dir ~/.claude-work
+```
+
+It reads the Keychain item Claude Code keeps for that dir (`Claude Code-credentials-`
+plus the first 8 hex digits of the sha256 of the dir's absolute path; on Linux
+`<dir>/.credentials.json`) and the `oauthAccount` in `<dir>/.claude.json`, and stores the
+account like `vibe add` does. No request, no refresh, no Keychain write, and the active
+account does not change. It refuses a dir with no login, a profile with no account id
+(auto-switch could never tell that account apart), the active account's name, and a name
+another account already holds.
+
+**After the import, stop using that config dir.** vibe now refreshes the login, and a
+refresh rotates the refresh token: whichever of the two copies refreshes second is logged
+out.
+
 ## Every day
 
 ```
@@ -44,6 +65,7 @@ vibe run <name> -- <cmd>      run one command as one account
 vibe remove <name>            forget an account
 vibe alias <old> <new>        rename one
 vibe auto on|off|status       switch accounts by itself, see below
+vibe statusline               one line for Claude Code's status line, see below
 vibe help                     what each command is for
 ```
 
@@ -99,6 +121,59 @@ It is deliberately timid:
 The 99% and the 15 minutes live in `~/.vibemaxxing/settings.json`. The dashboards show
 whether it is on and the last switch, and cannot change it.
 
+Every automatic switch raises a notification titled "vibemaxxing", such as `Switched to
+extra: main at 85% weekly`, through `/opt/homebrew/bin/terminal-notifier` when it is
+installed and through `osascript` otherwise.
+
+### An ordered policy
+
+Instead of "the one with the most room at 99%", you can give the order accounts are used
+in. Add a `policy` to `~/.vibemaxxing/settings.json`:
+
+```json
+{"schema": 1, "auto_switch": true, "threshold": 99, "cooldown_s": 900, "excluded": [],
+ "policy": {"mode": "ordered",
+            "steps": [{"account": "main", "until": 85},
+                      {"account": "extra", "until": 99},
+                      {"account": "main", "until": 99}],
+            "then": "earliest_reset"}}
+```
+
+That reads: main until 85%, then extra until 99%, then main until 99%, then whichever
+account gets room back first. Each tick walks the steps and puts Claude Code on the first
+account whose session and weekly rows are all below that step's `until`, on fresh numbers
+and a usable login. Model rows such as "Weekly · Fable" count only when named:
+`"block_models": ["Fable"]`. When no step has room, it picks the account whose limiting
+rows reset first.
+
+- **Leaving an account at or over one of its limits is never delayed**, even right after a
+  switch. The 15-minute cooldown holds only a switch to an account that outranks one where
+  the live account still has room, such as going back to main after its weekly reset.
+- Every guard above still holds. It stays when it has no fresh numbers for the live account,
+  when the live account is unknown or the pointer is wrong, and when the live account is not
+  in the policy (that was your choice). It never switches onto an account that is excluded,
+  dead, stored without an account id, or has stale numbers. An account left at 85% stays
+  out of the 85% step until what limited it has reset; its 99% step is still open.
+- The policy is followed, so **a `vibe switch` to an account in the policy is undone by the
+  next tick** when the policy says otherwise. Run `vibe auto off` to hold an account by hand.
+- A policy that is wrong anywhere leaves the whole file at the defaults, so auto-switch is
+  off. `vibe auto status` shows the policy, the step it is on now and the next one:
+
+```
+$ vibe auto status
+auto-switch  on
+policy       ordered: main until 85% -> extra until 99% -> main until 99%, then earliest reset
+cooldown     900s
+excluded     none
+live         main
+step         1 of 3: main until 85%
+last switch  none
+next step    2 of 3: extra until 99%
+```
+
+The live account is asked for numbers every minute while it is within 9 points below one of
+its own limits (76-84% and 90-98% above), not every three.
+
 `vibe auto install` only **writes** `~/Library/LaunchAgents/de.intra-ai.vibemaxxing-auto.plist`.
 Loading it is yours to do, with the one `launchctl bootstrap` line it prints, so nothing
 starts running behind your back. Anywhere else, run `vibe auto tick` from cron or a systemd
@@ -111,6 +186,26 @@ session that stays on the old account and later refreshes its own token may over
 Keychain with it. Both are untested. `scripts/verify_auto_live.py` is the check for the part
 that can be tested by hand: it does a real switch between two throwaway accounts and asserts
 the Keychain holds the incoming credential.
+
+### Status line
+
+Every command that collects usage (`vibe list`, the dashboards, `vibe auto status`) and
+every `vibe auto tick` writes `~/.vibemaxxing/status.json`: the live account, each
+account's rows with their reset times, when they were fetched, the policy and the last
+switch. `vibe statusline` prints one line from that file and nothing else: no Keychain, no
+request, about 25 ms.
+
+```
+▶ extra · main: 5h 100% (resets 19:30) wk 93% (resets Mon 00:00) · extra: 5h 28% (resets 23:10)
+```
+
+Times are local: `HH:MM` today, weekday and time otherwise. A row whose window has rolled
+over since it was read is left out, and numbers older than 15 minutes get a `?`. To show it
+in Claude Code, add this to `~/.claude/settings.json`:
+
+```json
+{"statusLine": {"type": "command", "command": "vibe statusline"}}
+```
 
 ### See what is left
 
@@ -214,7 +309,8 @@ access token needs a re-run. Every grandchild inherits the variable.
 
 **Switching does not reach a running session.** `vibe switch` makes no attempt to signal
 a live Claude Code process. Restart it, or use `vibe run`. Automatic switching has the same
-limit, and the untested caveat above it.
+limit, and the untested caveat above it. An ordered policy switches more often than the
+default rule (at 85% and back after a reset), so it meets that caveat more often.
 
 **`vibe switch` can now refuse.** It will not write an account whose login has lapsed or
 was rejected by the server (`vibe add <name>` fixes it), and it will not overwrite a Claude
