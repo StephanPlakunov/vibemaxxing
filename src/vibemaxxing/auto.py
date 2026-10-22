@@ -31,11 +31,14 @@ from vibemaxxing.keychain import KeychainPort
 from vibemaxxing.pool import (
     DEFAULT_COOLDOWN_S,
     DEFAULT_THRESHOLD,
+    EARLIEST_RESET,
     MAX_THRESHOLD,
     MIN_THRESHOLD,
     LastSwitch,
+    Policy,
     Reading,
     Settings,
+    Step,
 )
 
 SCHEMA_VERSION: Final = 1
@@ -44,6 +47,9 @@ TICK_INTERVAL_S: Final = 60
 # The live account is polled at the 60 s floor, not the 3 minute cadence, once a trigger
 # row is this full: finding out late that it is spent costs the work in flight.
 FAST_POLL_PERCENT: Final = 90
+# The same distance below each limit of an ordered policy: 76% for a step until 85%.
+FAST_POLL_MARGIN: Final = DEFAULT_THRESHOLD - FAST_POLL_PERCENT
+ORDERED: Final = "ordered"
 OSASCRIPT_BIN: Final = "/usr/bin/osascript"
 OSASCRIPT_TIMEOUT_S: Final = 5.0
 
@@ -79,6 +85,46 @@ def _time(value: object) -> float | None:
     return seconds
 
 
+def _parse_policy(raw: object) -> Policy | None:
+    """The `policy` member: absent is the default rule, and None means it is wrong anywhere."""
+    if raw is None:
+        return Policy()
+    if not isinstance(raw, dict) or raw.get("mode") != ORDERED:
+        return None
+    steps, models = raw.get("steps"), raw.get("block_models", [])
+    if raw.get("then", EARLIEST_RESET) != EARLIEST_RESET:
+        return None
+    if not isinstance(steps, list) or not steps:
+        return None
+    if not isinstance(models, list) or not all(isinstance(m, str) and m.strip() for m in models):
+        return None
+    parsed: list[Step] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            return None
+        account, until = step.get("account"), _int(step.get("until"))
+        if not isinstance(account, str) or not store.valid_alias(account):
+            return None
+        if until is None or not 1 <= until <= MAX_THRESHOLD:
+            return None
+        parsed.append(Step(account, until))
+    return Policy(tuple(parsed), tuple(str(model).strip() for model in models))
+
+
+def policy_document(policy: Policy) -> dict[str, object] | None:
+    """The policy as settings.json spells it; None for the default rule, which has no member."""
+    if not policy.steps:
+        return None
+    document: dict[str, object] = {
+        "mode": ORDERED,
+        "steps": [{"account": step.account, "until": step.until} for step in policy.steps],
+        "then": EARLIEST_RESET,
+    }
+    if policy.block_models:
+        document["block_models"] = list(policy.block_models)
+    return document
+
+
 def _parse_settings(root: Path) -> Settings | None:
     """The settings, or None when the file is missing or wrong anywhere."""
     try:
@@ -91,6 +137,7 @@ def _parse_settings(root: Path) -> Settings | None:
     threshold = _int(parsed.get("threshold", DEFAULT_THRESHOLD))
     cooldown = _int(parsed.get("cooldown_s", DEFAULT_COOLDOWN_S))
     excluded = parsed.get("excluded", [])
+    policy = _parse_policy(parsed.get("policy"))
     if (
         not isinstance(enabled, bool)
         or threshold is None
@@ -99,9 +146,12 @@ def _parse_settings(root: Path) -> Settings | None:
         or cooldown < 0
         or not isinstance(excluded, list)
         or not all(isinstance(alias, str) and store.valid_alias(alias) for alias in excluded)
+        or policy is None
     ):
         return None
-    return Settings(enabled, threshold, cooldown, tuple(dict.fromkeys(str(a) for a in excluded)))
+    return Settings(
+        enabled, threshold, cooldown, tuple(dict.fromkeys(str(a) for a in excluded)), policy
+    )
 
 
 def read_settings(root: Path) -> Settings:
@@ -145,6 +195,9 @@ def write_settings(root: Path, settings: Settings) -> None:
         "cooldown_s": settings.cooldown_s,
         "excluded": list(settings.excluded),
     }
+    policy = policy_document(settings.policy)
+    if policy is not None:
+        document["policy"] = policy
     write_private(settings_path(root), json.dumps(document, indent=2) + "\n")
 
 
@@ -164,7 +217,9 @@ def read_last(root: Path) -> LastSwitch | None:
         return None
     if at is None:
         return None
-    return LastSwitch(origin, target, at, reason, _time(parsed.get("until")))
+    return LastSwitch(
+        origin, target, at, reason, _time(parsed.get("until")), _int(parsed.get("limit"))
+    )
 
 
 def write_last(root: Path, last: LastSwitch) -> None:
@@ -176,16 +231,20 @@ def write_last(root: Path, last: LastSwitch) -> None:
         "at": last.at_s,
         "reason": last.reason,
         "until": last.until_s,
+        "limit": last.limit,
     }
     write_private(last_path(root), json.dumps(document, indent=2) + "\n")
 
 
 def rename(root: Path, old: str, new: str) -> None:
-    """Follow `vibe alias`: an exclusion and the last-switch record name accounts by alias."""
+    """Follow `vibe alias`: exclusions, policy steps and the last switch name accounts by alias."""
     settings = _parse_settings(root)
-    if settings is not None and old in settings.excluded:
+    steps = settings.policy.steps if settings is not None else ()
+    if settings is not None and (old in settings.excluded or any(s.account == old for s in steps)):
         excluded = tuple(new if alias == old else alias for alias in settings.excluded)
-        write_settings(root, replace(settings, excluded=excluded))
+        moved = tuple(Step(new, s.until) if s.account == old else s for s in steps)
+        policy = replace(settings.policy, steps=moved)
+        write_settings(root, replace(settings, excluded=excluded, policy=policy))
     last = read_last(root)
     if last is not None and old in (last.from_alias, last.to_alias):
         write_last(
@@ -211,12 +270,27 @@ def _readings(views: Sequence[AccountView]) -> list[Reading]:
     ]
 
 
-def _is_hot(root: Path, alias: str, now_s: float) -> bool:
-    """Whether the cached answer for ``alias`` already has a trigger row at FAST_POLL_PERCENT."""
+def _is_hot(root: Path, alias: str, now_s: float, settings: Settings) -> bool:
+    """Whether the cached answer for ``alias`` is close enough to a limit to poll every minute.
+
+    The default rule: a trigger row at FAST_POLL_PERCENT. An ordered policy: a row that
+    counts within FAST_POLL_MARGIN below one of the account's own step limits, and not
+    over it -- past 85% the next limit is 99%, and polling a spent account fast buys nothing.
+    """
     cached = store.read_usage_cache(root, alias)
     if cached is None or cached.payload is None:
         return False
-    return bool(pool.blocking(usage.summarize(cached.payload).rows, FAST_POLL_PERCENT, now_s))
+    rows = usage.summarize(cached.payload).rows
+    policy = settings.policy
+    if not policy.steps:
+        return bool(pool.blocking(rows, FAST_POLL_PERCENT, now_s))
+    models = policy.block_models
+    return any(
+        pool.blocking(rows, step.until - FAST_POLL_MARGIN, now_s, models=models)
+        and not pool.blocking(rows, step.until, now_s, models=models)
+        for step in policy.steps
+        if step.account == alias
+    )
 
 
 @dataclass(frozen=True)
@@ -260,7 +334,8 @@ def tick(
         )
 
     last = read_last(root)
-    fast: frozenset[str] = frozenset({live}) if _is_hot(root, live, now_s) else frozenset()
+    hot = _is_hot(root, live, now_s, settings)
+    fast: frozenset[str] = frozenset({live}) if hot else frozenset()
     views = envelope.collect(root, client=client, port=port, now_s=now_s, fast=fast)
     decision = pool.decide(_readings(views), settings=settings, live=live, now_s=now_s, last=last)
     if decision.action == "stay" or decision.target is None:
@@ -279,7 +354,10 @@ def tick(
         return _stay(exc.message)
 
     rows = next((v.summary.rows for v in views if v.alias == live and v.summary is not None), ())
+    limit = decision.limit if decision.limit is not None else settings.threshold
+    models = settings.policy.block_models
     line = f"switched {live} -> {target}: {decision.reason}"
+    notice = f"Switched to {target}: {decision.reason}"
     try:
         write_last(
             root,
@@ -288,14 +366,16 @@ def tick(
                 target,
                 now_s,
                 decision.reason,
-                pool.limited_until(rows, settings.threshold, now_s),
+                pool.limited_until(rows, limit, now_s, models=models),
+                limit,
             ),
         )
     except OSError as exc:
         # The switch landed. Raising here would hide that and skip the notification; the
         # cost of the missing record is a cooldown and a memory of why `live` was left.
-        line += f" (not recorded: {exc.__class__.__name__})"
-    notify(line)
+        unrecorded = f" (not recorded: {exc.__class__.__name__})"
+        line, notice = line + unrecorded, notice + unrecorded
+    notify(notice)
     return TickResult(line, switched=True)
 
 
@@ -320,6 +400,10 @@ class Status:
     active: str | None
     last: LastSwitch | None
     next_alias: str | None
+    # An ordered policy only: the step it is on now and the one a switch would go to,
+    # as 0-based indexes into settings.policy.steps.
+    step: int | None = None
+    next_step: int | None = None
 
 
 def status(root: Path, *, client: HttpClient, port: KeychainPort, now_s: float) -> Status:
@@ -327,15 +411,17 @@ def status(root: Path, *, client: HttpClient, port: KeychainPort, now_s: float) 
     live = store.live_alias(root, port)
     active = store.read_active(root)
     last = read_last(root)
-    next_alias = None
     # Not when the pointer disagrees: collecting would poll the live account as if it
     # were any other, which the tick refuses to do for the same reason.
-    if live is not None and live == active:
-        views = envelope.collect(root, client=client, port=port, now_s=now_s)
-        next_alias = pool.next_candidate(
-            _readings(views), settings=settings, live=live, now_s=now_s, last=last
-        )
-    return Status(settings, live, active, last, next_alias)
+    if live is None or live != active:
+        return Status(settings, live, active, last, None)
+    views = envelope.collect(root, client=client, port=port, now_s=now_s)
+    readings = _readings(views)
+    next_alias = pool.next_candidate(readings, settings=settings, live=live, now_s=now_s, last=last)
+    step, next_step = pool.ordered_steps(
+        readings, settings=settings, live=live, now_s=now_s, last=last
+    )
+    return Status(settings, live, active, last, next_alias, step, next_step)
 
 
 def notify_macos(message: str) -> None:

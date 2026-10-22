@@ -29,7 +29,7 @@ from vibemaxxing.errors import (
 from vibemaxxing.httpclient import HttpClient, UrllibClient
 from vibemaxxing.keychain import KeychainPort, default_port
 from vibemaxxing.models import AccountState
-from vibemaxxing.pool import dry_in
+from vibemaxxing.pool import Policy, dry_in
 from vibemaxxing.redact import err, install_excepthook, out
 from vibemaxxing.web import LOOPBACK
 
@@ -339,8 +339,24 @@ def cmd_auto_include(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
+def _render_policy(policy: Policy) -> str:
+    steps = " -> ".join(f"{step.account} until {step.until}%" for step in policy.steps)
+    text = f"ordered: {steps}, then earliest reset"
+    if policy.block_models:
+        text += f"; {', '.join(policy.block_models)} weekly rows count too"
+    return text
+
+
+def _render_step(policy: Policy, index: int | None) -> str:
+    if index is None:
+        return "none has room - earliest reset"
+    step = policy.steps[index]
+    return f"{index + 1} of {len(policy.steps)}: {step.account} until {step.until}%"
+
+
 def _render_status(status: auto.Status) -> str:
     settings = status.settings
+    policy = settings.policy
     live = status.live or "unknown"
     if status.live is not None and status.active != status.live:
         live += f"  (vibe's active account is {status.active or 'unset'}"
@@ -351,13 +367,26 @@ def _render_status(status: auto.Status) -> str:
         last = (
             f"{status.last.from_alias} -> {status.last.to_alias} at {when}  ({status.last.reason})"
         )
+    if not policy.steps:
+        return (
+            f"auto-switch  {'on' if settings.auto_switch else 'off'}\n"
+            f"threshold    {settings.threshold}%  cooldown {settings.cooldown_s}s\n"
+            f"excluded     {', '.join(settings.excluded) or 'none'}\n"
+            f"live         {live}\n"
+            f"last switch  {last}\n"
+            f"next         {status.next_alias or 'none'}\n"
+        )
+    # Collected only while the pointer agrees with the live account; otherwise unknown.
+    known = status.live is not None and status.live == status.active
     return (
         f"auto-switch  {'on' if settings.auto_switch else 'off'}\n"
-        f"threshold    {settings.threshold}%  cooldown {settings.cooldown_s}s\n"
+        f"policy       {_render_policy(policy)}\n"
+        f"cooldown     {settings.cooldown_s}s\n"
         f"excluded     {', '.join(settings.excluded) or 'none'}\n"
         f"live         {live}\n"
+        f"step         {_render_step(policy, status.step) if known else 'unknown'}\n"
         f"last switch  {last}\n"
-        f"next         {status.next_alias or 'none'}\n"
+        f"next step    {_render_step(policy, status.next_step) if known else 'unknown'}\n"
     )
 
 
@@ -374,6 +403,9 @@ def cmd_auto_status(args: argparse.Namespace, ctx: Context) -> int:
             active=status.active,
             last_switch=envelope.last_switch_entry(status.last),
             next=status.next_alias,
+            policy=auto.policy_document(status.settings.policy),
+            step=None if status.step is None else status.step + 1,
+            next_step=None if status.next_step is None else status.next_step + 1,
         ),
         as_json=args.json,
         human=_render_status(status),

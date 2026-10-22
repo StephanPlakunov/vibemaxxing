@@ -22,6 +22,9 @@ PROFILE_URL: Final = "https://api.anthropic.com/api/oauth/profile"
 BETA_HEADER: Final = "oauth-2025-04-20"
 
 _LABELS: Final = {"session": "Session", "weekly_all": "Weekly · all models"}
+# A weekly_scoped row is labelled with this and its model's name, which is how the
+# ordered policy finds the models it was told to count.
+SCOPED_LABEL_PREFIX: Final = "Weekly · "
 
 
 def _get(client: HttpClient, url: str, token: Secret, timeout_s: float) -> dict[str, object]:
@@ -112,7 +115,7 @@ def _label(entry: Mapping[str, object], kind: str) -> str:
     if kind == "weekly_scoped":
         name = _scoped_name(entry)
         if name is not None:
-            return f"Weekly · {name}"
+            return f"{SCOPED_LABEL_PREFIX}{name}"
     return _LABELS.get(kind) or kind.replace("_", " ").capitalize()
 
 
