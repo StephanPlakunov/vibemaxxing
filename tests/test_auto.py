@@ -833,9 +833,11 @@ def test_install_is_macos_only(
 
 
 def test_notify_passes_the_message_as_an_argument_never_as_script(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
+    # The osascript fallback: this machine may have terminal-notifier, the test must not care.
+    monkeypatch.setattr(auto, "TERMINAL_NOTIFIER_BIN", str(tmp_path / "absent"))
     calls: list[list[str]] = []
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -881,3 +883,68 @@ def test_last_switch_that_is_unreadable_is_no_record(tmp_home: Path) -> None:
     for raw in ("", "{ nope", '{"schema": 2}', '{"schema": 1, "from": "a"}', "[]"):
         (root / "auto.json").write_text(raw)
         assert auto.read_last(root) is None, raw
+
+
+def _notifier(tmp_path: Path) -> str:
+    path = tmp_path / "terminal-notifier"
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_notify_uses_terminal_notifier_when_it_is_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    notifier = _notifier(tmp_path)
+    monkeypatch.setattr(auto, "TERMINAL_NOTIFIER_BIN", notifier)
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    message = 'Switched to extra: main at 85% weekly" & (do shell script "x")'
+
+    auto.notify_macos(message)
+
+    assert calls == [[notifier, "-title", "vibemaxxing", "-message", message]]
+
+
+def test_notify_falls_back_to_osascript_when_terminal_notifier_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    notifier = _notifier(tmp_path)
+    monkeypatch.setattr(auto, "TERMINAL_NOTIFIER_BIN", notifier)
+    calls: list[str] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv[0])
+        if argv[0] == notifier:
+            return subprocess.CompletedProcess(argv, 1, "", "no GUI session")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    auto.notify_macos("Switched to extra: main at 85% weekly")
+    assert calls == [notifier, "/usr/bin/osascript"]
+
+    def broken(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv[0])
+        if argv[0] == notifier:
+            raise subprocess.TimeoutExpired(notifier, 5)
+        raise OSError("and osascript is gone too")
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", broken)
+    auto.notify_macos("Switched to extra: main at 85% weekly")
+    assert calls == [notifier, "/usr/bin/osascript"], "every failure swallowed"
+
+
+def test_a_switch_notifies_once_with_who_and_why(tmp_home: Path) -> None:
+    w = world(tmp_home, {"a": (99, 30), "b": (10, 10)})
+
+    w.tick()
+
+    assert w.notes == ["Switched to b: a session at 99%; b is at 10%"]
