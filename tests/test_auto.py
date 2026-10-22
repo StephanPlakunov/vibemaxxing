@@ -218,7 +218,7 @@ def test_tick_switches_and_records(tmp_home: Path, capsys: pytest.CaptureFixture
     assert (last.from_alias, last.to_alias, last.at_s) == ("a", "b", NOW_S)
     assert last.reason in line
     assert json.loads((w.root / "auto.json").read_text())["from"] == "a"
-    assert w.notes == [line], "one notification, naming the switch"
+    assert w.notes == [f"Switched to b: {last.reason}"], "one notification, naming the switch"
     assert w.client.requests == [], "the fresh caches answered; no request was needed"
 
 
@@ -422,7 +422,9 @@ def test_tick_still_reports_a_switch_it_could_not_record(
     assert result.switched is True
     assert result.line.startswith("switched a -> b")
     assert "not recorded" in result.line
-    assert store.read_active(w.root) == "b" and w.notes == [result.line]
+    assert store.read_active(w.root) == "b"
+    (note,) = w.notes
+    assert note.startswith("Switched to b: ") and note.endswith("(not recorded: OSError)")
 
 
 def test_tick_respects_the_cooldown(tmp_home: Path) -> None:
