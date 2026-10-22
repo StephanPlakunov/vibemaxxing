@@ -171,6 +171,27 @@ It talks to three hosts and no others — `claude.ai`, `platform.claude.com`,
 version pings, no analytics, no telemetry. The web dashboard binds `127.0.0.1`, and
 `--host` with anything else is a hard error.
 
+It is not a third-party client. Claude Code goes on talking to Anthropic as itself, using
+a credential you got by logging in the normal way — the same state you would reach by
+hand with `/logout` and `/login`. Several subscriptions of your own is a question between
+you and Anthropic; sharing one login between people is not what this is for, and not
+something it helps you do.
+
+## Other tools that do this
+
+Several Claude Code account switchers exist. [claude-swap](https://github.com/realiti4/claude-swap)
+is the mature one, and it also switches for you when an account nears its limit.
+vibemaxxing does that too (`vibe auto`, off until you turn it on), so the difference is
+not the switching.
+
+Two things I could not find anywhere else, which is why this exists:
+
+**A pooled number.** `account-weeks` answers "how much Claude do I have left in total".
+Three percentages of three differently-sized weekly windows do not.
+
+**The week ahead.** One lane per account, a marker where each weekly limit resets, in
+your timezone — so you can see whether the headroom comes back before the deadline does.
+
 ## Known limitations
 
 Real and deliberate. None of these is a bug report.
@@ -231,7 +252,8 @@ active stays active.
 
 ## Contributing
 
-Issues and pull requests welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the setup and
+Questions go to [Discussions → Q&A](https://github.com/jskarbecki/vibemaxxing/discussions/categories/q-a);
+bugs and pull requests to issues. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the setup and
 the one command CI runs. [`docs/CONTRACT.md`](docs/CONTRACT.md) is the frozen design and
 the authority on any question of intent.
 
