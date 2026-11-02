@@ -7,6 +7,8 @@ the cases are written against; it is the one this fork was made for.
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,8 +25,10 @@ from vibemaxxing.pool import (
     Settings,
     Step,
     decide,
+    limited_until,
     next_candidate,
     ordered_steps,
+    weekly_limit,
 )
 from vibemaxxing.usage import Row
 
@@ -545,3 +549,210 @@ def test_an_account_seeded_without_uuid_is_unidentified(tmp_home: Path) -> None:
     seed_account(w.root, "extra", credential=make_credential(access="extra-file"))
 
     assert w.tick().line == "stay: main is below 99% (step 3 of 3)"
+
+
+# --- the weekly cap by weekday -------------------------------------------------------
+
+CAPS = (20, 40, 60, 80, 100, 100, 100)
+CAPPED = Policy((Step("main", 85, CAPS), Step("extra", 99), Step("main", 99)))
+CAPPED_ON = Settings(auto_switch=True, policy=CAPPED)
+
+
+@pytest.fixture
+def berlin(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def at(day: int, hour: int = 12) -> float:
+    """Local time on 2026-10-<day> (Mon 26, Tue 27, ... Sun 1 Nov is day 32)."""
+    return datetime(2026, 10, day, hour).timestamp()
+
+
+def capped(*readings: Reading, live: str, now: float, last: LastSwitch | None = None):
+    return run(*readings, live=live, now=now, last=last, settings=CAPPED_ON)
+
+
+@pytest.mark.usefixtures("berlin")
+@pytest.mark.parametrize(
+    ("day", "weekly", "action"),
+    [
+        (26, 19, "stay"),
+        (26, 20, "switch"),
+        (27, 39, "stay"),
+        (27, 40, "switch"),
+        (29, 79, "stay"),
+        (29, 80, "switch"),
+        (30, 84, "stay"),  # Friday: the cap is 100, so the 85% step is the limit
+        (30, 85, "switch"),
+    ],
+)
+def test_main_leaves_at_the_weekly_cap_of_the_day(day: int, weekly: int, action: str) -> None:
+    now = at(day)
+    main = reading("main", 10, weekly, now=now)
+    extra = reading("extra", 10, 10, now=now)
+
+    assert capped(main, extra, live="main", now=now)[:2] == (
+        action,
+        "extra" if action == "switch" else None,
+    )
+
+
+@pytest.mark.usefixtures("berlin")
+def test_the_reason_names_the_cap_and_the_limit_stays_85() -> None:
+    now = at(27)
+
+    action, target, reason, limit = capped(
+        reading("main", 10, 56, now=now), reading("extra", 17, 0, now=now), live="main", now=now
+    )
+
+    assert (action, target, limit) == ("switch", "extra", 85)
+    assert reason == "main at 56% weekly, over today's 40% weekly cap"
+
+
+@pytest.mark.usefixtures("berlin")
+def test_main_over_the_cap_with_extra_spent_borrows_from_later_days() -> None:
+    now = at(27)
+    main = reading("main", 10, 56, now=now)
+    extra = reading("extra", 99, 0, now=now)
+
+    assert capped(main, extra, live="extra", now=now)[:3] == (
+        "switch",
+        "main",
+        "extra at 99% session",
+    )
+    assert capped(main, extra, live="main", now=now)[:3] == (
+        "stay",
+        None,
+        "main is below 99% (step 3 of 3)",
+    )
+
+
+@pytest.mark.usefixtures("berlin")
+def test_main_over_the_cap_leaves_the_borrowed_step_once_extra_has_room_again() -> None:
+    now = at(27)
+    last = LastSwitch("extra", "main", now - 3 * HOUR, "extra at 99% session", None, 99)
+
+    assert capped(
+        reading("main", 10, 56, now=now),
+        reading("extra", 5, 0, now=now),
+        live="main",
+        now=now,
+        last=last,
+    )[:2] == ("switch", "extra")
+
+
+@pytest.mark.usefixtures("berlin")
+def test_the_cap_rising_at_midnight_brings_main_back() -> None:
+    tue, wed = at(27, 23), at(28, 1)
+    main_tue, extra_tue = reading("main", 10, 56, now=tue), reading("extra", 5, 0, now=tue)
+    main_wed, extra_wed = reading("main", 10, 56, now=wed), reading("extra", 5, 0, now=wed)
+
+    assert capped(main_tue, extra_tue, live="extra", now=tue)[0] == "stay"
+    assert capped(main_wed, extra_wed, live="extra", now=wed)[:2] == ("switch", "main")
+
+
+@pytest.mark.usefixtures("berlin")
+def test_leaving_main_over_the_cap_is_fenced_until_local_midnight_not_the_week() -> None:
+    now = at(27, 11)
+    rows = reading("main", 10, 56, now=now).rows
+    assert rows is not None
+
+    until = limited_until(rows, 85, now, weekly=weekly_limit(CAPPED.steps[0], now))
+
+    assert until == at(28, 0)
+    assert limited_until(rows, 85, now) is None, "without the cap nothing holds main back at 56%"
+
+
+@pytest.mark.usefixtures("berlin")
+def test_a_session_over_85_is_fenced_until_it_resets_not_midnight() -> None:
+    now = at(27, 11)
+    rows = reading("main", 90, 30, now=now).rows
+    assert rows is not None
+
+    assert limited_until(rows, 85, now, weekly=40) == now + 3 * HOUR
+
+
+@pytest.mark.usefixtures("berlin")
+def test_ordered_steps_use_the_cap_too() -> None:
+    now = at(27)
+    main, extra = reading("main", 10, 56, now=now), reading("extra", 5, 0, now=now)
+
+    assert ordered_steps([main, extra], settings=CAPPED_ON, live="main", now_s=now, last=None) == (
+        1,
+        1,
+    )
+    assert ordered_steps([main, extra], settings=CAPPED_ON, live="extra", now_s=now, last=None) == (
+        1,
+        2,
+    )
+
+
+def test_weekly_cap_reads_and_writes_back(tmp_home: Path) -> None:
+    root = tmp_home / ".vibemaxxing"
+    document = json.loads(json.dumps(BRIEF))
+    document["steps"][0]["weekly_cap"] = list(CAPS)
+    _write(root, {"schema": 1, "auto_switch": True, "policy": document})
+
+    settings = auto.read_settings(root)
+    auto.write_settings(root, settings)
+
+    assert settings == CAPPED_ON
+    assert json.loads(auto.settings_path(root).read_text())["policy"] == document
+
+
+@pytest.mark.parametrize("cap", [[20, 40], "20", [0] * 7, [101] * 7, [True] * 7, [1.5] * 7])
+def test_a_weekly_cap_that_is_not_seven_percents_means_the_defaults(
+    tmp_home: Path, cap: object
+) -> None:
+    root = tmp_home / ".vibemaxxing"
+    document = json.loads(json.dumps(BRIEF))
+    document["steps"][0]["weekly_cap"] = cap
+    _write(root, {"schema": 1, "auto_switch": True, "policy": document})
+
+    assert auto.read_settings(root) == Settings()
+
+
+def test_renaming_an_account_keeps_its_weekly_cap(tmp_home: Path) -> None:
+    w = world(tmp_home, {"main": (10, 10), "extra": (10, 10)}, live="main")
+    auto.write_settings(w.root, CAPPED_ON)
+
+    assert cli.main(["alias", "main", "primary"], context=w.context()) == 0
+
+    assert auto.read_settings(w.root).policy.steps[0] == Step("primary", 85, CAPS)
+
+
+@pytest.mark.usefixtures("berlin")
+def test_tick_leaves_main_over_the_cap_and_logs_it(tmp_home: Path) -> None:
+    now = at(27)
+    w = world(tmp_home, {"main": (10, 56), "extra": (10, 0)}, live="main")
+    auto.write_settings(w.root, CAPPED_ON)
+    for alias, (session, weekly) in (("main", (10, 56)), ("extra", (10, 0))):
+        cache(w.root, alias, payload(session, weekly, now=now), fetched_at=now - 10.0)
+
+    result = w.tick(now)
+
+    assert result.line == "switched main -> extra: main at 56% weekly, over today's 40% weekly cap"
+    last = auto.read_last(w.root)
+    assert last is not None and last.until_s == at(28, 0)
+    entry = json.loads((w.root / "ticks.jsonl").read_text().splitlines()[-1])
+    assert entry["switched"] is True and entry["line"] == result.line
+    assert entry["pct"] == {"extra": [10, 0], "main": [10, 56]}
+
+
+def test_a_stay_is_logged_every_five_minutes_not_every_minute(tmp_home: Path) -> None:
+    w = world(tmp_home, {"main": (10, 10), "extra": (10, 10)}, live="main")
+    auto.write_settings(w.root, ON)
+    start = 1_800_000_000.0  # a multiple of five minutes
+
+    for minute in range(10):
+        now = start + minute * 60.0
+        for alias in ("main", "extra"):
+            cache(w.root, alias, payload(10, 10, now=now), fetched_at=now - 10.0)
+        w.tick(now)
+
+    lines = (w.root / "ticks.jsonl").read_text().splitlines()
+    assert [json.loads(line)["at"] for line in lines] == [int(start), int(start) + 300]

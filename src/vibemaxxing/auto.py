@@ -26,7 +26,7 @@ from typing import Final
 from vibemaxxing import envelope, oauth, pool, statusline, store, usage
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, UsageError, VibeError
-from vibemaxxing.fsutil import private_dir, write_private
+from vibemaxxing.fsutil import FILE_MODE, private_dir, write_private
 from vibemaxxing.httpclient import HttpClient
 from vibemaxxing.keychain import KeychainPort
 from vibemaxxing.pool import (
@@ -50,6 +50,8 @@ TICK_INTERVAL_S: Final = 60
 FAST_POLL_PERCENT: Final = 90
 # The same distance below each limit of an ordered policy: 76% for a step until 85%.
 FAST_POLL_MARGIN: Final = DEFAULT_THRESHOLD - FAST_POLL_PERCENT
+# ticks.jsonl gets a line every this many seconds, and one for every switch.
+LOG_EVERY_S: Final = 300
 ORDERED: Final = "ordered"
 OSASCRIPT_BIN: Final = "/usr/bin/osascript"
 OSASCRIPT_TIMEOUT_S: Final = 5.0
@@ -89,6 +91,18 @@ def _time(value: object) -> float | None:
     return seconds
 
 
+def _weekly_cap(raw: object) -> tuple[int, ...] | None:
+    """A step's `weekly_cap`: absent is none, else seven percents for Monday..Sunday."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or len(raw) != 7:
+        return None
+    caps = [_int(cap) for cap in raw]
+    if any(cap is None or not 1 <= cap <= MAX_THRESHOLD for cap in caps):
+        return None
+    return tuple(cap for cap in caps if cap is not None)
+
+
 def _parse_policy(raw: object) -> Policy | None:
     """The `policy` member: absent is the default rule, and None means it is wrong anywhere."""
     if raw is None:
@@ -111,8 +125,18 @@ def _parse_policy(raw: object) -> Policy | None:
             return None
         if until is None or not 1 <= until <= MAX_THRESHOLD:
             return None
-        parsed.append(Step(account, until))
+        weekly_cap = _weekly_cap(step.get("weekly_cap"))
+        if weekly_cap is None:
+            return None
+        parsed.append(Step(account, until, weekly_cap))
     return Policy(tuple(parsed), tuple(str(model).strip() for model in models))
+
+
+def _step_document(step: Step) -> dict[str, object]:
+    document: dict[str, object] = {"account": step.account, "until": step.until}
+    if step.weekly_cap:
+        document["weekly_cap"] = list(step.weekly_cap)
+    return document
 
 
 def policy_document(policy: Policy) -> dict[str, object] | None:
@@ -121,7 +145,7 @@ def policy_document(policy: Policy) -> dict[str, object] | None:
         return None
     document: dict[str, object] = {
         "mode": ORDERED,
-        "steps": [{"account": step.account, "until": step.until} for step in policy.steps],
+        "steps": [_step_document(step) for step in policy.steps],
         "then": EARLIEST_RESET,
     }
     if policy.block_models:
@@ -246,7 +270,7 @@ def rename(root: Path, old: str, new: str) -> None:
     steps = settings.policy.steps if settings is not None else ()
     if settings is not None and (old in settings.excluded or any(s.account == old for s in steps)):
         excluded = tuple(new if alias == old else alias for alias in settings.excluded)
-        moved = tuple(Step(new, s.until) if s.account == old else s for s in steps)
+        moved = tuple(replace(s, account=new) if s.account == old else s for s in steps)
         policy = replace(settings.policy, steps=moved)
         write_settings(root, replace(settings, excluded=excluded, policy=policy))
     last = read_last(root)
@@ -324,6 +348,8 @@ def tick(
     """
     result, live = _tick(root, client=client, port=port, now_s=now_s, notify=notify)
     publish_status(root, live=live, now_s=now_s)
+    if result.switched or int(now_s) // LOG_EVERY_S != int(now_s - TICK_INTERVAL_S) // LOG_EVERY_S:
+        log_tick(root, result, live=live, now_s=now_s)
     return result
 
 
@@ -386,7 +412,7 @@ def _tick(
                 target,
                 now_s,
                 decision.reason,
-                pool.limited_until(rows, limit, now_s, models=models),
+                pool.limited_until(rows, limit, now_s, models=models, weekly=decision.weekly),
                 limit,
             ),
         )
@@ -493,6 +519,29 @@ def publish_status(root: Path, *, live: str | None, now_s: float) -> None:
     }
     with contextlib.suppress(OSError):
         statusline.write(root, document)
+
+
+def log_tick(root: Path, result: TickResult, *, live: str | None, now_s: float) -> None:
+    """Append one line to ticks.jsonl: who is live, each account's [5h, weekly] %, the outcome.
+
+    The only record of what the ticks did; status.json and auto.json keep just the latest.
+    Best effort, like publish_status.
+    """
+    percents: dict[str, list[object]] = {}
+    for alias in store.list_aliases(root):
+        rows = {row["kind"]: row["percent"] for row in _status_account(root, alias)["rows"]}  # type: ignore[attr-defined]
+        percents[alias] = [rows.get("session"), rows.get("weekly_all")]
+    entry = {
+        "at": int(now_s),
+        "live": live,
+        "pct": percents,
+        "switched": result.switched,
+        "line": result.line,
+    }
+    with contextlib.suppress(OSError):
+        fd = os.open(root / "ticks.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, FILE_MODE)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
 def publish(root: Path, *, port: KeychainPort, now_s: float) -> None:

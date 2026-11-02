@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Final, Literal
 
 from vibemaxxing.models import AccountState, Sample
@@ -78,6 +78,21 @@ class Step:
 
     account: str
     until: int
+    # Monday..Sunday: the weekly percent this step also stops at on that weekday (local time),
+    # so a week is spent evenly. Empty: only ``until`` counts.
+    weekly_cap: tuple[int, ...] = ()
+
+
+def weekly_limit(step: Step, now_s: float) -> int | None:
+    """The weekly percent ``step`` stops at today: ``until`` or today's cap, whichever is lower."""
+    if not step.weekly_cap:
+        return None
+    return min(step.until, step.weekly_cap[datetime.fromtimestamp(now_s).weekday()])
+
+
+def _next_midnight_s(now_s: float) -> float:
+    tomorrow = datetime.fromtimestamp(now_s).date() + timedelta(days=1)
+    return datetime.combine(tomorrow, time.min).timestamp()
 
 
 @dataclass(frozen=True)
@@ -147,6 +162,8 @@ class Decision:
     reason: str
     # The limit the live account was over when it is left; what LastSwitch.limit records.
     limit: int | None = None
+    # The weekly limit in force for that step today (see weekly_limit); None without a cap.
+    weekly: int | None = None
 
 
 def _stay(reason: str) -> Decision:
@@ -176,16 +193,27 @@ def _counts(row: Row, models: Sequence[str]) -> bool:
     return model in {name.casefold() for name in models}
 
 
-def _over(rows: Iterable[Row], threshold: int, models: Sequence[str] = ()) -> list[Row]:
+def _over(
+    rows: Iterable[Row], threshold: int, models: Sequence[str] = (), weekly: int | None = None
+) -> list[Row]:
+    """The rows at or over ``threshold``; the weekly_all row at ``weekly`` when that is given."""
     return [
         row
         for row in rows
-        if _counts(row, models) and row.percent is not None and row.percent >= threshold
+        if _counts(row, models)
+        and row.percent is not None
+        and row.percent
+        >= (weekly if weekly is not None and row.kind == WEEKLY_ALL_KIND else threshold)
     ]
 
 
 def blocking(
-    rows: Iterable[Row], threshold: int, now_s: float, *, models: Sequence[str] = ()
+    rows: Iterable[Row],
+    threshold: int,
+    now_s: float,
+    *,
+    models: Sequence[str] = (),
+    weekly: int | None = None,
 ) -> tuple[Row, ...]:
     """The trigger rows at or over ``threshold`` whose window has not reset yet.
 
@@ -194,7 +222,7 @@ def blocking(
     and one whose reset has passed says nothing about now.
     """
     found: list[Row] = []
-    for row in _over(rows, threshold, models):
+    for row in _over(rows, threshold, models, weekly):
         reset_s = _reset_s(row)
         if reset_s is None or reset_s > now_s:
             found.append(row)
@@ -202,10 +230,24 @@ def blocking(
 
 
 def limited_until(
-    rows: Iterable[Row], threshold: int, now_s: float, *, models: Sequence[str] = ()
+    rows: Iterable[Row],
+    threshold: int,
+    now_s: float,
+    *,
+    models: Sequence[str] = (),
+    weekly: int | None = None,
 ) -> float | None:
-    """When every row holding the account over ``threshold`` has reset; None if unknown."""
-    resets = [_reset_s(row) for row in blocking(rows, threshold, now_s, models=models)]
+    """When every row holding the account over ``threshold`` has reset; None if unknown.
+
+    A weekly row held back by today's cap alone (under ``threshold``) is free again when the
+    cap rises at local midnight, not when the week resets.
+    """
+    resets: list[float | None] = []
+    for row in blocking(rows, threshold, now_s, models=models, weekly=weekly):
+        if weekly is not None and row.kind == WEEKLY_ALL_KIND and (row.percent or 0) < threshold:
+            resets.append(_next_midnight_s(now_s))
+        else:
+            resets.append(_reset_s(row))
     known = [reset_s for reset_s in resets if reset_s is not None]
     if not known or len(known) != len(resets):
         return None
@@ -328,13 +370,23 @@ def _fresh(reading: Reading, now_s: float) -> bool:
     return reading.updated_at is not None and 0 <= now_s - reading.updated_at < USAGE_FRESH_S
 
 
-def _under(reading: Reading, limit: int, models: Sequence[str], now_s: float) -> int | None:
+def _under(
+    reading: Reading,
+    limit: int,
+    models: Sequence[str],
+    now_s: float,
+    weekly: int | None = None,
+) -> int | None:
     """How full ``reading`` is when fresh numbers put every row that counts below ``limit``.
 
     Only fresh numbers say an account is below a limit: a reading is a floor, so an old
     one that was below may not be any more.
     """
-    if reading.rows is None or not _fresh(reading, now_s) or _over(reading.rows, limit, models):
+    if (
+        reading.rows is None
+        or not _fresh(reading, now_s)
+        or _over(reading.rows, limit, models, weekly)
+    ):
         return None
     return trigger_percent(reading.rows, models)
 
@@ -375,7 +427,9 @@ def _qualifies(
         return None
     if _fenced(reading.alias, step.until, now_s, last):
         return None
-    return _under(reading, step.until, settings.policy.block_models, now_s)
+    return _under(
+        reading, step.until, settings.policy.block_models, now_s, weekly_limit(step, now_s)
+    )
 
 
 def ordered_steps(
@@ -398,7 +452,10 @@ def ordered_steps(
     for index, step in enumerate(settings.policy.steps):
         reading = by_alias.get(step.account)
         if step.account == live:
-            room = reading is not None and _under(reading, step.until, models, now_s) is not None
+            wk = weekly_limit(step, now_s)
+            room = (
+                reading is not None and _under(reading, step.until, models, now_s, wk) is not None
+            )
             if current is None and room:
                 current = index
             continue
@@ -438,29 +495,43 @@ def _decide_ordered(
     current = by_alias.get(live)
     if current is None or current.rows is None:
         return _stay(f"no fresh numbers for {live}")
-    own = [step.until for step in policy.steps if step.account == live]
+    own = [step for step in policy.steps if step.account == live]
     if not own:
         # A person put Claude Code on an account the policy does not name; that is theirs.
         return _stay(f"{live} is not in the policy")
-    # The limits of its own steps the live account is over: floors, true however old.
-    over = [limit for limit in own if blocking(current.rows, limit, now_s, models=models)]
+    # The steps of its own the live account is over: floors, true however old.
+    over = [
+        step
+        for step in own
+        if blocking(
+            current.rows, step.until, now_s, models=models, weekly=weekly_limit(step, now_s)
+        )
+    ]
     total = len(policy.steps)
     for index, step in enumerate(policy.steps):
         if step.account == live:
-            if step.until in over:
+            if step in over:
                 continue
-            if _under(current, step.until, models, now_s) is None:
+            cap = weekly_limit(step, now_s)
+            if _under(current, step.until, models, now_s, cap) is None:
                 return _stay(f"no fresh numbers for {live}")
-            return _stay(f"{live} is below {step.until}% (step {index + 1} of {total})")
+            capped = f" and {cap}% weekly today" if cap is not None and cap < step.until else ""
+            return _stay(f"{live} is below {step.until}%{capped} (step {index + 1} of {total})")
         reading = by_alias.get(step.account)
         fullness = _qualifies(reading, step, settings=settings, live=live, now_s=now_s, last=last)
         if fullness is None:
             continue
         if over:
             # Leaving an account at or over one of its limits is never delayed.
-            limit = max(over)
-            worst = max(blocking(current.rows, limit, now_s, models=models), key=_percent)
-            return Decision("switch", step.account, f"{live} at {_spent(worst)}", limit)
+            top = max(over, key=lambda own_step: own_step.until)
+            cap = weekly_limit(top, now_s)
+            worst = max(
+                blocking(current.rows, top.until, now_s, models=models, weekly=cap), key=_percent
+            )
+            reason = f"{live} at {_spent(worst)}"
+            if cap is not None and worst.kind == WEEKLY_ALL_KIND and _percent(worst) < top.until:
+                reason += f", over today's {cap}% weekly cap"
+            return Decision("switch", step.account, reason, top.until, cap)
         # The live account still has room; this one outranks it. The cooldown applies.
         if last is not None and abs(now_s - last.at_s) < settings.cooldown_s:
             return _stay(f"cooldown: last switch {int(abs(now_s - last.at_s))}s ago")
@@ -468,7 +539,7 @@ def _decide_ordered(
             "switch",
             step.account,
             f"{step.account} is at {fullness}%, below its {step.until}% step",
-            min(own),
+            min(own_step.until for own_step in own),
         )
     return _earliest_reset(by_alias, settings=settings, live=live, now_s=now_s, last=last)
 

@@ -434,7 +434,15 @@ def cmd_auto_include(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def _render_policy(policy: Policy) -> str:
-    steps = " -> ".join(f"{step.account} until {step.until}%" for step in policy.steps)
+    steps = " -> ".join(
+        f"{step.account} until {step.until}%"
+        + (
+            f" (weekly cap Mon-Sun {'/'.join(map(str, step.weekly_cap))}%)"
+            if step.weekly_cap
+            else ""
+        )
+        for step in policy.steps
+    )
     text = f"ordered: {steps}, then earliest reset"
     if policy.block_models:
         text += f"; {', '.join(policy.block_models)} weekly rows count too"
