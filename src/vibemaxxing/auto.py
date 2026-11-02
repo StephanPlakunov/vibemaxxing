@@ -214,6 +214,14 @@ def settings_for_edit(root: Path) -> Settings:
     return Settings()
 
 
+def _carried_routing(root: Path) -> object | None:
+    try:
+        parsed: object = json.loads(settings_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return parsed.get("routing") if isinstance(parsed, dict) else None
+
+
 def write_settings(root: Path, settings: Settings) -> None:
     private_dir(root)
     document = {
@@ -226,6 +234,11 @@ def write_settings(root: Path, settings: Settings) -> None:
     policy = policy_document(settings.policy)
     if policy is not None:
         document["policy"] = policy
+    # The routing of `vibe run auto` lives in the same file but is not auto-switch's: carry it
+    # over untouched, or `vibe auto on` would silently delete it.
+    carried = _carried_routing(root)
+    if carried is not None:
+        document["routing"] = carried
     write_private(settings_path(root), json.dumps(document, indent=2) + "\n")
 
 

@@ -522,8 +522,9 @@ def build(
     dry_in: timedelta | None = None,
     auto: Settings | None = None,
     last_switch: LastSwitch | None = None,
+    cursor: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
-    return {
+    document: dict[str, object] = {
         "schema": ENVELOPE_SCHEMA,
         "generated_at": _iso(now_s),
         "accounts": [account_entry(v) for v in views],
@@ -535,6 +536,12 @@ def build(
         "resets": resets(views),
         "auto_switch": auto_switch_entry(auto if auto is not None else Settings(), last_switch),
     }
+    if cursor:
+        # Additive and only when a Cursor account is stored, so a Claude-only setup emits the
+        # bytes it always did. Cursor seats are not in `accounts` or the pool: they have no
+        # weekly window and no Keychain login.
+        document["cursor"] = [dict(entry) for entry in cursor]
+    return document
 
 
 def error_payload(error: VibeError) -> dict[str, object]:

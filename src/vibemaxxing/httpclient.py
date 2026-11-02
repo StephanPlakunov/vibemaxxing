@@ -15,6 +15,9 @@ from vibemaxxing import __version__
 from vibemaxxing.errors import NetworkError
 
 ALLOWED_HOSTS: Final = frozenset({"claude.ai", "platform.claude.com", "api.anthropic.com"})
+# The Cursor seat's usage, and nothing else. A second client with its own list, so the
+# Claude client can never be pointed at it and a Cursor token can never reach a Claude host.
+CURSOR_HOSTS: Final = frozenset({"api2.cursor.sh"})
 DEFAULT_TIMEOUT_S: Final = 10.0
 # Cloudflare fronts all three hosts and answers urllib's default
 # "Python-urllib/3.x" with 403 "error code: 1010" before the request ever
@@ -105,6 +108,10 @@ _OPENER: Final = urllib.request.build_opener(_NoRedirect)
 
 
 class UrllibClient:
+    def __init__(self, hosts: frozenset[str] | None = None) -> None:
+        # None is the module's ALLOWED_HOSTS, read at each request.
+        self._hosts = hosts
+
     def request(
         self,
         method: str,
@@ -115,10 +122,11 @@ class UrllibClient:
         timeout_s: float = DEFAULT_TIMEOUT_S,
     ) -> HttpResponse:
         host = urllib.parse.urlsplit(url).hostname
-        if host not in ALLOWED_HOSTS:
+        allowed = ALLOWED_HOSTS if self._hosts is None else self._hosts
+        if host not in allowed:
             raise NetworkError(
                 f"refusing to contact {host!r}: vibemaxxing only talks to "
-                + ", ".join(sorted(ALLOWED_HOSTS)),
+                + ", ".join(sorted(allowed)),
                 "vibe list",
             )
         sent = {"User-Agent": USER_AGENT, **headers}

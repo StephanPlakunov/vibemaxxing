@@ -20,16 +20,21 @@ from vibemaxxing import (
     __version__,
     auto,
     credentials,
+    cursor,
     envelope,
     history,
     keychain,
+    launch,
     oauth,
+    route,
     statusline,
     store,
     tui,
     web,
 )
 from vibemaxxing.credentials import Credential
+from vibemaxxing.cursor import AgentPort, CliAgent
+from vibemaxxing.cursor_usage import AgentTokenStore, CursorTokenPort
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.errors import (
     NeedsLoginError,
@@ -38,7 +43,7 @@ from vibemaxxing.errors import (
     UsageError,
     VibeError,
 )
-from vibemaxxing.httpclient import HttpClient, UrllibClient
+from vibemaxxing.httpclient import CURSOR_HOSTS, HttpClient, UrllibClient
 from vibemaxxing.keychain import KeychainPort, default_port
 from vibemaxxing.models import AccountState
 from vibemaxxing.pool import Policy, dry_in
@@ -66,6 +71,40 @@ class Context:
     # --from-config-dir`. Read only; a field so a test hands it a fake.
     port_for: Callable[[Path], KeychainPort] = keychain.config_dir_port
     argv0: str = field(default="vibe")
+    # Cursor: the agent binary, the client that may talk to Cursor's API and nothing else,
+    # and where the agent keeps its login token. Fields so a test hands it fakes.
+    agent: AgentPort = field(default_factory=CliAgent)
+    cursor_client: HttpClient = field(default_factory=lambda: UrllibClient(CURSOR_HOSTS))
+    cursor_token: CursorTokenPort = field(default_factory=AgentTokenStore)
+
+    def services(self) -> launch.Services:
+        return launch.Services(
+            root=self.root,
+            client=self.client,
+            port=self.port,
+            agent=self.agent,
+            cursor_client=self.cursor_client,
+            cursor_token=self.cursor_token,
+            now_s=self.now_s,
+            environ=os.environ,
+            cwd=Path.cwd(),
+            home=Path.home(),
+        )
+
+    def cursor_readings(self, *, now_s: float | None = None) -> list[launch.CursorReading]:
+        """Every Cursor account with its usage; [] without one, and no process is started."""
+        aliases = cursor.list_cursor_aliases(self.root)
+        if not aliases:
+            return []
+        try:
+            margin = route.read_routing(self.root).cursor_margin_cents
+        except UsageError:
+            # A wrong routing stops `vibe run auto`; it must not stop `vibe list`.
+            margin = route.Routing().cursor_margin_cents
+        svc = self.services()
+        if now_s is not None:
+            svc = replace(svc, now_s=now_s)
+        return [launch.read_cursor(svc, alias, margin_cents=margin) for alias in aliases]
 
 
 def default_context() -> Context:
@@ -126,8 +165,13 @@ def _slug(text: str) -> str:
     return slug[:64] or "account"
 
 
+def _taken(root: Path) -> set[str]:
+    """Every alias in use: Claude accounts and Cursor ones share one namespace."""
+    return {*store.list_aliases(root), *cursor.list_cursor_aliases(root), *cursor.RESERVED_ALIASES}
+
+
 def _free_alias(root: Path, wanted: str) -> str:
-    taken = set(store.list_aliases(root))
+    taken = _taken(root)
     if wanted not in taken:
         return wanted
     for n in range(2, 100):
@@ -195,6 +239,7 @@ def _login(ctx: Context, alias: str, as_json: bool) -> int:
             f'"{alias}" is not a usable alias: letters, digits, dot, dash, underscore',
             "vibe add work",
         )
+    _require_unused(ctx.root, alias)
     verifier, state = oauth.new_verifier(), oauth.new_state()
     url = oauth.build_authorize_url(verifier, state)
     # URL first, then the browser. On Linux, CPython registers text-mode console
@@ -272,6 +317,7 @@ def _import(ctx: Context, wanted: str | None, given: Path, as_json: bool) -> int
             f'"{alias}" is not a usable alias: lower-case letters, digits, dot, dash, underscore',
             f"vibe add extra --from-config-dir {directory}",
         )
+    _require_unused(ctx.root, alias)
     if store.read_active(ctx.root) == alias:
         # The port holds the active account's login; its file must keep matching it.
         raise UsageError(
@@ -309,7 +355,48 @@ def _import(ctx: Context, wanted: str | None, given: Path, as_json: bool) -> int
     return 0
 
 
+def _require_unused(root: Path, alias: str) -> None:
+    """A Claude login may not take a Cursor account's alias, nor a reserved word."""
+    if alias in cursor.RESERVED_ALIASES or cursor.is_cursor(root, alias):
+        raise UsageError(f'"{alias}" is already used (or reserved)', "vibe list")
+
+
+def _add_cursor(ctx: Context, alias: str | None, as_json: bool) -> int:
+    """Register a Cursor seat. vibe never sees its credentials: `cursor-agent login` keeps them."""
+    wanted = alias if alias is not None else "cursor"
+    if not store.valid_alias(wanted):
+        raise UsageError(
+            f'"{wanted}" is not a usable alias: lower-case letters, digits, dot, dash, underscore',
+            "vibe add cursor --kind cursor",
+        )
+    if wanted in cursor.RESERVED_ALIASES or wanted in store.list_aliases(ctx.root):
+        raise UsageError(f'"{wanted}" is already used (or reserved)', "vibe list")
+    ctx.agent.binary()  # not installed: refused before anything is written
+    status = ctx.agent.status()
+    cursor.write_marker(ctx.root, wanted, added_at=ctx.now_s)
+    if status.logged_in:
+        who = f"logged in as {status.email or 'an unknown user'}"
+        if status.team:
+            who += f", team {status.team}"
+        human = f'added Cursor account "{wanted}" ({who})\n'
+    else:
+        human = (
+            f'added Cursor account "{wanted}", but cursor-agent is not logged in: '
+            f"run: {cursor.AGENT_LOGIN}\n"
+        )
+    _emit(
+        _action("add", alias=wanted, kind=cursor.KIND_CURSOR, logged_in=status.logged_in),
+        as_json=as_json,
+        human=human,
+    )
+    return 0
+
+
 def cmd_add(args: argparse.Namespace, ctx: Context) -> int:
+    if args.kind == cursor.KIND_CURSOR:
+        if args.from_config_dir is not None:
+            raise UsageError("--from-config-dir is for Claude accounts", "vibe add --help")
+        return _add_cursor(ctx, args.alias, args.json)
     if args.from_config_dir is not None:
         return _import(ctx, args.alias, args.from_config_dir, args.json)
     if args.alias is None:
@@ -327,8 +414,48 @@ def _collect_and_record(ctx: Context) -> tuple[list[AccountView], float | None]:
     return views, None if forecast is None else forecast.total_seconds()
 
 
+def _money(cents: int) -> str:
+    return f"${cents / 100:,.2f}"
+
+
+def _render_cursor(reading: launch.CursorReading) -> list[str]:
+    """One Cursor seat: who, the two numbers Cursor bills by, and whether routing may use it."""
+    who = reading.email or "—"
+    lines = [f"  {reading.alias}  {who}  Cursor{f' · team {reading.team}' if reading.team else ''}"]
+    if not reading.logged_in:
+        lines.append(f"    not logged in — run: {cursor.AGENT_LOGIN}")
+        return lines
+    usage = reading.usage
+    if usage is None:
+        lines.append(f"    usage: unknown ({reading.note}); see cursor.com/dashboard")
+        return lines
+    if reading.note:
+        lines.append(f"    {reading.note}")
+    if usage.included_percent is not None:
+        lines.append(f"    {'Included + bonus':<24}{round(usage.included_percent):>4}%")
+    used, cap = usage.on_demand_used_cents, usage.on_demand_limit_cents
+    if used is not None:
+        of = f" of {_money(cap)}" if cap else " (off)" if cap == 0 else ""
+        lines.append(f"    {'On-demand':<24}{_money(used)}{of}  billed to the company")
+    if usage.cycle_end_s is not None:
+        end = datetime.fromtimestamp(usage.cycle_end_s).strftime("%a %d %b %H:%M")
+        lines.append(f"    resets {end}")
+    verdict = {True: "available", False: "spent", None: "unknown"}[reading.availability.ok]
+    lines.append(f"    routing: {verdict} ({reading.availability.why})")
+    return lines
+
+
 def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
     views, dry = _collect_and_record(ctx)
+    readings = ctx.cursor_readings()
+    human = _render_accounts(views, now_s=ctx.now_s, dry=dry)
+    if readings:
+        shown = [line for reading in readings for line in (*_render_cursor(reading), "")]
+        if views:
+            head, _, tail = human.rpartition("\n\npool")
+            human = head + "\n\n" + "\n".join(shown) + "\npool" + tail
+        else:
+            human = "\n".join(shown) + "\n"
     _emit(
         envelope.build(
             views,
@@ -336,9 +463,10 @@ def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
             dry_in=None if dry is None else timedelta(seconds=dry),
             auto=auto.read_settings(ctx.root),
             last_switch=auto.read_last(ctx.root),
+            cursor=[launch.cursor_entry(reading) for reading in readings],
         ),
         as_json=args.json,
-        human=_render_accounts(views, now_s=ctx.now_s, dry=dry),
+        human=human,
     )
     return 0
 
@@ -377,6 +505,11 @@ def cmd_usage(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def cmd_switch(args: argparse.Namespace, ctx: Context) -> int:
+    if cursor.is_cursor(ctx.root, args.alias):
+        raise UsageError(
+            f'"{args.alias}" is a Cursor account: it has no Claude Code login to switch to',
+            f"vibe run {args.alias} -- claude",
+        )
     oauth.ensure_usable(ctx.root, args.alias, ctx.client, now_ms=int(ctx.now_s * 1000))
     store.switch(ctx.root, args.alias, ctx.port, now_s=ctx.now_s)
     _emit(
@@ -570,7 +703,10 @@ def cmd_statusline(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def cmd_remove(args: argparse.Namespace, ctx: Context) -> int:
-    store.delete_account(ctx.root, args.alias)
+    if cursor.is_cursor(ctx.root, args.alias):
+        cursor.delete_marker(ctx.root, args.alias)  # the Cursor login itself is cursor-agent's
+    else:
+        store.delete_account(ctx.root, args.alias)
     _emit(
         _action("remove", alias=args.alias),
         as_json=args.json,
@@ -580,8 +716,15 @@ def cmd_remove(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def cmd_alias(args: argparse.Namespace, ctx: Context) -> int:
-    store.rename_account(ctx.root, args.old, args.new)
-    auto.rename(ctx.root, args.old, args.new)
+    if cursor.is_cursor(ctx.root, args.old):
+        _require_unused(ctx.root, args.new)
+        if args.new in store.list_aliases(ctx.root):
+            raise UsageError(f'there is already an account named "{args.new}"', "vibe list")
+        cursor.rename_marker(ctx.root, args.old, args.new)
+    else:
+        _require_unused(ctx.root, args.new)
+        store.rename_account(ctx.root, args.old, args.new)
+        auto.rename(ctx.root, args.old, args.new)
     _emit(
         _action("alias", old=args.old, new=args.new),
         as_json=args.json,
@@ -622,25 +765,92 @@ def _fresh_token(ctx: Context, alias: str) -> Credential:
     )
 
 
+def _run_flags(args: argparse.Namespace) -> launch.RunFlags:
+    needs: tuple[str, ...] | None = None
+    if args.needs is not None:
+        needs = tuple(name.strip() for name in args.needs.split(",") if name.strip())
+        if not needs:
+            raise UsageError(
+                "--needs wants connector names, e.g. slack,atlassian", "vibe run --help"
+            )
+    return launch.RunFlags(
+        needs=needs,
+        no_needs=args.no_needs,
+        claude_only=args.claude_only,
+        allow_force=args.allow_force,
+        allow_fast=args.allow_fast,
+        allow_no_zdr=args.allow_no_zdr,
+        brief=args.brief,
+        handover=args.handover,
+    )
+
+
+def _say(text: str) -> None:
+    err(f"{launch.VIBE_LINE}{text}\n")
+
+
+def _spawn(argv: Sequence[str], env: dict[str, str] | None) -> int:
+    try:
+        return subprocess.run(list(argv), env=env, check=False).returncode
+    except KeyboardInterrupt:
+        # The child got the same SIGINT and is already shutting down. Report
+        # the conventional 130 rather than a traceback from the wrapper.
+        return 130
+    except OSError as exc:
+        raise UsageError(
+            f"could not start {argv[0]}: {exc.__class__.__name__}", "vibe list"
+        ) from None
+
+
 def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
     # Only the leading separator is ours; a `--` the child itself needs must
     # survive into its argv.
     command = args.command[1:] if args.command[:1] == ["--"] else list(args.command)
     if not command:
         raise UsageError("vibe run needs a command after --", "vibe run work -- claude")
-    credential = _fresh_token(ctx, args.alias)
-    # The fifth and last permitted reveal() site: the child's environment. The
-    # global Keychain credential is untouched, so other shells keep their account.
-    child_env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": credential.access_token.reveal()}
-    try:
-        completed = subprocess.run(command, env=child_env, check=False)
-    except KeyboardInterrupt:
-        # The child got the same SIGINT and is already shutting down. Report
-        # the conventional 130 rather than a traceback from the wrapper.
-        return 130
-    if args.json:
-        out(envelope.dumps(_action("run", alias=args.alias, exit_code=completed.returncode)) + "\n")
-    return completed.returncode
+    plan = launch.plan_run(ctx.services(), args.alias, command, _run_flags(args))
+    for note in plan.notes:
+        _say(note)
+    if args.dry_run:
+        _emit(
+            _action(
+                "run",
+                alias=plan.alias,
+                kind=plan.kind,
+                argv=list(plan.argv),
+                dry_run=True,
+                notes=list(plan.notes),
+            ),
+            as_json=args.json,
+            human=f"would run on {plan.alias} ({plan.kind}): {' '.join(plan.argv)}\n",
+        )
+        return 0
+    if plan.kind == cursor.KIND_CURSOR:
+        # No credential of ours goes anywhere: cursor-agent reads its own login.
+        code = _spawn(plan.argv, None)
+    elif not plan.claude_token:
+        code = _spawn(plan.argv, None)  # `claude --version` and friends: no account involved
+    else:
+        credential = _fresh_token(ctx, plan.alias)
+        # The fifth permitted reveal() site: the child's environment. The
+        # global Keychain credential is untouched, so other shells keep their account.
+        child_env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": credential.access_token.reveal()}
+        code = _spawn(plan.argv, child_env)
+    if args.json and code != 130:
+        out(envelope.dumps(_action("run", alias=plan.alias, kind=plan.kind, exit_code=code)) + "\n")
+    return code
+
+
+SHELL_INIT: Final = """# vibe: route Claude Code sessions to the account with room (add to ~/.zshrc)
+claude() { vibe run auto -- claude "$@"; }
+# a short name for code-only sessions: no Slack/Atlassian needed, so extra comes first
+claude-code() { vibe run auto --no-needs -- claude "$@"; }
+"""
+
+
+def cmd_shell_init(args: argparse.Namespace, ctx: Context) -> int:
+    out(SHELL_INIT)
+    return 0
 
 
 # --- parser ------------------------------------------------------------------
@@ -734,6 +944,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="import the login Claude Code keeps for CLAUDE_CONFIG_DIR=DIR (no browser)",
     )
+    add.add_argument(
+        "--kind",
+        choices=cursor.KINDS,
+        default=cursor.KIND_CLAUDE,
+        help="claude (default) or cursor: a Cursor seat, logged in with `cursor-agent login`",
+    )
     _add_json(add)
     add.set_defaults(handler=cmd_add)
 
@@ -746,11 +962,39 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json(switch)
     switch.set_defaults(handler=cmd_switch)
 
-    run = subs.add_parser("run", help="run one command pinned to one account")
-    run.add_argument("alias")
-    run.add_argument("command", nargs=argparse.REMAINDER)
+    run = subs.add_parser(
+        "run", help="run one command pinned to one account (`auto` picks it, `cursor` is Cursor)"
+    )
+    run.add_argument("alias", help="an account, or `auto` to pick by the routing rules")
+    run.add_argument(
+        "--needs", metavar="LIST", help="connectors the run needs: slack,atlassian,m365,gcal"
+    )
+    run.add_argument("--no-needs", action="store_true", help="the run needs no connector")
+    run.add_argument(
+        "--claude-only", action="store_true", help="never translate this run to Cursor"
+    )
+    run.add_argument(
+        "--allow-force", action="store_true", help="on Cursor: let bypassPermissions mean --force"
+    )
+    run.add_argument("--allow-fast", action="store_true", help='on Cursor: allow "-fast" models')
+    run.add_argument(
+        "--allow-no-zdr", action="store_true", help='on Cursor: allow "(NO ZDR)" models'
+    )
+    run.add_argument(
+        "--brief", metavar="TEXT", help="the original task, for a fresh run after a move"
+    )
+    run.add_argument(
+        "--handover", type=Path, metavar="FILE", help="notes the fresh run reads first after a move"
+    )
+    run.add_argument("--dry-run", action="store_true", help="print what would run; run nothing")
+    # The command is cut off before parsing (split_run_command); nothing is left for argparse.
     _add_json(run)
-    run.set_defaults(handler=cmd_run)
+    run.set_defaults(handler=cmd_run, command=[])
+
+    init = subs.add_parser(
+        "shell-init", help="print a zsh snippet that routes `claude` through `vibe run auto`"
+    )
+    init.set_defaults(handler=cmd_shell_init)
 
     remove = subs.add_parser("remove", help="forget an account")
     remove.add_argument("alias")
@@ -818,9 +1062,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_RUN_VALUE_FLAGS: Final = ("--needs", "--brief", "--handover")
+
+
+def split_run_command(argv: Sequence[str]) -> tuple[list[str], list[str] | None]:
+    """Cut `vibe run <alias> [vibe options] -- <command>` into vibe's part and the child's.
+
+    argparse's REMAINDER would swallow the vibe options written between the alias and the `--`
+    as part of the command, so `run` is cut here instead. Everything after the first `--` is the
+    child's, verbatim. Without a `--`, the command starts after the alias (the old form
+    `vibe run work claude`). None when this is not a `run`.
+    """
+    items = list(argv)
+    first = next((index for index, token in enumerate(items) if not token.startswith("-")), None)
+    if first is None or items[first] != "run":
+        return items, None
+    if "--" in items[first:]:
+        cut = items.index("--", first)
+        return items[:cut], items[cut + 1 :]
+    index = first + 1
+    while index < len(items) and items[index].startswith("-"):
+        index += 2 if items[index] in _RUN_VALUE_FLAGS else 1
+    end = min(index + 1, len(items))  # the alias, if there is one
+    return items[:end], items[end:]
+
+
 def main(argv: Sequence[str] | None = None, *, context: Context | None = None) -> int:
     install_excepthook()
-    args = build_parser().parse_args(argv)
+    head, command = split_run_command(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(head)
+    if command is not None:
+        args.command = ["--", *command]  # cmd_run strips the one separator that is ours
     try:
         ctx = context if context is not None else default_context()
         handler: Callable[[argparse.Namespace, Context], int] = args.handler
