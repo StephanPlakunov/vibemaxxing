@@ -1699,3 +1699,26 @@ decision is made at run start and never again; the Claude account that is Claude
 login runs without a token override. A move between kinds is a fresh run (`--brief`,
 `--handover`). `--claude-only` skips Cursor. `vibe shell-init` prints a zsh snippet and writes
 nothing.
+
+---
+
+## 20. vibe-bridge (fork)
+
+`vibe bridge serve` (`bridge.py`): newline-delimited JSON-RPC 2.0 on stdio (`initialize`,
+`ping`, `tools/list`, `tools/call`; notifications get no answer). `tools/list` is the allowlist
+in `bridge.TOOLS`: reads and two drafts, each with a closed input schema. A call of any other name
+is a result with `isError: true` and "ask the lead", before any account is chosen. Arguments are
+checked (names, types) before anything is spent. A call: guard (calls per hour, sliding window,
+per process) -> `launch.bridge_pick` (`route.decide` with `routing.bridge.order`, default main
+within budget, cursor, main as last resort, for `needs=(connector,)`; extra never has a
+connector) -> `launch.bridge_execute` (one headless run: `claude -p ... --model haiku --tools ""
+--allowedTools <one tool> --no-session-persistence`, `CLAUDE_CONFIG_DIR` and
+`CLAUDE_CODE_OAUTH_TOKEN` of the caller removed, the account's token lent only when it is not
+Claude Code's live login; or `cursor-agent -p --output-format json --model
+claude-haiku-5-5-<effort> --approve-mcps [--mode ask]`) under a per-call timeout. The clock is read
+per call. `routing.bridge`: `order`, `timeout_s` (90), `max_calls_per_hour` (30), `claude_model`,
+`cursor_effort`, `claude_tool_pattern`, `cursor_read_mode`, `tools` (bridge tool -> connector
+tool name). `bridge.log` (0600): `{at, account, kind, tool, ms, outcome}` with outcome `ok`,
+`failed`, `refused`, `limit` or `no-account`. `vibe bridge add-command` prints the
+`claude mcp add` line for `~/.claude-extra` and runs nothing. The connector tool names are
+defaults, unverified.

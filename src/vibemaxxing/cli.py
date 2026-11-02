@@ -19,6 +19,7 @@ from typing import Final
 from vibemaxxing import (
     __version__,
     auto,
+    bridge,
     credentials,
     cursor,
     envelope,
@@ -841,6 +842,36 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
     return code
 
 
+def _token_env(ctx: Context, alias: str) -> dict[str, str]:
+    credential = _fresh_token(ctx, alias)
+    # Reveal site of the bridge's one nested run, same as `vibe run`: the child's environment.
+    return {"CLAUDE_CODE_OAUTH_TOKEN": credential.access_token.reveal()}
+
+
+def cmd_bridge_serve(args: argparse.Namespace, ctx: Context) -> int:
+    routing = route.read_routing(ctx.root)
+    config = bridge.parse_config(routing.bridge)
+    svc = ctx.services()
+    server = bridge.Bridge(
+        config=config,
+        pick=launch.bridge_pick(svc, routing, config),
+        execute=launch.bridge_execute(svc, config, lambda alias: _token_env(ctx, alias)),
+        log=lambda entry: bridge.append_log(ctx.root, entry),
+    )
+    # The protocol owns stdout; vibe's own words go to stderr.
+    bridge.serve(server, sys.stdin, sys.stdout)
+    return 0
+
+
+def cmd_bridge_add(args: argparse.Namespace, ctx: Context) -> int:
+    command = bridge.print_add_command(args.config_dir)
+    out(
+        "run this yourself (vibe does not): it registers vibe-bridge with that config dir only\n"
+        f"  {command}\n"
+    )
+    return 0
+
+
 SHELL_INIT: Final = """# vibe: route Claude Code sessions to the account with room (add to ~/.zshrc)
 claude() { vibe run auto -- claude "$@"; }
 # a short name for code-only sessions: no Slack/Atlassian needed, so extra comes first
@@ -995,6 +1026,18 @@ def build_parser() -> argparse.ArgumentParser:
     # The command is cut off before parsing (split_run_command); nothing is left for argparse.
     _add_json(run)
     run.set_defaults(handler=cmd_run, command=[])
+
+    bridge_cmd = subs.add_parser(
+        "bridge", help="vibe-bridge: lend a connector to a session on extra, one call at a time"
+    )
+    bridge_subs = bridge_cmd.add_subparsers(dest="bridge_command", required=True)
+    serve = bridge_subs.add_parser("serve", help="the stdio MCP server (Claude Code starts it)")
+    serve.set_defaults(handler=cmd_bridge_serve)
+    add_cmd = bridge_subs.add_parser(
+        "add-command", help="print the `claude mcp add` command for the extra config dir"
+    )
+    add_cmd.add_argument("--config-dir", default="~/.claude-extra")
+    add_cmd.set_defaults(handler=cmd_bridge_add)
 
     init = subs.add_parser(
         "shell-init", help="print a zsh snippet that routes `claude` through `vibe run auto`"

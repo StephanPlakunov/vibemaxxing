@@ -103,10 +103,14 @@ class World:
         self.cursor_client.queue_json(200, usage_answer(**kw))
         self.cursor_client.queue_json(200, {"hardLimit": 250})
 
-    def claude_calls(self) -> list[dict[str, object]]:
+    def claude_calls(self, *, full: bool = False) -> list[dict[str, object]]:
         if not self.claude_record.exists():
             return []
-        return [json.loads(line) for line in self.claude_record.read_text().splitlines()]
+        calls = [json.loads(line) for line in self.claude_record.read_text().splitlines()]
+        if not full:
+            for call in calls:
+                call.pop("has_config_dir", None)
+        return calls
 
 
 @pytest.fixture

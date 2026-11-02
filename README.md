@@ -361,6 +361,39 @@ slack, atlassian, gcal; extra has none. To add one yourself (vibe adds none):
 In headless runs (`-p`) the agent may need `--approve-mcps`; vibe adds it only to runs that
 declared `--needs`.
 
+## The connector bridge (`vibe-bridge`)
+
+A session on extra has no Slack, Atlassian or Microsoft 365, and a running Claude Code session
+cannot switch accounts mid-way (it keeps the login and connector list it started with, and
+switching under it breaks Remote Control). So extra borrows a connector one call at a time:
+`vibe bridge serve` is a small local stdio MCP server whose tools mirror a short allowlist.
+
+- **Reads**: `slack_read_channel`, `slack_read_thread`, `slack_search`, `slack_read_profile`,
+  `atlassian_get_issue`, `atlassian_search_jql`, `atlassian_get_page`, `m365_search_mail`,
+  `m365_read_mail`, `m365_search_chat`, `m365_read_chat`. **Drafts**: `slack_create_draft`,
+  `outlook_create_draft`.
+- **Never**: sending, posting, creating or transitioning tickets, deleting, reactions. Any other
+  tool name is refused with "ask the lead".
+- Each call runs one headless run on the account the routing picks for that connector (main
+  within budget, else Cursor, else main; Microsoft 365 only main; never extra), with only that one
+  tool allowed (`--allowedTools` on Claude, `--mode ask` for reads on Cursor), on the cheap model
+  (`haiku`; `claude-haiku-5-5-low` on Cursor), and returns the tool's JSON result.
+- Cost guard: a timeout per call (90 s), at most 30 calls per hour per bridge process, both in
+  `routing.bridge`. `~/.vibemaxxing/bridge.log` has one line per call: account, tool, duration,
+  outcome. Never arguments, content or a secret.
+- Register it for extra only. vibe prints the command and never runs it:
+
+```
+vibe bridge add-command
+CLAUDE_CONFIG_DIR=~/.claude-extra claude mcp add --scope user vibe-bridge -- vibe bridge serve
+```
+
+The connector tool names the nested run calls (`mcp__claude_ai_Slack__slack_read_channel`,
+`getJiraIssue`, ...) are defaults that have **not** been checked against the live connectors;
+override them in `routing.bridge.tools` / `claude_tool_pattern`. Text a connector returns (a Slack
+message, a Jira description) reaches the extra session as the tool result: it is data, but it is
+the same prompt-injection surface any connector has.
+
 ## How it works
 
 It swaps **credentials**, plus the one line of config that names them. One `~/.claude`

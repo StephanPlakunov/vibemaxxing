@@ -98,6 +98,8 @@ class Routing:
     cursor_margin_cents: int = 1000
     # The percent at which a Claude account counts as spent (session or weekly).
     spent_percent: int = 99
+    # The `bridge` member, validated by vibe-bridge (bridge.py) where it is used.
+    bridge: object = None
 
 
 @dataclass(frozen=True)
@@ -213,6 +215,7 @@ def parse_routing(raw: object, path: Path) -> Routing:
         order=order,
         cursor_margin_cents=margin,
         spent_percent=spent,
+        bridge=raw.get("bridge"),
     )
 
 

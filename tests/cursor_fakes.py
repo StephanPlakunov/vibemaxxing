@@ -61,6 +61,7 @@ if args[:1] == ["models"]:
     sys.exit(0)
 with open(state["record"], "a") as handle:
     handle.write(json.dumps(args) + "\\n")
+print(json.dumps({{"result": json.dumps({{"from": "cursor"}})}}))
 sys.exit(state.get("exit", 0))
 """
 
@@ -191,11 +192,17 @@ def json_text(value: Mapping[str, object]) -> str:
 
 
 _CLAUDE_SCRIPT = """#!{python}
-import json, os, sys
-seen = {{"argv": sys.argv[1:], "has_token": bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))}}
+import json, os, sys, time
+seen = {{
+    "argv": sys.argv[1:],
+    "has_token": bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")),
+    "has_config_dir": "CLAUDE_CONFIG_DIR" in os.environ,
+}}
 with open({record!r}, "a") as handle:
     handle.write(json.dumps(seen) + "\\n")
-sys.exit(0)
+time.sleep(float(os.environ.get("FAKE_CLAUDE_SLEEP", "0")))
+print(json.dumps({{"result": json.dumps({{"from": "claude"}})}}))
+sys.exit(int(os.environ.get("FAKE_CLAUDE_EXIT", "0")))
 """
 
 

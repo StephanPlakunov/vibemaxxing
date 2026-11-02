@@ -7,6 +7,12 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vibe bridge serve` (vibe-bridge).** A local stdio MCP server that lets a session on extra
+  borrow Slack, Atlassian or Microsoft 365 for one read or draft at a time: one headless run on
+  the account the routing picks, with only that tool allowed, on a cheap model, under a timeout
+  and a calls-per-hour cap, logged without content to `~/.vibemaxxing/bridge.log`. Sends, posts,
+  ticket changes, deletes and reactions are refused ("ask the lead"). `vibe bridge add-command`
+  prints the `claude mcp add` line for extra's config dir. `docs/CONTRACT.md` §20.
 - **Cursor accounts.** `vibe add [alias] --kind cursor` registers a Cursor seat (no credential
   of vibe's: `cursor-agent login` keeps it). `vibe run cursor -- claude <args>` translates the
   Claude Code command line to `cursor-agent` (every flag mapped or refused by name; the model is

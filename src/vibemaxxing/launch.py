@@ -7,17 +7,18 @@ the person), so `vibe run --dry-run` can print it and the tests can compare it.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import cursor, cursor_translate, cursor_usage, envelope, route, store
+from vibemaxxing import bridge, cursor, cursor_translate, cursor_usage, envelope, route, store
 from vibemaxxing.cursor import AgentPort
 from vibemaxxing.cursor_usage import CursorTokenPort, CursorUsage
 from vibemaxxing.envelope import AccountView
-from vibemaxxing.errors import NotFoundError, UsageError
+from vibemaxxing.errors import NotFoundError, UsageError, VibeError
 from vibemaxxing.httpclient import HttpClient
 from vibemaxxing.keychain import KeychainPort
 from vibemaxxing.models import AccountState
@@ -515,3 +516,60 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
         chosen,
         claude_token=not live,
     )
+
+
+# --- vibe-bridge ---------------------------------------------------------------------
+
+
+def bridge_pick(svc: Services, routing: route.Routing, config: bridge.BridgeConfig) -> bridge.Pick:
+    """The account for "needs this connector", by the bridge's own order (never extra)."""
+    bridge_routing = replace(routing, order={**routing.order, route.NEEDS_CLASS: config.order})
+
+    def pick(connector: str) -> route.Route:
+        # A bridge process lives for hours: every call reads the clock, never process start.
+        now_s = time.time()
+        return route.decide(
+            candidates(replace(svc, now_s=now_s), bridge_routing),
+            routing=bridge_routing,
+            needs=(connector,),
+            claude_only=False,
+            now_s=now_s,
+        )
+
+    return pick
+
+
+def bridge_execute(
+    svc: Services, config: bridge.BridgeConfig, token_env: Callable[[str], dict[str, str]]
+) -> bridge.Execute:
+    """One headless run on the chosen account, with only the one tool allowed."""
+
+    def execute(
+        chosen: route.Route, tool: bridge.BridgeTool, arguments: Mapping[str, object]
+    ) -> str:
+        prompt = bridge.build_prompt(tool, bridge.upstream_name(config, tool), arguments)
+        try:
+            if chosen.kind == cursor.KIND_CURSOR:
+                cursor.require_login(svc.agent)
+                model = cursor.resolve_model("haiku", config.cursor_effort, svc.agent.models())
+                argv = bridge.cursor_argv(
+                    config, tool, prompt, program=svc.agent.binary(), model=model
+                )
+                return bridge.run_headless(argv, None, config.timeout_s)
+            # The nested run is its own Claude Code: not the config dir or token of the session
+            # that called the bridge. The live login keeps itself; any other account is lent
+            # its token for this one call.
+            env = {
+                key: value
+                for key, value in svc.environ.items()
+                if key not in ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN")
+            }
+            if store.live_alias(svc.root, svc.port) != chosen.alias:
+                env.update(token_env(chosen.alias))
+            return bridge.run_headless(
+                bridge.claude_argv(config, tool, prompt), env, config.timeout_s
+            )
+        except VibeError as exc:
+            raise bridge.BridgeError(exc.message) from None
+
+    return execute
