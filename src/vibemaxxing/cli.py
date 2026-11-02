@@ -868,6 +868,11 @@ Every day
   vibe                        the dashboard, in the terminal
   vibe list                   each account's limits and the pooled headroom
   vibe run work -- claude     one command on one account; the active login is untouched
+  vibe add cursor --kind cursor
+                              a Cursor seat (log in with `cursor-agent login`); then
+                              `vibe run cursor -- claude ...` runs it on cursor-agent
+  vibe run auto -- claude     pick the account by need and budget, then run it
+  vibe shell-init             print a zsh snippet that routes `claude` through that
   vibe usage web              the same dashboard in a browser, http://127.0.0.1:8787
 
 Status line

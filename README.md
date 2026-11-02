@@ -61,7 +61,9 @@ vibe                          open the dashboard in the terminal
 vibe usage web                open it in a browser at http://127.0.0.1:8787
 vibe list                     every account, its limits, the pooled total
 vibe switch <name>            change the active account
-vibe run <name> -- <cmd>      run one command as one account
+vibe run <name> -- <cmd>      run one command as one account (`cursor`: translated for Cursor)
+vibe run auto -- claude       pick the account by the routing rules, then run
+vibe shell-init               print a zsh snippet that routes `claude` through that
 vibe remove <name>            forget an account
 vibe alias <old> <new>        rename one
 vibe auto on|off|status       switch accounts by itself, see below
@@ -243,6 +245,122 @@ vibe list --json | jq -r '.resets[] | "\(.alias) \(.at)"'
 
 The schema is frozen in [`docs/CONTRACT.md`](docs/CONTRACT.md) §10.
 
+## Cursor accounts
+
+Fork feature. A Cursor seat (the terminal agent `cursor-agent`, running the same Claude
+models) is a second kind of account:
+
+```
+cursor-agent login                  # once; Cursor keeps that login, vibe never sees it
+vibe add cursor --kind cursor       # checks `cursor-agent status`, stores a marker, no credential
+vibe list                           # the seat's real numbers, next to the Claude accounts
+vibe run cursor -- claude -p "fix the bug" --model sonnet --permission-mode auto
+```
+
+### What `vibe run cursor -- claude ...` does
+
+It turns the Claude Code command line into a `cursor-agent` one. Every flag is mapped or
+**refused by name**: nothing is dropped silently.
+
+| Claude Code | cursor-agent |
+| --- | --- |
+| `-p`, `--output-format text\|json\|stream-json` | the same |
+| `--include-partial-messages` | `--stream-partial-output` |
+| `--permission-mode auto` | `--auto-review` (never `--force`) |
+| `--permission-mode default` / `manual` | nothing |
+| `--permission-mode plan` | `--plan` |
+| `--permission-mode bypassPermissions`, `--dangerously-skip-permissions` | refused; `--force` only with `vibe run --allow-force` |
+| `--model`, `--effort` (or the model and effort Claude Code would use) | `--model claude-<family>-<version>-<effort>`, picked from the live `cursor-agent models` |
+| `--resume <id>` | `--resume <id>` for a Cursor chat id; a Claude session id is refused |
+| `--add-dir` | `--add-dir` |
+| no `-p` (interactive) | cursor-agent's own terminal UI, and vibe says so |
+| anything else (`--allowedTools`, `--mcp-config`, `-c`, `claude mcp ...`, ...) | refused, naming the flag |
+
+A model that is not in `cursor-agent models` is refused with the closest names. A `-fast`
+variant and any model marked `(NO ZDR)` (no zero data retention) are never picked unless you
+pass `--allow-fast` / `--allow-no-zdr`. `vibe run cursor -- <anything but claude>` runs the
+command unchanged. `--dry-run` prints what would run and runs nothing.
+
+### What it is not
+
+It is not Claude Code. A Cursor session has no Claude skills, no Claude hooks, no Remote
+Control, no `CLAUDE.md` memory; Cursor reads its own rules and its own MCP config. Do not
+route a program that relies on Claude Code hooks for its safety policy: run it with
+`--claude-only`. `vibe switch` and `vibe auto tick` never touch a Cursor account (the Keychain
+login cannot point at Cursor).
+
+### Usage
+
+`vibe list` / `vibe usage` show the included allowance plus Cursor's bonus (a percent), the
+on-demand spend against your personal cap, and when the cycle resets. `cursor-agent` has no
+usage command, so vibe sends the same two calls its interactive `/usage` sends
+(`GetCurrentPeriodUsage`, `GetHardLimit` on `api2.cursor.sh`) with the access token
+`cursor-agent login` stored: read at that moment, held in memory, sent in one header, never
+stored or printed. It is an undocumented API, parsed defensively; any shape change reads as
+`usage: unknown (...); see cursor.com/dashboard`, and unknown counts as unavailable. **This
+has not been verified against the live endpoint.**
+
+### Routing: `vibe run auto`
+
+`vibe run auto [--needs slack,atlassian | --no-needs] [--claude-only] -- claude <args>` picks the
+account when the run starts and never again for that run (a running session keeps its login).
+Defaults, all configurable under `routing` in `~/.vibemaxxing/settings.json`:
+
+- **needs connectors**: `main` while its weekly usage is within today's budget, else `cursor`
+  while it has usage left, else `extra` (no connectors: the run goes without and says so), else
+  `main` whatever the budget.
+- **needs none**: `extra`, else `main` within budget, else `cursor`, else `main` whatever the
+  budget.
+- **Budget**: the share of main's weekly usage allowed by the end of each day, Berlin time:
+  Mon 20%, Tue 40%, Wed 60%, Thu 80%, Fri-Sun 100%.
+- **Cursor has usage left** while its included usage and bonus last, and then its personal
+  on-demand cap (minus a margin, default $10). **On-demand is billed to the company.** It
+  counts as spent after that, until the cycle resets.
+- `--needs m365` can only go to main. `--claude-only` never picks Cursor.
+- An account with unknown usage is unavailable, and vibe prints why it was skipped.
+- When a run moves between Claude and Cursor, vibe prints which account and why. A Claude session
+  id cannot be resumed on Cursor, nor the reverse: it starts a fresh run with `--brief "<task>"`
+  and `--handover <file>` instead, and says so.
+
+```json
+{"routing": {"weekday_budget": [20, 40, 60, 80, 100, 100, 100], "timezone": "Europe/Berlin",
+             "default_needs": ["slack", "atlassian"],
+             "connectors": {"main": ["slack", "atlassian", "m365"],
+                            "cursor": ["slack", "atlassian", "gcal"], "extra": []},
+             "order": {"needs": [{"account": "main", "budget": true}, {"account": "cursor"},
+                                 {"account": "extra", "degraded": true},
+                                 {"account": "main", "last_resort": true}]},
+             "cursor_margin_cents": 1000}}
+```
+
+`vibe shell-init` prints (and never writes) a zsh snippet: `claude` becomes
+`vibe run auto -- claude`, and `claude-code` is `vibe run auto --no-needs -- claude`.
+`claude --version` and `claude mcp ...` pass through untouched. A Claude account that is already
+Claude Code's own login runs without a token override; any other runs on its own token, which
+cannot refresh itself (see Known limitations).
+
+### Connectors (MCP) on Cursor
+
+A Cursor session does not get Claude's claude.ai connectors; those belong to the Claude account.
+What the CLI agent has comes from Cursor's own MCP config and your Cursor plugins. Checked with
+the interactive `/mcp`: Slack (`https://mcp.slack.com/mcp`, the same 27 tools), Atlassian and
+Google Calendar are there; Microsoft 365 is not. So: main has slack, atlassian, m365; cursor has
+slack, atlassian, gcal; extra has none. To add one yourself (vibe adds none):
+
+- **Slack**: official hosted server `https://mcp.slack.com/mcp`, per Slack's
+  [Cursor guide](https://docs.slack.dev/ai/slack-mcp-server/connect-to-cursor); your workspace
+  admin must approve the integration.
+- **Atlassian**: official Rovo MCP server `https://mcp.atlassian.com/v1/mcp/authv2` (OAuth), see
+  [Atlassian's IDE setup](https://support.atlassian.com/atlassian-rovo-mcp-server/docs/setting-up-ides/).
+  The old `/v1/sse` endpoint stops on 30 June 2026.
+- **Microsoft 365**: Microsoft's own route is the Work IQ MCP (Entra OAuth, a global admin must
+  grant consent, it may need a Microsoft 365 Copilot licence; locally `npx -y @microsoft/workiq
+  mcp`), see [Microsoft Learn](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/work-iq/mcp/overview).
+  Treat M365 as main-only until that works for you.
+
+In headless runs (`-p`) the agent may need `--approve-mcps`; vibe adds it only to runs that
+declared `--needs`.
+
 ## How it works
 
 It swaps **credentials**, plus the one line of config that names them. One `~/.claude`
@@ -262,7 +380,9 @@ predecessor is treated as spent. A crash mid-refresh leaves a recoverable succes
 rather than a dead account.
 
 It talks to three hosts and no others — `claude.ai`, `platform.claude.com`,
-`api.anthropic.com` — and refuses to contact anything else, redirects included. No
+`api.anthropic.com` — and refuses to contact anything else, redirects included. (Fork: with a
+Cursor account stored, a second client also reaches `api2.cursor.sh`, for the seat's usage, and
+only that host.) No
 version pings, no analytics, no telemetry. The web dashboard binds `127.0.0.1`, and
 `--host` with anything else is a hard error.
 

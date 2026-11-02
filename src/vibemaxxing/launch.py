@@ -500,11 +500,18 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
         text = _fresh_run_prompt(flags)
         if text:
             args = _with_prompt(args, text)
+    # The account Claude Code is logged in as right now keeps its own login: no token override,
+    # so it refreshes itself and keeps the scopes (and connectors) of a normal login.
+    live = store.live_alias(svc.root, svc.port) == chosen.alias
+    if live:
+        notes.append(
+            f"{chosen.alias} is Claude Code's own login: it runs as that, no token override"
+        )
     return Plan(
         chosen.alias,
         cursor.KIND_CLAUDE,
         (command[0], *args),
         tuple(notes),
         chosen,
-        claude_token=True,
+        claude_token=not live,
     )

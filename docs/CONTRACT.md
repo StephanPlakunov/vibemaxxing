@@ -58,6 +58,11 @@ src/vibemaxxing/
   __main__.py      B   python -m vibemaxxing
   entry.py         F   the console scripts; answers `statusline` before importing cli (fork)
   statusline.py    F   status.json's path and shape, and the one line it prints (fork)
+  cursor.py        F   Cursor account marker, cursor-agent port, model resolution (fork, §19)
+  cursor_translate.py F claude arguments -> cursor-agent arguments (fork, §19)
+  cursor_usage.py  F   the Cursor seat's usage and its availability rule (fork, §19)
+  route.py         F   routing by need, the weekday budget, settings.json `routing` (fork, §19)
+  launch.py        F   `vibe run` for Cursor and `auto`: readings, plans (fork, §19)
   models.py        B   AccountState, Sample      [shared, frozen]
   errors.py        B   error taxonomy, exit codes [shared, frozen]
   redact.py        B   Secret, scrub, excepthook  [shared, frozen]
@@ -200,12 +205,15 @@ Rules, in force everywhere:
    `.refresh_token` are `Secret`, never `str`.
 2. `Secret` is not JSON-serialisable. `json.dumps` on one raises `TypeError` — loud,
    by design.
-3. `.reveal()` may be called in **exactly five places**, and nowhere else:
+3. `.reveal()` may be called in **exactly five places** (the fork adds a sixth, below), and
+   nowhere else:
    - `credentials.credential_to_disk()` — writing the account/stash file
    - `credentials.credential_to_blob()` — writing the Keychain / credentials file
    - `usage._get()` — the `Authorization` header of both OAuth API GETs
    - `oauth.refresh()` and `oauth.exchange_code()` — the POST body
    - `cli` — the `CLAUDE_CODE_OAUTH_TOKEN` value in the child env of `vibe run`
+   (fork) `cursor_usage._rpc()` — the `Authorization` header of the two Cursor usage calls
+   (§19). The Cursor token is read at that request, held in a `Secret`, never stored.
    (fork) `vibe add --from-config-dir` and `status.json` add none: the import parses the
    blob into `Secret`s and writes it through `credential_to_disk`, and the status holds no
    token.
@@ -243,7 +251,9 @@ No module constructs a `UrllibClient` at import time; `cli` builds the one insta
 passes it down. No test may reach the network.
 
 Allowed hosts, and no others: `claude.ai`, `platform.claude.com`, `api.anthropic.com`.
-No version pings, no analytics, no telemetry.
+No version pings, no analytics, no telemetry. (fork) A second client, `UrllibClient(CURSOR_HOSTS)`,
+may talk to `api2.cursor.sh` and nothing else; the default client refuses that host and the
+Cursor client refuses every Claude host, so neither token can reach the other's servers.
 
 Every request carries `User-Agent: vibemaxxing/<version>` unless the caller sets its own.
 Cloudflare fronts all three hosts and rejects urllib's default `Python-urllib/3.x` with a
@@ -1613,3 +1623,79 @@ measured 25 ms median for `vibe statusline` against 173 ms for `vibe --version` 
 fork's machine. `tests/test_statusline.py` pins that a child process answering it never
 loads `vibemaxxing.cli`, `textual`, `urllib.request` or `importlib.metadata`.
 
+
+---
+
+## 19. Cursor accounts and routing (fork)
+
+### The account kind
+
+A Cursor account is `~/.vibemaxxing/cursor/<alias>.json`
+(`{"schema": 1, "alias", "kind": "cursor", "added_at"}`, 0600). It holds **no credential**:
+`cursor-agent login` keeps the login and vibe never reads, copies or writes it. Claude
+accounts stay in `accounts/`; the two share one alias namespace, and `auto` is reserved.
+`vibe add [alias] --kind cursor` checks `cursor-agent status --format json` and says to run
+`cursor-agent login` when it is not logged in. `vibe switch` refuses a Cursor alias (there is
+no Claude Code login to switch to) and `vibe auto tick` never targets one: the Keychain login
+cannot point at Cursor, so Cursor is reached only per run (`vibe run`).
+
+### The envelope
+
+`vibe list --json` gains a top-level `cursor` array, **only when a Cursor account is stored**
+(a Claude-only setup emits the bytes it always did). Entries are not in `accounts` and not in
+the pool. Every key is present: `alias`, `kind` (`"cursor"`), `state` (`ok`, `needs_login`,
+`unknown`), `message`, `email`, `team`, `plan`, `included_percent`, `on_demand_used_cents`,
+`on_demand_limit_cents` (0: on-demand off; null: unnamed), `resets_at`, `available`
+(true/false/null) and `available_why`. The web dashboard and the TUI do not show Cursor.
+
+### Usage — `cursor_usage.py`
+
+Read the way `cursor-agent`'s own `/usage` reads it: Connect unary JSON POSTs of
+`aiserver.v1.DashboardService/GetCurrentPeriodUsage` and `GetHardLimit` on
+`https://api2.cursor.sh`, `Authorization: Bearer <the agent's access token>`,
+`Connect-Protocol-Version: 1`. The token comes from the macOS Keychain item the agent writes
+(service `cursor-access-token`, account `cursor-user`; both from the agent's own code), else
+`auth.json`. It is read at the request, held in a `Secret`, revealed in one header, and never
+stored, logged or put in a message. The web cookie (`WorkosCursorSessionToken`) is not used.
+Any other shape, status or failure is **unknown**, and unknown is unavailable. Answers are
+cached for 120 s (`usage/<alias>.json`) and shown up to 15 min old, with their time.
+**Not verified against the live endpoint**; see the README.
+
+Availability: while on-demand spend is 0 the seat is on included usage plus Cursor's bonus
+and is available. Once it is above 0 the personal cap decides: available while
+`cap - used > margin` (`routing.cursor_margin_cents`, 1000), spent after, and a cap of 0
+(on-demand off) means spent. On-demand is billed to the company.
+
+### Translation — `cursor_translate.py`
+
+`vibe run cursor -- claude <args>` becomes `cursor-agent <args>`: `-p`, `--output-format`,
+`--include-partial-messages` (as `--stream-partial-output`), `--resume <Cursor chat id>`
+(`~/.cursor/chats/*/<id>` must exist, else refused), `--permission-mode auto` as
+`--auto-review`, `plan` as `--plan`, `default`/`manual` as nothing, `bypassPermissions` and
+`--dangerously-skip-permissions` as `--force` only with `--allow-force`, `--add-dir`, `--model`
+and `--effort` as one model `claude-<family>-<version>-<effort>` picked from the live
+`cursor-agent models` (never `-fast` or `(NO ZDR)` without `--allow-fast` / `--allow-no-zdr`;
+else refused with the closest names). With no `--model`, the model and effort are Claude
+Code's: `ANTHROPIC_MODEL` / `CLAUDE_CODE_EFFORT_LEVEL`, then `model` / `effortLevel` in the
+project's `.claude/settings.local.json` and `settings.json`, then the user's. No `claude`
+command is a `cursor-agent` one: `-c/--continue`, a bare `--resume`, `claude mcp ...` and every
+other flag are refused by name. Anything but `claude` after a Cursor alias runs unchanged.
+`--needs` on a headless run adds `--approve-mcps`.
+
+### Routing — `route.py`, `vibe run auto`
+
+`settings.json` member `routing` (absent: the defaults; wrong anywhere: `vibe run auto` is
+refused, never guessed; `vibe auto on|off` carries it over untouched): `timezone`
+(`Europe/Berlin`), `weekday_budget` (Mon..Sun, `[20,40,60,80,100,100,100]`: the share of main's
+weekly usage allowed by the end of the day), `default_needs` (`["slack","atlassian"]`),
+`no_degrade` (`["m365"]`), `connectors` (main: slack, atlassian, m365; cursor: slack,
+atlassian, gcal; extra: none), `order` per class (`needs`, `no_needs`: lists of
+`{"account", "budget", "degraded", "last_resort"}`), `cursor_margin_cents`, `spent_percent`
+(99). Defaults: needs = main within budget, cursor, extra (degraded: runs without the
+connectors, with a warning), main (last resort); no needs = extra, main within budget,
+cursor, main (last resort). Unknown usage is unavailable and printed; only the last resort
+accepts an unknown or spent reading (with a warning), and only a dead login stops it. The
+decision is made at run start and never again; the Claude account that is Claude Code's own
+login runs without a token override. A move between kinds is a fresh run (`--brief`,
+`--handover`). `--claude-only` skips Cursor. `vibe shell-init` prints a zsh snippet and writes
+nothing.

@@ -7,6 +7,14 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Cursor accounts.** `vibe add [alias] --kind cursor` registers a Cursor seat (no credential
+  of vibe's: `cursor-agent login` keeps it). `vibe run cursor -- claude <args>` translates the
+  Claude Code command line to `cursor-agent` (every flag mapped or refused by name; the model is
+  picked from the live `cursor-agent models`, never a `-fast` or `(NO ZDR)` one unless allowed).
+  `vibe list` shows the seat's usage, read the way cursor-agent's own `/usage` reads it
+  (unverified against the live endpoint; unknown on any shape change). `vibe run auto` routes a
+  run by need (connectors or none) with a weekday budget on main, Cursor's on-demand cap and
+  extra; `vibe shell-init` prints the zsh snippet. `docs/CONTRACT.md` §19.
 - **An ordered failover policy.** An optional `policy` in `~/.vibemaxxing/settings.json`
   (`{"mode": "ordered", "steps": [{"account", "until"}...], "then": "earliest_reset"}`)
   replaces "the most room at 99%": each tick puts Claude Code on the first step whose

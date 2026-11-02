@@ -346,14 +346,15 @@ def auto_world(world: World, *, main_weekly: int, extra_weekly: int | None = 5) 
         world.claude_account("extra", session=5, weekly=extra_weekly)
 
 
-def test_auto_with_needs_and_main_within_budget_runs_claude_on_main_with_its_token(
+def test_auto_with_needs_and_main_within_budget_runs_claude_on_main_as_its_own_login(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     auto_world(world, main_weekly=40)
 
     assert world.main("run", "auto", "--needs", "slack", "--", "claude", "-p", "hi") == 0
 
-    assert world.claude_calls() == [{"argv": ["-p", "hi"], "has_token": True}]
+    # main is the login Claude Code already has: no token override
+    assert world.claude_calls() == [{"argv": ["-p", "hi"], "has_token": False}]
     assert world.fake.calls() == []
     err = capsys.readouterr().err
     assert (
@@ -389,6 +390,18 @@ def test_auto_without_a_flag_uses_the_default_class_needs_connectors(
     world.main("run", "auto", "--", "claude", "-p", "hi", "--model", "haiku")
 
     assert "auto picked cursor" in capsys.readouterr().err  # default_needs = slack, atlassian
+
+
+def test_a_non_live_account_runs_on_its_token(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.claude_account("main", session=5, weekly=10)
+    world.claude_account("extra", session=5, weekly=5, active=True)  # extra is the live login
+
+    assert world.main("run", "auto", "--needs", "slack", "--", "claude", "-p", "hi") == 0
+
+    assert "auto picked main (claude)" in capsys.readouterr().err
+    assert world.claude_calls() == [{"argv": ["-p", "hi"], "has_token": True}]
 
 
 def test_auto_no_needs_prefers_extra(world: World, capsys: pytest.CaptureFixture[str]) -> None:
@@ -433,7 +446,7 @@ def test_auto_m365_goes_to_main_even_over_budget(
     assert world.main("run", "auto", "--needs", "m365", "--", "claude", "-p", "hi") == 0
 
     assert "auto picked main (claude): last resort" in capsys.readouterr().err
-    assert world.claude_calls() == [{"argv": ["-p", "hi"], "has_token": True}]
+    assert world.claude_calls() == [{"argv": ["-p", "hi"], "has_token": False}]
 
 
 def test_auto_treats_unknown_cursor_usage_as_unavailable_and_says_so(
