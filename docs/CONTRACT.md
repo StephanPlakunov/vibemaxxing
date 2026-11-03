@@ -1659,7 +1659,10 @@ Read the way `cursor-agent`'s own `/usage` reads it: Connect unary JSON POSTs of
 stored, logged or put in a message. The web cookie (`WorkosCursorSessionToken`) is not used.
 Any other shape, status or failure is **unknown**, and unknown is unavailable. Answers are
 cached for 120 s (`usage/<alias>.json`) and shown up to 15 min old, with their time.
-**Not verified against the live endpoint**; see the README.
+Checked live once (3 Nov 2026, one seat, read-only): the call works with that token and Connect
+JSON. The answer leaves out a field that is zero (proto3 JSON): no `individualUsed` is $0, and
+`individualRemaining` (cap minus used) then carries the cap, so `used` is derived from it; with
+neither figure it is unknown, never 0. `spendLimitUsage.pooledUsed` is the team's, not ours.
 
 Availability: while on-demand spend is 0 the seat is on included usage plus Cursor's bonus
 and is available. Once it is above 0 the personal cap decides: available while
@@ -1680,7 +1683,8 @@ Code's: `ANTHROPIC_MODEL` / `CLAUDE_CODE_EFFORT_LEVEL`, then `model` / `effortLe
 project's `.claude/settings.local.json` and `settings.json`, then the user's. No `claude`
 command is a `cursor-agent` one: `-c/--continue`, a bare `--resume`, `claude mcp ...` and every
 other flag are refused by name. Anything but `claude` after a Cursor alias runs unchanged.
-`--needs` on a headless run adds `--approve-mcps`.
+`--needs` on a headless run adds `--approve-mcps`. A headless run in a workspace nobody trusted
+stops (exit 1, no output): `vibe run --trust-workspace` adds `--trust`, nothing else does.
 
 ### Routing — `route.py`, `vibe run auto`
 
@@ -1709,16 +1713,28 @@ nothing.
 in `bridge.TOOLS`: reads and two drafts, each with a closed input schema. A call of any other name
 is a result with `isError: true` and "ask the lead", before any account is chosen. Arguments are
 checked (names, types) before anything is spent. A call: guard (calls per hour, sliding window,
-per process) -> `launch.bridge_pick` (`route.decide` with `routing.bridge.order`, default main
-within budget, cursor, main as last resort, for `needs=(connector,)`; extra never has a
-connector) -> `launch.bridge_execute` (one headless run: `claude -p ... --model haiku --tools ""
---allowedTools <one tool> --no-session-persistence`, `CLAUDE_CONFIG_DIR` and
-`CLAUDE_CODE_OAUTH_TOKEN` of the caller removed, the account's token lent only when it is not
-Claude Code's live login; or `cursor-agent -p --output-format json --model
-claude-haiku-5-5-<effort> --approve-mcps [--mode ask]`) under a per-call timeout. The clock is read
-per call. `routing.bridge`: `order`, `timeout_s` (90), `max_calls_per_hour` (30), `claude_model`,
-`cursor_effort`, `claude_tool_pattern`, `cursor_read_mode`, `tools` (bridge tool -> connector
-tool name). `bridge.log` (0600): `{at, account, kind, tool, ms, outcome}` with outcome `ok`,
-`failed`, `refused`, `limit` or `no-account`. `vibe bridge add-command` prints the
-`claude mcp add` line for `~/.claude-extra` and runs nothing. The connector tool names are
-defaults, unverified.
+per process) -> `launch.bridge_pick` -> `launch.bridge_execute` -> the result, with fences
+stripped.
+
+**Claude Code on main only, in code.** `bridge_pick` decides with the fixed order `main` (no
+budget, no last resort) and `claude_only=True`, whatever `settings.json` says; main must be
+healthy, else the call is refused with the reason. `bridge_execute` raises on a Cursor route, and
+`routing.bridge` has no key for the order or for Cursor (an old `order`, `cursor_effort` or
+`cursor_read_mode` is refused as unknown). Reason: Cursor has no per-run allowed-tools flag, its
+`--mode ask` is documented as "read-only exploration" and not as a boundary for MCP tools, and an
+attempt to show it blocks MCP writes is not allowed; a Cursor run could therefore be made to call a
+write tool by a prompt-injected result. Reads and drafts alike stay off Cursor until that is
+shown.
+
+The run: `claude -p <prompt> --model haiku --output-format json --tools "" --permission-prompts
+none --allowedTools <one tool> --disallowedTools <every known write tool of that connector>
+--no-session-persistence`, started in `~/.vibemaxxing/bridge-workspace` with `CLAUDE_CONFIG_DIR`
+and `CLAUDE_CODE_OAUTH_TOKEN` of the caller removed; the account's token is lent only when it is
+not Claude Code's live login. `--permission-prompts none` is documented in `claude --help` as
+"nobody: anything that would prompt is denied automatically". The clock is read per call.
+`routing.bridge`: `timeout_s` (90), `max_calls_per_hour` (30), `claude_model`,
+`claude_tool_pattern` (`mcp__claude_ai_{server}__{tool}`), `tools` (bridge tool -> connector tool
+name). `bridge.log` (0600): `{at, account, kind, tool, ms, outcome}` with outcome `ok`, `failed`,
+`refused`, `limit` or `no-account`. `vibe bridge add-command` prints the `claude mcp add` line
+for `~/.claude-extra` and runs nothing. Connector tool names and write-tool lists are defaults;
+only `slack_read_user_profile` is checked against the live connector.

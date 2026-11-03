@@ -299,3 +299,9 @@ def test_what_counts_as_not_a_session() -> None:
     assert cursor_translate.is_claude_command(["claude", "-p"])
     assert cursor_translate.is_claude_command(["/usr/local/bin/claude"])
     assert not cursor_translate.is_claude_command(["ls"])
+
+
+def test_trust_workspace_adds_trust_only_to_headless_runs() -> None:
+    assert "--trust" in run("-p", "x", trust_workspace=True).args
+    assert "--trust" not in run("-p", "x").args
+    assert "--trust" not in run("x", trust_workspace=True).args  # interactive asks in the TUI

@@ -8,9 +8,10 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **`vibe bridge serve` (vibe-bridge).** A local stdio MCP server that lets a session on extra
-  borrow Slack, Atlassian or Microsoft 365 for one read or draft at a time: one headless run on
-  the account the routing picks, with only that tool allowed, on a cheap model, under a timeout
-  and a calls-per-hour cap, logged without content to `~/.vibemaxxing/bridge.log`. Sends, posts,
+  borrow Slack, Atlassian or Microsoft 365 for one read or draft at a time: one headless Claude
+  Code run on main (never Cursor, never extra: fixed in code), with only that tool allowed (plus
+  `--permission-prompts none` and a deny list of the connector's write tools), on a cheap model,
+  under a timeout and a calls-per-hour cap, logged without content to `~/.vibemaxxing/bridge.log`. Sends, posts,
   ticket changes, deletes and reactions are refused ("ask the lead"). `vibe bridge add-command`
   prints the `claude mcp add` line for extra's config dir. `docs/CONTRACT.md` §20.
 - **Cursor accounts.** `vibe add [alias] --kind cursor` registers a Cursor seat (no credential
@@ -20,7 +21,8 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `vibe list` shows the seat's usage, read the way cursor-agent's own `/usage` reads it
   (unverified against the live endpoint; unknown on any shape change). `vibe run auto` routes a
   run by need (connectors or none) with a weekday budget on main, Cursor's on-demand cap and
-  extra; `vibe shell-init` prints the zsh snippet. `docs/CONTRACT.md` §19.
+  extra; `vibe shell-init` prints the zsh snippet. `vibe run cursor --trust-workspace` passes
+  `--trust` for headless runs. `docs/CONTRACT.md` §19.
 - **An ordered failover policy.** An optional `policy` in `~/.vibemaxxing/settings.json`
   (`{"mode": "ordered", "steps": [{"account", "until"}...], "then": "earliest_reset"}`)
   replaces "the most room at 99%": each tick puts Claude Code on the first step whose

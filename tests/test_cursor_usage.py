@@ -243,3 +243,70 @@ def test_the_file_fallback_reads_access_token_only(
 def test_the_keychain_item_names_are_the_agents_own() -> None:
     assert cursor_usage.KEYCHAIN_SERVICE == "cursor-access-token"
     assert cursor_usage.KEYCHAIN_ACCOUNT == "cursor-user"
+
+
+# --- the real answer (shape read from the live endpoint on 3 Nov 2026, numbers kept) -----------
+
+
+def real_answer(**spend: object) -> dict[str, object]:
+    return {
+        "billingCycleStart": "1791067517000",
+        "billingCycleEnd": "1793745917000",
+        "planUsage": {
+            "totalSpend": 24,
+            "includedSpend": 24,
+            "remaining": 1976,
+            "limit": 2000,
+            "remainingBonus": False,
+            "autoPercentUsed": 0.1142857142857143,
+            "apiPercentUsed": 0,
+            "totalPercentUsed": 0.096,
+        },
+        # proto3 JSON leaves out a field that is zero: there is no individualUsed here
+        "spendLimitUsage": {
+            "totalSpend": 1587827,
+            "pooledUsed": 1587827,
+            "individualLimit": 25000,
+            "individualRemaining": 25000,
+            "limitType": "team",
+            **spend,
+        },
+        "displayMessage": "You've used 0% of your included usage",
+    }
+
+
+def test_the_real_answer_has_no_used_field_when_nothing_is_used() -> None:
+    parsed = parse_usage(real_answer(), {"hardLimit": 2_147_483_647})
+
+    assert parsed is not None
+    assert parsed.on_demand_used_cents == 0 and parsed.on_demand_limit_cents == 25_000
+    assert parsed.included_percent == pytest.approx(0.096)
+    assert availability(parsed, margin_cents=1000).ok is True
+
+
+def test_used_is_derived_from_the_remaining_when_it_is_left_out() -> None:
+    parsed = parse_usage(real_answer(individualRemaining=20_000), None)
+
+    assert parsed is not None and parsed.on_demand_used_cents == 5_000
+    spent = parse_usage(real_answer(individualRemaining=500), None)
+    assert spent is not None and availability(spent, margin_cents=1000).ok is False
+
+
+def test_with_neither_used_nor_remaining_the_figure_is_unknown() -> None:
+    answer = real_answer()
+    spend = answer["spendLimitUsage"]
+    assert isinstance(spend, dict)
+    del spend["individualRemaining"]
+
+    parsed = parse_usage(answer, None)
+
+    assert parsed is not None and parsed.on_demand_used_cents is None
+    assert availability(parsed, margin_cents=1000).ok is None  # never guessed as zero
+    spend["individualLimit"] = 0
+    assert parse_usage(answer, None).on_demand_used_cents == 0  # type: ignore[union-attr]
+
+
+def test_the_pooled_team_spend_is_not_mistaken_for_ours() -> None:
+    parsed = parse_usage(real_answer(), None)
+
+    assert parsed is not None and parsed.on_demand_used_cents == 0  # pooledUsed is 1587827

@@ -20,7 +20,7 @@ from tests.cursor_fakes import StubToken
 from tests.test_run_cursor import NOW_S, World
 from vibemaxxing import bridge, cli, launch, route
 from vibemaxxing.bridge import Bridge, BridgeConfig, BridgeError, parse_config
-from vibemaxxing.errors import UsageError
+from vibemaxxing.errors import NetworkError, UsageError
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -244,18 +244,15 @@ def test_config_defaults_and_overrides_and_refusals() -> None:
     assert parse_config(None) == BridgeConfig()
     config = parse_config(
         {"timeout_s": 30, "max_calls_per_hour": 5, "claude_model": "sonnet",
-         "cursor_effort": "medium", "cursor_read_mode": None,
-         "tools": {"slack_search": "slack_search_public"},
-         "order": [{"account": "cursor"}, {"account": "main", "last_resort": True}]}
+         "tools": {"slack_search": "slack_search_public"}}
     )  # fmt: skip
     assert (config.timeout_s, config.max_calls_per_hour, config.claude_model) == (30.0, 5, "sonnet")
-    assert config.cursor_read_mode is None
     assert bridge.upstream_name(config, bridge.BY_NAME["slack_search"]) == "slack_search_public"
-    assert config.order[0] == route.Step("cursor")
     for bad in (
         "x", {"surprise": 1}, {"timeout_s": 0}, {"timeout_s": True}, {"max_calls_per_hour": 0},
-        {"claude_model": ""}, {"cursor_effort": "ludicrous"}, {"cursor_read_mode": "agent"},
-        {"tools": {"slack_send_message": "x"}}, {"tools": []},
+        {"claude_model": ""}, {"tools": {"slack_send_message": "x"}}, {"tools": []},
+        # nothing in the config can send a bridge call to Cursor, or change who it runs on
+        {"order": [{"account": "cursor"}]}, {"cursor_effort": "low"}, {"cursor_read_mode": "ask"},
     ):  # fmt: skip
         with pytest.raises(UsageError, match=r"routing\.bridge"):
             parse_config(bad)
@@ -358,58 +355,130 @@ def test_a_main_that_is_not_the_live_login_is_lent_its_token_for_the_call(world:
     assert call["has_token"] is True
 
 
-def test_over_budget_the_call_goes_to_cursor_with_haiku_low_and_read_only_mode(
-    world: World,
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("slack_search", {"query": "release"}),
+        ("slack_read_profile", {"user": "U1"}),
+        ("slack_create_draft", {"channel": "C1", "text": "hi"}),
+        ("atlassian_get_issue", {"issue": "ZAL-1"}),
+    ],
+)
+def test_a_call_main_cannot_take_is_refused_and_never_goes_to_cursor(
+    world: World, tool: str, arguments: dict[str, object]
 ) -> None:
-    fresh_claude_account(world, "main", weekly=100, active=True)  # over every day's budget
-    world.cursor_usage()  # included usage left
+    fresh_claude_account(world, "main", weekly=100, active=True)  # spent
+    fresh_claude_account(world, "extra", weekly=1)
+    world.cursor_usage()  # Cursor has plenty of room and a working login
 
-    text, failed = bridge_for(world).call("slack_search", {"query": "release"})
+    text, failed = bridge_for(world).call(tool, arguments)
 
-    assert (text, failed) == ('{"from": "cursor"}', False)
-    (argv,) = world.fake.calls()
-    assert argv[:5] == ["-p", "--output-format", "json", "--model", "claude-haiku-5-5-low"]
-    assert "--approve-mcps" in argv
-    assert argv[argv.index("--mode") + 1] == "ask"
-    assert world.claude_calls() == []
+    assert failed
+    assert "the bridge only runs on main" in text and "Cursor cannot be limited to one tool" in text
+    assert world.fake.calls() == []  # no cursor-agent run: no read, no draft
+    assert world.claude_calls() == []  # and nothing on extra either
+    assert world.cursor_client.requests == []  # Cursor was not even asked for its usage
     entries = [json.loads(x) for x in bridge.log_path(world.root).read_text().splitlines()]
-    assert entries[0]["account"] == "cursor" and entries[0]["kind"] == "cursor"
+    assert entries[-1]["outcome"] == "no-account"
 
 
-def test_a_draft_on_cursor_is_not_put_in_read_only_mode(world: World) -> None:
+def test_main_with_unknown_usage_is_refused_too(world: World) -> None:
+    # No usage cache and nothing queued for the endpoint: unknown, so unavailable.
+    world.claude_account("main", session=1, weekly=1, active=True)
+    cache = world.root / "usage" / "main.json"
+    cache.unlink()
+    world.client.queue(NetworkError("offline", "x"))
+
+    text, failed = bridge_for(world).call("slack_search", {"query": "x"})
+
+    assert failed and "usage unknown" in text
+    assert world.claude_calls() == [] and world.fake.calls() == []
+
+
+def test_no_config_key_and_no_route_can_start_a_cursor_run_from_the_bridge(world: World) -> None:
+    ctx = world.ctx()
+    execute = launch.bridge_execute(ctx.services(), BridgeConfig(), lambda alias: {})
+
+    with pytest.raises(BridgeError, match="never runs on Cursor"):
+        execute(
+            route.Route("cursor", "cursor", "x"), bridge.BY_NAME["slack_search"], {"query": "x"}
+        )
+
+    assert world.fake.calls() == []
+    # the order the bridge decides by is fixed in code: main only, whatever settings.json says
+    (world.root / "settings.json").write_text(
+        json.dumps({"schema": 1, "routing": {"order": {"needs": [{"account": "cursor"}]}}})
+    )
     fresh_claude_account(world, "main", weekly=100, active=True)
     world.cursor_usage()
+    routing = route.read_routing(world.root)
+    pick = launch.bridge_pick(ctx.services(), routing, BridgeConfig())
+    with pytest.raises(UsageError, match="only runs on main"):
+        pick("slack")
+    assert world.fake.calls() == []
 
-    bridge_for(world).call("slack_create_draft", {"channel": "C1", "text": "hi"})
 
-    (argv,) = world.fake.calls()
-    assert "--mode" not in argv
-
-
-def test_m365_only_ever_goes_to_main_even_over_budget(world: World) -> None:
-    fresh_claude_account(world, "main", weekly=100, active=True)
-    world.cursor_usage()
+def test_m365_runs_on_main_with_its_own_tool_allowed(world: World) -> None:
+    fresh_claude_account(world, "main", weekly=1, active=True)
 
     _, failed = bridge_for(world).call("m365_search_mail", {"query": "invoice"})
 
     assert failed is False
-    assert world.fake.calls() == []  # cursor has no m365
     (call,) = world.claude_calls(full=True)
     assert call["argv"][call["argv"].index("--allowedTools") + 1] == (  # type: ignore[index]
         "mcp__claude_ai_Microsoft_365__outlook_email_search"
     )
 
 
+def test_the_nested_run_has_three_fences_and_an_empty_workspace(world: World) -> None:
+    fresh_claude_account(world, "main", weekly=1, active=True)
+
+    bridge_for(world).call("slack_read_profile", {"user": "U1"})
+
+    (call,) = world.claude_calls(full=True)
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    assert argv[argv.index("--tools") + 1] == ""
+    assert argv[argv.index("--permission-prompts") + 1] == "none"  # nobody answers: deny, not ask
+    denied = argv[argv.index("--disallowedTools") + 1].split(",")
+    assert "mcp__claude_ai_Slack__slack_send_message" in denied
+    assert "mcp__claude_ai_Slack__slack_add_reaction" in denied
+    assert argv[argv.index("--allowedTools") + 1] not in denied
+    assert Path(str(call["cwd"])).resolve() == (world.root / "bridge-workspace").resolve()
+
+
+def test_every_allowlisted_tool_is_allowed_alone_and_every_write_of_its_server_is_denied() -> None:
+    config = BridgeConfig()
+    for tool in bridge.TOOLS:
+        argv = bridge.claude_argv(config, tool, "p")
+        allowed = argv[argv.index("--allowedTools") + 1]
+        denied = argv[argv.index("--disallowedTools") + 1].split(",")
+        assert allowed not in denied
+        writes = bridge.WRITE_TOOLS[tool.server]
+        expected = {
+            config.claude_tool_pattern.format(server=tool.server.replace(" ", "_"), tool=w)
+            for w in writes
+            if w != tool.upstream
+        }
+        assert set(denied) == expected
+        assert "--permission-prompts" in argv and "--tools" in argv
+    send = bridge.claude_argv(config, bridge.BY_NAME["slack_create_draft"], "p")
+    assert "mcp__claude_ai_Slack__slack_send_message" in send[send.index("--disallowedTools") + 1]
+    # a draft tool is itself on the write list, and is the one thing its own call allows
+    deny = send[send.index("--disallowedTools") + 1].split(",")
+    assert "mcp__claude_ai_Slack__slack_send_message_draft" not in deny
+    assert (
+        send[send.index("--allowedTools") + 1] == "mcp__claude_ai_Slack__slack_send_message_draft"
+    )
+
+
 def test_the_bridge_never_uses_extra(world: World) -> None:
     fresh_claude_account(world, "main", weekly=100, active=True)
     fresh_claude_account(world, "extra", weekly=1)  # plenty of room, but no connectors
-    world.cursor_client.queue_json(200, {"shape": "changed"})  # cursor unknown
-    world.cursor_client.queue_json(200, {})
 
-    bridge_for(world).call("slack_search", {"query": "x"})
+    _, failed = bridge_for(world).call("slack_search", {"query": "x"})
 
-    (call,) = world.claude_calls(full=True)
-    assert call["has_token"] is False  # ran on main (the live login), not on extra's token
+    assert failed and world.claude_calls() == []
 
 
 def test_a_failing_nested_run_is_reported_without_content(world: World) -> None:
@@ -500,3 +569,12 @@ def test_a_session_on_extra_calls_the_bridge_over_stdio_in_a_scratch_config(
     ]
     assert "ZAL-901" not in bridge.log_path(world.root).read_text()
     assert StubToken().value not in done.stdout + done.stderr
+
+
+def test_a_fenced_answer_is_handed_back_as_the_json_inside() -> None:
+    fenced = json.dumps({"result": '```json\n{"a": 1}\n```'})
+
+    assert bridge.extract_result(fenced) == '{"a": 1}'
+    assert bridge.extract_result(json.dumps({"result": '{"a": 1}'})) == '{"a": 1}'
+    assert bridge.extract_result("plain text") == "plain text"
+    assert bridge.extract_result("```\nx\n```") == "x"

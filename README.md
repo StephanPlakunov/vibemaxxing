@@ -294,11 +294,12 @@ login cannot point at Cursor).
 `vibe list` / `vibe usage` show the included allowance plus Cursor's bonus (a percent), the
 on-demand spend against your personal cap, and when the cycle resets. `cursor-agent` has no
 usage command, so vibe sends the same two calls its interactive `/usage` sends
-(`GetCurrentPeriodUsage`, `GetHardLimit` on `api2.cursor.sh`) with the access token
+(`GetCurrentPeriodUsage`, `GetHardLimit` on `api2.cursor.sh`; checked live on 3 Nov 2026, it
+answers) with the access token
 `cursor-agent login` stored: read at that moment, held in memory, sent in one header, never
 stored or printed. It is an undocumented API, parsed defensively; any shape change reads as
 `usage: unknown (...); see cursor.com/dashboard`, and unknown counts as unavailable. **This
-has not been verified against the live endpoint.**
+has not been verified beyond one read-only call on one seat.**
 
 ### Routing: `vibe run auto`
 
@@ -359,7 +360,10 @@ slack, atlassian, gcal; extra has none. To add one yourself (vibe adds none):
   Treat M365 as main-only until that works for you.
 
 In headless runs (`-p`) the agent may need `--approve-mcps`; vibe adds it only to runs that
-declared `--needs`.
+declared `--needs`. Headless `cursor-agent -p` also stops at a workspace nobody trusted (exit 1,
+no output: seen live); `vibe run cursor --trust-workspace` passes `--trust`, and vibe never adds it
+on its own. In a headless run the Slack MCP answered "needs auth" even though the interactive agent
+is logged in to it, so check `--needs` runs on Cursor before relying on them.
 
 ## The connector bridge (`vibe-bridge`)
 
@@ -374,10 +378,17 @@ switching under it breaks Remote Control). So extra borrows a connector one call
   `outlook_create_draft`.
 - **Never**: sending, posting, creating or transitioning tickets, deleting, reactions. Any other
   tool name is refused with "ask the lead".
-- Each call runs one headless run on the account the routing picks for that connector (main
-  within budget, else Cursor, else main; Microsoft 365 only main; never extra), with only that one
-  tool allowed (`--allowedTools` on Claude, `--mode ask` for reads on Cursor), on the cheap model
-  (`haiku`; `claude-haiku-5-5-low` on Cursor), and returns the tool's JSON result.
+- Each call runs one headless **Claude Code** run on **main** and nowhere else, with only that one
+  tool allowed, on the cheap model (`haiku`), and returns the tool's JSON result. Never extra (it
+  has no connectors) and never Cursor, for reads and drafts alike: Cursor has no per-run
+  allowed-tools flag, its `--mode ask` is documented only as "read-only exploration", and a
+  prompt-injected result could otherwise make a Cursor run call a write tool. This is fixed in
+  code; no setting changes it. When main cannot take the call (spent, usage unknown, login gone)
+  the call is refused with the reason.
+- Three fences around the one allowed tool: `--tools ""` (no Claude Code tools),
+  `--permission-prompts none` (in `-p` anything that would prompt is denied, so a tool outside
+  `--allowedTools` is denied, not asked), and `--disallowedTools` with every known write tool of
+  the same connector. The run starts in an empty directory (`~/.vibemaxxing/bridge-workspace`).
 - Cost guard: a timeout per call (90 s), at most 30 calls per hour per bridge process, both in
   `routing.bridge`. `~/.vibemaxxing/bridge.log` has one line per call: account, tool, duration,
   outcome. Never arguments, content or a secret.
@@ -388,9 +399,10 @@ vibe bridge add-command
 CLAUDE_CONFIG_DIR=~/.claude-extra claude mcp add --scope user vibe-bridge -- vibe bridge serve
 ```
 
-The connector tool names the nested run calls (`mcp__claude_ai_Slack__slack_read_channel`,
-`getJiraIssue`, ...) are defaults that have **not** been checked against the live connectors;
-override them in `routing.bridge.tools` / `claude_tool_pattern`. Text a connector returns (a Slack
+The connector tool names the nested run calls are defaults. One is checked against the live
+connector (`slack_read_user_profile` as `mcp__claude_ai_Slack__...`, which ran without a
+permission denial); the rest, and the lists of write tools, are not. Override them in
+`routing.bridge.tools` / `claude_tool_pattern`. Text a connector returns (a Slack
 message, a Jira description) reaches the extra session as the tool result: it is data, but it is
 the same prompt-injection surface any connector has.
 

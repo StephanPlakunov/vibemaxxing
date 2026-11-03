@@ -433,7 +433,7 @@ def _render_cursor(reading: launch.CursorReading) -> list[str]:
     if reading.note:
         lines.append(f"    {reading.note}")
     if usage.included_percent is not None:
-        lines.append(f"    {'Included + bonus':<24}{round(usage.included_percent):>4}%")
+        lines.append(f"    {'Included + bonus':<24}{usage.included_percent:>6.1f}%")
     used, cap = usage.on_demand_used_cents, usage.on_demand_limit_cents
     if used is not None:
         of = f" of {_money(cap)}" if cap else " (off)" if cap == 0 else ""
@@ -781,6 +781,7 @@ def _run_flags(args: argparse.Namespace) -> launch.RunFlags:
         allow_force=args.allow_force,
         allow_fast=args.allow_fast,
         allow_no_zdr=args.allow_no_zdr,
+        trust_workspace=args.trust_workspace,
         brief=args.brief,
         handover=args.handover,
     )
@@ -1015,6 +1016,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-fast", action="store_true", help='on Cursor: allow "-fast" models')
     run.add_argument(
         "--allow-no-zdr", action="store_true", help='on Cursor: allow "(NO ZDR)" models'
+    )
+    run.add_argument(
+        "--trust-workspace",
+        action="store_true",
+        help="on Cursor: pass --trust (headless runs refuse a workspace nobody trusted)",
     )
     run.add_argument(
         "--brief", metavar="TEXT", help="the original task, for a fresh run after a move"

@@ -180,6 +180,15 @@ def parse_usage(
         return None
     used = _cents(spend.get("individualUsed")) if spend is not None else None
     limit = _cents(spend.get("individualLimit")) if spend is not None else None
+    if spend is not None and used is None:
+        # The real answer omits a field that is zero (proto3 JSON): no `individualUsed` is $0
+        # used, and `individualRemaining` then carries the whole cap. Derive it from that, and
+        # from nothing weaker: with neither figure there is no on-demand number to trust.
+        remaining = _cents(spend.get("individualRemaining"))
+        if limit is not None and remaining is not None:
+            used = max(0, limit - remaining)
+        elif limit == 0:
+            used = 0
     if web_demand is not None:
         used = _cents(web_demand.get("used")) if used is None else used
         limit = _cents(web_demand.get("limit")) if limit is None else limit

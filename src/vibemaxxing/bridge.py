@@ -11,6 +11,11 @@ returns the tool's result.
 * Cost guard: a timeout per call, a cap of calls per hour per bridge process, a cheap model.
 * Log: ``~/.vibemaxxing/bridge.log`` holds account, tool, duration and outcome. No arguments, no
   content, no secret.
+* The bridge runs on Claude Code (main) ONLY, by code, not by a setting. Cursor has no per-run
+  allowed-tools flag, its ``--mode ask`` is documented as "read-only exploration" and not as a
+  boundary for MCP tools, and nobody has shown that it blocks an MCP write. So a prompt-injected
+  result could make a Cursor run send a message; no Cursor run is ever started from here, no
+  read and no draft. When main cannot take the call, the call is refused.
 * The upstream tool names below are defaults and are NOT verified against the live connectors;
   ``routing.bridge.tools`` overrides them per bridge tool.
 """
@@ -19,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from collections import deque
@@ -28,7 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, TextIO
 
-from vibemaxxing import cursor, route
+from vibemaxxing import route
 from vibemaxxing.errors import UsageError, VibeError
 from vibemaxxing.fsutil import FILE_MODE
 from vibemaxxing.redact import scrub
@@ -106,11 +112,27 @@ TOOLS: Final = (
 )  # fmt: skip
 BY_NAME: Final = {tool.name: tool for tool in TOOLS}
 
-DEFAULT_ORDER: Final = (
-    route.Step("main", budget=True),
-    route.Step("cursor"),
-    route.Step("main", last_resort=True),
-)
+# The connectors' write tools, as a second fence beside the one allowed tool: passed as
+# --disallowedTools, which beats --allowedTools. Defaults, not verified against the live
+# connectors; the allowed tool of a call is always left out of its own list.
+WRITE_TOOLS: Final = {
+    "Slack": (
+        "slack_send_message", "slack_schedule_message", "slack_send_message_draft",
+        "slack_post_message", "slack_update_message", "slack_delete_message",
+        "slack_add_reaction", "slack_remove_reaction", "slack_create_canvas",
+        "slack_update_canvas",
+    ),
+    "Atlassian": (
+        "createJiraIssue", "editJiraIssue", "transitionJiraIssue", "addCommentToJiraIssue",
+        "addWorklogToJiraIssue", "createIssueLink", "deleteJiraIssue", "createConfluencePage",
+        "updateConfluencePage", "createConfluenceFooterComment", "createConfluenceInlineComment",
+    ),
+    "Microsoft 365": (
+        "outlook_email_send", "outlook_draft_message", "outlook_email_reply",
+        "outlook_email_forward", "outlook_email_delete", "send_message", "chat_send_message",
+        "calendar_create_event", "calendar_delete_event",
+    ),
+}  # fmt: skip
 
 
 # --- config --------------------------------------------------------------------------
@@ -118,14 +140,10 @@ DEFAULT_ORDER: Final = (
 
 @dataclass(frozen=True)
 class BridgeConfig:
-    order: tuple[route.Step, ...] = DEFAULT_ORDER
     timeout_s: float = DEFAULT_TIMEOUT_S
     max_calls_per_hour: int = DEFAULT_MAX_CALLS_PER_HOUR
     claude_model: str = "haiku"
-    cursor_effort: str = "low"
     claude_tool_pattern: str = "mcp__claude_ai_{server}__{tool}"
-    # Cursor's read-only mode for the reads; None to leave it off.
-    cursor_read_mode: str | None = "ask"
     upstream: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -134,26 +152,16 @@ def _bad(why: str) -> UsageError:
 
 
 def parse_config(raw: object) -> BridgeConfig:
+    """`routing.bridge`. There is deliberately no key that moves a call to Cursor: an old `order`,
+    `cursor_effort` or `cursor_read_mode` is refused like any unknown member."""
     if raw is None:
         return BridgeConfig()
     if not isinstance(raw, dict):
         raise _bad("must be an object")
-    known = {
-        "order",
-        "timeout_s",
-        "max_calls_per_hour",
-        "claude_model",
-        "cursor_effort",
-        "claude_tool_pattern",
-        "cursor_read_mode",
-        "tools",
-    }
+    known = {"timeout_s", "max_calls_per_hour", "claude_model", "claude_tool_pattern", "tools"}
     if set(raw) - known:
         raise _bad(f"has unknown members: {', '.join(sorted(set(raw) - known))}")
     config = BridgeConfig()
-    order = config.order
-    if "order" in raw:
-        order = route._parse_steps(raw["order"], Path("settings.json"), "bridge")
     timeout = raw.get("timeout_s", config.timeout_s)
     calls = raw.get("max_calls_per_hour", config.max_calls_per_hour)
     if (
@@ -165,29 +173,21 @@ def parse_config(raw: object) -> BridgeConfig:
     if isinstance(calls, bool) or not isinstance(calls, int) or not 1 <= calls <= 1000:
         raise _bad("max_calls_per_hour must be between 1 and 1000")
     texts: dict[str, str] = {}
-    for key in ("claude_model", "cursor_effort", "claude_tool_pattern"):
+    for key in ("claude_model", "claude_tool_pattern"):
         value = raw.get(key, getattr(config, key))
         if not isinstance(value, str) or not value:
             raise _bad(f"{key} must be a non-empty string")
         texts[key] = value
-    if texts["cursor_effort"] not in cursor.EFFORTS:
-        raise _bad(f"cursor_effort must be one of {', '.join(cursor.EFFORTS)}")
-    mode = raw.get("cursor_read_mode", config.cursor_read_mode)
-    if mode is not None and mode not in ("ask", "plan"):
-        raise _bad("cursor_read_mode must be ask, plan or null")
     tools = raw.get("tools", {})
     if not isinstance(tools, dict) or not all(
         name in BY_NAME and isinstance(up, str) and up for name, up in tools.items()
     ):
         raise _bad("tools must map bridge tool names to the connector's tool name")
     return BridgeConfig(
-        order=order,
         timeout_s=float(timeout),
         max_calls_per_hour=calls,
         claude_model=texts["claude_model"],
-        cursor_effort=texts["cursor_effort"],
         claude_tool_pattern=texts["claude_tool_pattern"],
-        cursor_read_mode=mode,
         upstream={str(k): str(v) for k, v in tools.items()},
     )
 
@@ -208,10 +208,24 @@ def build_prompt(tool: BridgeTool, upstream: str, arguments: Mapping[str, object
     )
 
 
+def _tool_name(config: BridgeConfig, tool: BridgeTool, upstream: str) -> str:
+    return config.claude_tool_pattern.format(server=tool.server.replace(" ", "_"), tool=upstream)
+
+
 def claude_argv(config: BridgeConfig, tool: BridgeTool, prompt: str) -> list[str]:
-    allowed = config.claude_tool_pattern.format(
-        server=tool.server.replace(" ", "_"), tool=upstream_name(config, tool)
-    )
+    """The nested Claude Code run: one tool allowed, three fences around it.
+
+    1. ``--tools ""``: none of Claude Code's own tools.
+    2. ``--permission-prompts none``: in ``-p`` anything that would prompt is denied (nobody is
+       there to answer), so a tool outside ``--allowedTools`` is denied, never asked.
+    3. ``--disallowedTools``: every known write tool of the same connector, which beats an allow.
+    """
+    allowed_upstream = upstream_name(config, tool)
+    denied = [
+        _tool_name(config, tool, write)
+        for write in WRITE_TOOLS.get(tool.server, ())
+        if write != allowed_upstream
+    ]
     return [
         "claude",
         "-p",
@@ -222,19 +236,23 @@ def claude_argv(config: BridgeConfig, tool: BridgeTool, prompt: str) -> list[str
         "json",
         "--tools",
         "",
+        "--permission-prompts",
+        "none",
         "--allowedTools",
-        allowed,
+        _tool_name(config, tool, allowed_upstream),
+        "--disallowedTools",
+        ",".join(denied),
         "--no-session-persistence",
     ]
 
 
-def cursor_argv(
-    config: BridgeConfig, tool: BridgeTool, prompt: str, *, program: str, model: str
-) -> list[str]:
-    argv = [program, "-p", "--output-format", "json", "--model", model, "--approve-mcps"]
-    if config.cursor_read_mode and not tool.draft:
-        argv += ["--mode", config.cursor_read_mode]
-    return [*argv, prompt]
+_FENCE: Final = re.compile(r"^```[a-zA-Z]*\s*\n(.*?)\n?```\s*$", re.S)
+
+
+def _unfenced(text: str) -> str:
+    """A model likes to wrap JSON in a code fence; the bridge hands back the JSON itself."""
+    found = _FENCE.match(text.strip())
+    return found.group(1).strip() if found else text.strip()
 
 
 def extract_result(stdout: str) -> str:
@@ -242,12 +260,12 @@ def extract_result(stdout: str) -> str:
     try:
         parsed: object = json.loads(stdout)
     except ValueError:
-        return stdout.strip()
+        return _unfenced(stdout)
     if isinstance(parsed, dict):
         result = parsed.get("result")
         if isinstance(result, str):
-            return result.strip()
-    return stdout.strip()
+            return _unfenced(result)
+    return _unfenced(stdout)
 
 
 class BridgeError(Exception):
@@ -441,7 +459,9 @@ def append_log(root: Path, entry: Mapping[str, object]) -> None:
         return
 
 
-def run_headless(argv: Sequence[str], env: Mapping[str, str] | None, timeout_s: float) -> str:
+def run_headless(
+    argv: Sequence[str], env: Mapping[str, str] | None, timeout_s: float, cwd: Path | None = None
+) -> str:
     try:
         done = subprocess.run(
             list(argv),
@@ -452,6 +472,7 @@ def run_headless(argv: Sequence[str], env: Mapping[str, str] | None, timeout_s: 
             timeout=timeout_s,
             check=False,
             stdin=subprocess.DEVNULL,
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired:
         raise BridgeError(f"timed out after {timeout_s:.0f}s") from None

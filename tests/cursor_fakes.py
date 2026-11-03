@@ -197,6 +197,7 @@ seen = {{
     "argv": sys.argv[1:],
     "has_token": bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")),
     "has_config_dir": "CLAUDE_CONFIG_DIR" in os.environ,
+    "cwd": os.getcwd(),
 }}
 with open({record!r}, "a") as handle:
     handle.write(json.dumps(seen) + "\\n")

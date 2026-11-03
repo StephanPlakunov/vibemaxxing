@@ -110,6 +110,7 @@ class World:
         if not full:
             for call in calls:
                 call.pop("has_config_dir", None)
+                call.pop("cwd", None)
         return calls
 
 
@@ -589,3 +590,16 @@ def test_shell_init_prints_a_snippet_and_writes_nothing(
     assert 'claude-code() { vibe run auto --no-needs -- claude "$@"; }' in out
     assert zshrc.read_text() == "# mine\n"
     assert not (tmp_home / ".vibemaxxing").joinpath("shell-init").exists()
+
+
+def test_headless_cursor_runs_say_the_workspace_must_be_trusted_and_the_flag_passes_trust(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku")
+    err = capsys.readouterr().err
+    assert "never told to trust" in err and "--trust-workspace" in err
+    assert "--trust" not in world.fake.calls()[-1]  # never added on its own
+
+    world.main("run", "cursor", "--trust-workspace", "--", "claude", "-p", "x", "--model", "haiku")
+    assert "--trust" in world.fake.calls()[-1]
+    assert "never told to trust" not in capsys.readouterr().err

@@ -62,6 +62,8 @@ class Options:
     allow_force: bool = False
     allow_fast: bool = False
     allow_no_zdr: bool = False
+    # Pass --trust: headless cursor-agent refuses a workspace it was never told to trust.
+    trust_workspace: bool = False
     is_cursor_chat: Callable[[str], bool] = lambda _: False
 
 
@@ -277,6 +279,8 @@ def translate(claude_args: Sequence[str], options: Options) -> Translation:
     out += ["--model", cursor_model]
     if options.needs_mcp and print_mode:
         out.append("--approve-mcps")
+    if options.trust_workspace and print_mode:
+        out.append("--trust")
     out += extra
     if prompt:
         out += ["--", *prompt] if any(word.startswith("-") for word in prompt) else prompt
