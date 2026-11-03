@@ -306,7 +306,14 @@ class Dashboard(App[None]):
         loop = asyncio.get_running_loop()
         views = await loop.run_in_executor(
             self._pool,
-            partial(envelope.collect, ctx.root, client=ctx.client, port=ctx.port, now_s=now_s),
+            partial(
+                envelope.collect,
+                ctx.root,
+                client=ctx.client,
+                port=ctx.port,
+                now_s=now_s,
+                port_for=ctx.port_for,
+            ),
         )
         # Cursor seats: cached for two minutes inside read_cursor, so a one-minute refresh makes
         # a request at most every other cycle. Before the publish, so status.json has them.

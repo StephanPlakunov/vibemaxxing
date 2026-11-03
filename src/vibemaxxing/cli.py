@@ -25,6 +25,7 @@ from vibemaxxing import (
     childenv,
     credentials,
     cursor,
+    cursor_translate,
     envelope,
     history,
     keychain,
@@ -100,6 +101,7 @@ class Context:
             environ=os.environ,
             cwd=Path.cwd(),
             home=Path.home(),
+            port_for=self.port_for,
         )
 
     def cursor_readings(self, *, now_s: float | None = None) -> list[launch.CursorReading]:
@@ -357,10 +359,22 @@ def _import(ctx: Context, wanted: str | None, given: Path, as_json: bool) -> int
         )
     existing = _already_stored(ctx.root, credential)
     if existing is not None:
+        stored = store.read_account(ctx.root, existing)
+        if stored.config_dir is None and store.read_active(ctx.root) != existing:
+            # Imported before accounts knew their config dir: vibe still refreshes this very
+            # lineage, and so does Claude Code in that dir. From here only Claude Code does.
+            store.delete_stash(ctx.root, existing)
+            store.write_account(ctx.root, replace(stored, config_dir=str(directory)))
+            human = (
+                f'"{existing}" is now the login in {directory}: Claude Code refreshes it there '
+                "and vibe never does\n"
+            )
+        else:
+            human = f'that login is already stored as "{existing}"\n'
         _emit(
             _action("add", alias=existing, adopted=True, config_dir=str(directory)),
             as_json=as_json,
-            human=f'that login is already stored as "{existing}"\n',
+            human=human,
         )
         return 0
     base = identity.email or identity.display_name or "account"
@@ -395,6 +409,7 @@ def _import(ctx: Context, wanted: str | None, given: Path, as_json: bool) -> int
             state=AccountState.OK,
             message=None,
             added_at=ctx.now_s,
+            config_dir=str(directory),
         ),
     )
     _emit(
@@ -402,7 +417,8 @@ def _import(ctx: Context, wanted: str | None, given: Path, as_json: bool) -> int
         as_json=as_json,
         human=(
             f'imported the login in {directory} as "{alias}"\n'
-            f"vibe now refreshes it; stop using that dir, or the two copies log each other out\n"
+            f"Claude Code keeps refreshing it there and vibe never does: "
+            f"`vibe run {alias} -- claude` starts it with CLAUDE_CONFIG_DIR={directory}\n"
         ),
     )
     return 0
@@ -458,7 +474,9 @@ def cmd_add(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def _collect_and_record(ctx: Context) -> tuple[list[AccountView], float | None]:
-    views = envelope.collect(ctx.root, client=ctx.client, port=ctx.port, now_s=ctx.now_s)
+    views = envelope.collect(
+        ctx.root, client=ctx.client, port=ctx.port, now_s=ctx.now_s, port_for=ctx.port_for
+    )
     auto.publish(ctx.root, port=ctx.port, now_s=ctx.now_s)
     with closing(history.connect(store.history_path(ctx.root))) as conn:
         history.record(conn, at_s=ctx.now_s, pool=envelope.pool_weeks(views))
@@ -791,6 +809,13 @@ def cmd_alias(args: argparse.Namespace, ctx: Context) -> int:
 def _fresh_token(ctx: Context, alias: str) -> Credential:
     account = store.read_account(ctx.root, alias)
     now_ms = int(ctx.now_s * 1000)
+    if account.config_dir is not None:
+        # Planning sends such an account to its config dir; this is the net under that.
+        raise UsageError(
+            f'"{alias}" is the Claude Code login in {account.config_dir}, which only Claude Code '
+            "refreshes",
+            f"vibe run {alias} -- claude",
+        )
     if store.read_active(ctx.root) == alias:
         # Claude Code refreshes this lineage; refreshing it here too logs it out.
         # With the refresh buffer: the child cannot refresh, so a token with
@@ -903,11 +928,23 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
     elif plan.kind == cursor.KIND_CURSOR:
         # No credential of ours goes anywhere: cursor-agent reads its own login.
         code = _spawn(plan.argv, child.env)
+    elif plan.config_dir is not None:
+        # The account's login is Claude Code's, in that dir: it reads and refreshes it there. Not a
+        # token of ours, so a session that outlives the access token keeps its login, and vibe
+        # starting another run can never take it away.
+        code = _spawn(plan.argv, {**child.env, "CLAUDE_CONFIG_DIR": plan.config_dir})
     elif not plan.claude_token:
         # Claude Code's own login: no token override, and no inherited Claude variable either.
         code = _spawn(plan.argv, child.env)
     else:
         credential = _fresh_token(ctx, plan.alias)
+        if cursor_translate.is_claude_command(plan.argv) and not {"-p", "--print"} & set(plan.argv):
+            ends = datetime.fromtimestamp(credential.expires_at_ms / 1000).strftime("%H:%M")
+            _say(
+                f"this session carries a token that ends at {ends} and cannot renew it: "
+                f"for a longer one give {plan.alias} its own config dir "
+                f"(vibe add {plan.alias} --from-config-dir DIR)"
+            )
         # The fifth permitted reveal() site: the child's environment. The
         # global Keychain credential is untouched, so other shells keep their account.
         explicit = {childenv.TOKEN_VAR: credential.access_token.reveal()}

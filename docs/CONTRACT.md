@@ -1595,8 +1595,28 @@ The import parses the blob, reads `oauthAccount`, and writes an `ok` account, as
 no Keychain write, `active` unchanged, and the alias's stash deleted. It refuses: no login
 (`NeedsLoginError`, `CLAUDE_CONFIG_DIR=DIR claude /login`), no `accountUuid`
 (`UsageError`), the active account's alias, and an alias that holds another uuid. A login
-whose refresh token is already stored is reported as that account. Measured once: the item
+whose refresh token is already stored is reported as that account (and, when that account has no
+`config_dir` yet, converted to one: its stash is deleted and vibe stops refreshing it). Measured once: the item
 for `/Users/stephanplakunov/.claude-extra` is `Claude Code-credentials-702813c4`.
+
+**Owned accounts (`config_dir`).** The import records `config_dir` (absolute path) in the account file; the key is
+written only when set, so the file of an account vibe owns is unchanged. Such an account's lineage has one
+refresher, Claude Code in that dir, and vibe never POSTs a refresh for it:
+
+- `oauth.refresh` returns `RefreshOutcome(None, "owned")` before anything else (no stash, no claim, no request);
+  an unreadable account file returns `transient` rather than guessing. `oauth.ensure_usable` and `store.switch`
+  raise `UsageError` (`store.refuse_owned`), so `vibe switch` and auto-switch never copy it into the default login.
+- `envelope.owned_token` borrows the token from the dir's own item (`port_for(dir)`, read only; the dir's
+  `.claude.json` must name the same uuid; the rule of `active_token`). With it expired the view keeps the last
+  usage numbers and says Claude Code refreshes it in that dir. `envelope.collect(..., port_for=...)` carries the port
+  factory (default `keychain.config_dir_port`).
+- `launch.Plan.config_dir` is set for such an account, by `vibe run <alias>` and by `vibe run auto`. `cmd_run` then
+  runs the child with `CLAUDE_CONFIG_DIR=<dir>` and no `CLAUDE_CODE_OAUTH_TOKEN`; the rest of the environment is
+  built as for any Claude child (section 19) and the bridge is injected as before. The run is refused, naming
+  `CLAUDE_CONFIG_DIR=<dir> claude`, when the dir has no login, or when `<dir>/.claude.json` names another uuid.
+  A one-line note names what `~/.claude` has and the dir lacks among `CLAUDE.md`, `settings.json`, `skills`, `projects`.
+- An account vibe owns still runs on `CLAUDE_CODE_OAUTH_TOKEN`; an interactive `claude` on it prints when that token
+  ends and that a longer session needs a config dir of its own.
 
 ### `status.json` and `vibe statusline`
 

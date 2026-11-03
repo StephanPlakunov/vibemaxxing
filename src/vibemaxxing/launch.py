@@ -7,6 +7,7 @@ the person), so `vibe run --dry-run` can print it and the tests can compare it.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from typing import Final
 from vibemaxxing import (
     bridge,
     childenv,
+    credentials,
     cursor,
     cursor_translate,
     cursor_usage,
@@ -27,9 +29,9 @@ from vibemaxxing import (
 from vibemaxxing.cursor import AgentPort
 from vibemaxxing.cursor_usage import CursorTokenPort, CursorUsage
 from vibemaxxing.envelope import AccountView
-from vibemaxxing.errors import NotFoundError, UsageError
+from vibemaxxing.errors import NeedsLoginError, NotFoundError, UsageError, VibeError
 from vibemaxxing.httpclient import HttpClient
-from vibemaxxing.keychain import KeychainPort
+from vibemaxxing.keychain import KeychainPort, config_dir_port
 from vibemaxxing.models import AccountState
 from vibemaxxing.poll import USAGE_FRESH_S
 from vibemaxxing.pool import WEEKLY_ALL_KIND, blocking
@@ -81,6 +83,8 @@ class Services:
     environ: Mapping[str, str]
     cwd: Path
     home: Path
+    # The Keychain item Claude Code keeps the login of a config dir in. Only ever read.
+    port_for: Callable[[Path], KeychainPort] = config_dir_port
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,9 @@ class Plan:
     interactive: bool = False
     # Whether the child needs the Claude account's token in its environment.
     claude_token: bool = False
+    # The account's own config dir, when Claude Code keeps its login there: the child runs with
+    # CLAUDE_CONFIG_DIR set to it and no token, so Claude Code refreshes the login itself.
+    config_dir: str | None = None
     # `claude --version` and friends: no account, no environment of ours.
     passthrough: bool = False
 
@@ -340,7 +347,11 @@ def candidates(svc: Services, routing: route.Routing) -> Callable[[str], route.C
         else:
             if not claude:
                 views = envelope.collect(
-                    svc.root, client=svc.client, port=svc.port, now_s=svc.now_s
+                    svc.root,
+                    client=svc.client,
+                    port=svc.port,
+                    now_s=svc.now_s,
+                    port_for=svc.port_for,
                 )
                 claude.update({v.alias: _claude_candidate(v, routing, svc.now_s) for v in views})
             found[alias] = claude.get(alias)
@@ -447,6 +458,55 @@ def _cursor_plan(
     )
 
 
+# What a config dir of its own lacks compared with ~/.claude. Names only; a link brings each over.
+_SHARED_NAMES: Final = ("CLAUDE.md", "settings.json", "skills", "projects")
+
+
+def _config_dir_of(svc: Services, alias: str) -> str | None:
+    try:
+        return store.read_account(svc.root, alias).config_dir
+    except VibeError:
+        return None  # the broken file is reported by whoever reads it next
+
+
+def _config_dir_notes(svc: Services, alias: str, directory: str) -> list[str]:
+    """Refuse a config dir with no matching login; say what it does not have.
+
+    The login is Claude Code's, so there is no token to hand over: a dir nobody logged in
+    to, or one logged in as somebody else, would start a session on the wrong account.
+    """
+    path = Path(directory)
+    login = f"CLAUDE_CONFIG_DIR={path} claude"
+    if svc.port_for(path).read() is None:
+        raise NeedsLoginError(
+            f'Claude Code has no login for {path}, where "{alias}" lives (log in with /login)',
+            login,
+        )
+    stored = store.read_account(svc.root, alias).identity.account_uuid
+    there = credentials.read_claude_identity(path / ".claude.json")
+    if stored is not None and there.account_uuid is not None and there.account_uuid != stored:
+        raise UsageError(
+            f'{path} is logged in as {there.email or there.account_uuid}, not as "{alias}"',
+            f"vibe add {alias} --from-config-dir {path}",
+        )
+    notes = [
+        f"{alias} runs with CLAUDE_CONFIG_DIR={path}: Claude Code keeps that login and "
+        "refreshes it itself, no token override"
+    ]
+    base = svc.home / ".claude"
+    lacking = [
+        name
+        for name in _SHARED_NAMES
+        if os.path.lexists(base / name) and not os.path.lexists(path / name)
+    ]
+    if lacking:
+        notes.append(
+            f"{path} has no {', '.join(lacking)} of its own, so what ~/.claude has there "
+            f"does not apply: ln -s ~/.claude/{lacking[0]} {path}/"
+        )
+    return notes
+
+
 def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags) -> Plan:
     """The plan for `vibe run <alias> -- <command>`; ``alias`` may be ``auto``."""
     if not command:
@@ -478,6 +538,10 @@ def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags)
     if alias not in store.list_aliases(svc.root):
         raise NotFoundError(f'there is no account named "{alias}"', "vibe list")
     argv, bridge_notes = _with_bridge(svc, alias, command, flags)
+    config_dir = _config_dir_of(svc, alias)
+    if config_dir is not None:
+        notes = _config_dir_notes(svc, alias, config_dir)
+        return Plan(alias, cursor.KIND_CLAUDE, argv, (*notes, *bridge_notes), config_dir=config_dir)
     return Plan(alias, cursor.KIND_CLAUDE, argv, tuple(bridge_notes), claude_token=True)
 
 
@@ -613,7 +677,11 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
             args = _with_prompt(args, text)
     # The account Claude Code is logged in as right now keeps its own login: no token override,
     # so it refreshes itself and keeps the scopes (and connectors) of a normal login.
-    live = store.live_alias(svc.root, svc.port) == chosen.alias
+    config_dir = _config_dir_of(svc, chosen.alias)
+    if config_dir is not None:
+        # Its login is Claude Code's in that dir: never the live login, never a token override.
+        notes += _config_dir_notes(svc, chosen.alias, config_dir)
+    live = store.live_alias(svc.root, svc.port) == chosen.alias and config_dir is None
     inherited = childenv.parent_carries_claude_account(svc.environ)
     if live and inherited:
         # This process runs inside a session pinned to an account by a token or a config dir.
@@ -636,5 +704,6 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
         argv,
         (*notes, *bridge_notes),
         chosen,
-        claude_token=not live,
+        claude_token=not live and config_dir is None,
+        config_dir=config_dir,
     )

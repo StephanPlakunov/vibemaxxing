@@ -50,9 +50,23 @@ account does not change. It refuses a dir with no login, a profile with no accou
 (auto-switch could never tell that account apart), the active account's name, and a name
 another account already holds.
 
-**After the import, stop using that config dir.** vibe now refreshes the login, and a
-refresh rotates the refresh token: whichever of the two copies refreshes second is logged
-out.
+**From then on that login is Claude Code's, in that dir, and vibe never refreshes it.** The account records
+the dir. `vibe run work -- claude` starts Claude Code with `CLAUDE_CONFIG_DIR=<dir>` and no token override (the other
+Claude variables are still dropped and the bridge is still handed over), so Claude Code reads and renews the login in
+the dir's own Keychain item, and a session in it keeps working for as long as the login lives, whatever else vibe
+starts or polls. (Before this, vibe copied the login, refreshed the copy itself and ran sessions on a bare access
+token: a refresh on either side logged the other out, and a long session died with "OAuth token revoked".)
+`vibe list`, the TUI and the web page read that account's usage with the token in the dir's item; once it has expired
+they show the last numbers until the next session in the dir renews it. `vibe switch work` is refused (it would copy
+the refresh token into the default login) and auto-switch never switches onto it: use `vibe run work -- claude`. A
+dir with no login, or logged in as another account, stops the run and names the command that fixes it.
+
+**A config dir has its own settings.** The `CLAUDE.md`, `settings.json`, `skills` and `projects` of `~/.claude` do not
+apply there unless linked (`ln -s ~/.claude/CLAUDE.md ~/.claude-work/`); `vibe run` names what is missing. Linking
+`projects` also lets `claude --resume` find sessions that were started in `~/.claude`.
+
+An alias imported before this change becomes owned by running the same import again: the login is already stored, so
+vibe records the dir, drops its stash and stops refreshing.
 
 ## Every day
 
@@ -459,8 +473,8 @@ vibe bridge add-command   # prints the line that registers the bridge for extra;
 ```
 
 **You do not need to register it for `vibe run` sessions.** `vibe run <account> -- claude ...` (and
-`vibe run auto`) start claude with a token override and without `CLAUDE_CONFIG_DIR`, so Claude Code reads the
-default config and never the one in `~/.claude-extra`. So when the Claude run is on an account that lacks a
+`vibe run auto`) start claude with a token override and without `CLAUDE_CONFIG_DIR` (for an account that lives in
+its own config dir: with `CLAUDE_CONFIG_DIR` and no token), so Claude Code may not read the one in `~/.claude-extra`. So when the Claude run is on an account that lacks a
 connector the bridge offers (by `routing.connectors`: extra has none) and the bridge has a login for that
 upstream, vibe adds `--mcp-config=<~/.vibemaxxing/bridge/mcp-config.json>` to the claude arguments itself: a
 vibe-owned file holding only `vibe-bridge` (not `--strict-mcp-config`, so the account's own servers stay) and
@@ -540,9 +554,13 @@ truncates at ~4005 bytes and stores the truncated value, and the Security framew
 refuses to read Claude Code's item from a process outside its ACL, which would put an
 authorization prompt in front of every switch. Multi-user macOS is out of scope for v1.
 
-**`vibe run` cannot refresh its own token.** It sets `CLAUDE_CODE_OAUTH_TOKEN` for the
-child only, which is what lets two shells hold two accounts, but a session outliving that
-access token needs a re-run. Every grandchild inherits the variable.
+**`vibe run` cannot refresh its own token, for an account vibe owns.** It sets `CLAUDE_CODE_OAUTH_TOKEN` for the
+child only, which is what lets two shells hold two accounts, but that is an access token (about 8 hours) and nothing
+in the session can renew it: a session that outlives it fails, which is why an interactive run prints "this session
+carries a token that ends at HH:MM". Every grandchild inherits the variable. **For a session that lives longer, give
+the account its own config dir** (`vibe add NAME --from-config-dir DIR`, see "Import a login from a second config
+dir"): `vibe run` then starts Claude Code with `CLAUDE_CONFIG_DIR=DIR` and no token, and Claude Code refreshes the
+login itself.
 
 **Switching does not reach a running session.** `vibe switch` makes no attempt to signal
 a live Claude Code process. Restart it, or use `vibe run`. Automatic switching has the same

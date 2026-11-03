@@ -5,6 +5,18 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - fork `stephan/ordered-failover`
 
+### Fixed
+
+- **A running Claude session no longer loses its login because vibe started or polled something.** A long
+  interactive session on extra stopped with "OAuth token revoked": it had been started with
+  `CLAUDE_CODE_OAUTH_TOKEN` (an access token that cannot renew itself) while vibe's own 5-minute tick refreshed the
+  same lineage and rotated its refresh token. An account imported with `--from-config-dir` now records that dir,
+  `vibe run` starts Claude Code with `CLAUDE_CONFIG_DIR=<dir>` and no token (Claude Code refreshes the login itself;
+  env scrub and bridge injection unchanged), and nothing in vibe refreshes it: `oauth.refresh` refuses it for every
+  caller (run, list, TUI, web, tick, `run auto`), `vibe switch` and auto-switch never copy it into the default login,
+  and its usage is read with the token in the dir's own Keychain item. Importing the same dir again converts an
+  alias imported earlier. An interactive run on a vibe-owned account prints when its token ends.
+
 ### Changed
 
 - **The bridge reaches `vibe run` sessions by itself.** `vibe run` / `vibe run auto` start claude with a token

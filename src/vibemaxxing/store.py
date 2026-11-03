@@ -54,6 +54,10 @@ class Account:
     state: AccountState
     message: str | None
     added_at: float
+    # The config dir whose Claude Code login this account is (`vibe add --from-config-dir`).
+    # Claude Code refreshes that lineage, in that dir's own Keychain item; vibe only reads it.
+    # None: the lineage is vibe's, and vibe refreshes it.
+    config_dir: str | None = None
 
 
 def valid_alias(alias: str) -> bool:
@@ -190,11 +194,14 @@ def read_account(root: Path, alias: str) -> Account:
         state=state,
         message=_optional_str(raw, "message"),
         added_at=float(added_at) if isinstance(added_at, (int, float)) else 0.0,
+        config_dir=_optional_str(raw, "config_dir"),
     )
 
 
 def write_account(root: Path, account: Account) -> None:
     identity = account.identity
+    # Only when set: a file of an account vibe owns stays what it always was.
+    owner = {"config_dir": account.config_dir} if account.config_dir is not None else {}
     _write_json(
         account_path(root, account.alias),
         root,
@@ -204,6 +211,7 @@ def write_account(root: Path, account: Account) -> None:
             "added_at": account.added_at,
             "state": str(account.state),
             "message": account.message,
+            **owner,
             "identity": {
                 "email": identity.email,
                 "account_uuid": identity.account_uuid,
@@ -541,8 +549,23 @@ def require_usable(account: Account, *, now_ms: int) -> None:
         raise NeedsLoginError(f'the login for "{account.alias}" has lapsed', recovery)
 
 
+def refuse_owned(account: Account) -> None:
+    """An account whose login Claude Code keeps in another config dir is never copied elsewhere.
+
+    A switch would put its refresh token into the default login too; the next refresh by
+    either holder logs the other out. It runs with `vibe run`, which sets that config dir.
+    """
+    if account.config_dir is not None:
+        raise UsageError(
+            f'"{account.alias}" is the Claude Code login in {account.config_dir}, and copying '
+            "it into the default login would log one of the two out",
+            f"vibe run {account.alias} -- claude",
+        )
+
+
 def switch(root: Path, alias: str, port: KeychainPort, *, now_s: float | None = None) -> None:
     incoming = read_account(root, alias)  # an unknown alias must fail before the port is touched
+    refuse_owned(incoming)
 
     outgoing = read_active(root)
     # `active` is only what vibe last wrote. When ~/.claude.json names another stored

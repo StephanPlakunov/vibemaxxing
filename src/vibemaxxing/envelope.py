@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import credentials, oauth, store, usage
+from vibemaxxing import credentials, keychain, oauth, store, usage
 from vibemaxxing.credentials import EMPTY_IDENTITY, Credential, Identity
 from vibemaxxing.errors import StoreError, VibeError
 from vibemaxxing.httpclient import HttpClient, HTTPError
@@ -285,7 +285,13 @@ def _usage_view(
 
 
 def active_token(
-    root: Path, account: store.Account, port: KeychainPort, *, now_ms: int, buffer_ms: int = 0
+    root: Path,
+    account: store.Account,
+    port: KeychainPort,
+    *,
+    now_ms: int,
+    buffer_ms: int = 0,
+    profile: Path | None = None,
 ) -> tuple[Credential | None, str]:
     """A token for the active account that needs no refresh, or why there is none.
 
@@ -311,7 +317,8 @@ def active_token(
         raw, read_problem = None, exc.message
     stored_uuid = account.identity.account_uuid
     if raw is not None and stored_uuid is not None:
-        live_uuid = credentials.read_claude_identity(Path.home() / ".claude.json").account_uuid
+        where = profile if profile is not None else Path.home() / ".claude.json"
+        live_uuid = credentials.read_claude_identity(where).account_uuid
         if live_uuid == stored_uuid:
             with contextlib.suppress(StoreError):
                 live = credentials.parse_blob(raw)
@@ -327,6 +334,39 @@ def active_token(
         # never be borrowed. Switching away lets vibe refresh this account again.
         return None, "token expired - no account id stored to match Claude Code's login"
     return None, "token expired - vibe leaves the active account's token to Claude Code"
+
+
+def owned_token(
+    root: Path,
+    account: store.Account,
+    port_for: Callable[[Path], KeychainPort],
+    *,
+    now_ms: int,
+    buffer_ms: int = 0,
+) -> tuple[Credential | None, str]:
+    """A token for an account Claude Code keeps in its own config dir, or why there is none.
+
+    Same rule as for the active account, and for the same reason: that lineage has one
+    refresher, Claude Code in that dir, and nothing here refreshes or writes. The token is
+    borrowed from the dir's own Keychain item, so it is as fresh as Claude Code left it.
+    When it has expired the next session in that dir refreshes it; until then the numbers
+    on screen are the last ones fetched.
+    """
+    if account.config_dir is None:
+        return None, f'"{account.alias}" has no config dir'
+    directory = Path(account.config_dir)
+    try:
+        port = port_for(directory)
+    except VibeError as exc:
+        return None, exc.message
+    token, problem = active_token(
+        root, account, port, now_ms=now_ms, buffer_ms=buffer_ms, profile=directory / ".claude.json"
+    )
+    if token is not None:
+        return token, ""
+    if "vibe leaves the active account" not in problem:
+        return None, problem
+    return None, f"token expired - Claude Code refreshes it in {directory} when a session runs"
 
 
 def _stored_elsewhere(root: Path, alias: str, live: Credential) -> bool:
@@ -349,6 +389,7 @@ def _view(
     now_s: float,
     fetch: bool,
     fresh_s: float = USAGE_FRESH_S,
+    port_for: Callable[[Path], KeychainPort] = keychain.config_dir_port,
 ) -> AccountView:
     now_ms = int(now_s * 1000)
     try:
@@ -365,6 +406,23 @@ def _view(
 
     if active:
         token, problem = active_token(root, account, port, now_ms=now_ms)
+        base = AccountView(alias, active, AccountState.OK, None, identity, plan, None, None)
+        if not fetch:
+            return base
+        return _usage_view(
+            root,
+            account,
+            token or account.credential,
+            client,
+            now_s,
+            base,
+            can_fetch_why=problem,
+            fresh_s=fresh_s,
+        )
+
+    if account.config_dir is not None:
+        # Claude Code's lineage, in its own dir: read, never refreshed (oauth.refresh refuses it).
+        token, problem = owned_token(root, account, port_for, now_ms=now_ms)
         base = AccountView(alias, active, AccountState.OK, None, identity, plan, None, None)
         if not fetch:
             return base
@@ -414,6 +472,7 @@ def collect(
     now_s: float,
     fetch: bool = True,
     fast: frozenset[str] = frozenset(),
+    port_for: Callable[[Path], KeychainPort] = keychain.config_dir_port,
 ) -> list[AccountView]:
     """Every account's view. ``fast`` names the accounts whose usage answer may be
     reused for POLL_FLOOR_S instead of USAGE_FRESH_S: an account close to its limit,
@@ -429,6 +488,7 @@ def collect(
             now_s=now_s,
             fetch=fetch,
             fresh_s=POLL_FLOOR_S if alias in fast else USAGE_FRESH_S,
+            port_for=port_for,
         )
         for alias in store.list_aliases(root)
     ]
