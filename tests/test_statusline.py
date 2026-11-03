@@ -80,6 +80,12 @@ def test_the_line_has_the_documented_shape() -> None:
     )
 
 
+def test_an_account_with_only_its_weekly_window_shows_the_bare_number() -> None:
+    doc = document(account("main", [("weekly_all", 53, _at(26, 0, 0))]))
+
+    assert statusline.render(doc, now_s=NOON) == "▶ extra · main: 53%"
+
+
 def test_numbers_older_than_fifteen_minutes_get_a_question_mark() -> None:
     rows = [("session", 28, _at(22, 23, 10))]
     old = document(account("extra", rows, fetched_at=NOON - 16 * 60))
@@ -99,7 +105,7 @@ def test_rows_without_fresh_data_are_left_out() -> None:
     )
 
     assert statusline.render(doc, now_s=NOON) == (
-        "main: wk 5% · extra: - · side: - · gone: needs login"
+        "main: 5% · extra: - · side: - · gone: needs login"
     )
 
 

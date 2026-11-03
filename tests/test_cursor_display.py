@@ -307,8 +307,8 @@ def test_the_cursor_panel_shows_both_bars_the_reset_and_the_routing_state() -> N
 
     assert "cursor" in text and "dev@example.com" in text and "Cursor · team Zvoove" in text
     assert "Included + bonus" in text and "42%" in text and "in 5d" in text
-    assert "On-demand" in text and "$12.50 of $250.00" in text and "billed to the company" in text
-    assert "routing: available" in text
+    assert "On-demand" in text and "$12.50 of $250.00" in text
+    assert "billed to the company" not in text and "routing:" not in text
 
 
 def test_the_cursor_panel_for_unknown_logged_out_and_spent() -> None:
@@ -331,7 +331,7 @@ def test_the_cursor_panel_for_unknown_logged_out_and_spent() -> None:
         reading(usage=spent_usage, availability=availability(spent_usage, margin_cents=1000)),
         now_s=NOW_S,
     )
-    assert "routing: spent" in spent.plain
+    assert "routing:" not in spent.plain
     styled = " ".join(spent.plain[s.start : s.end] for s in spent.spans if s.style)
     assert "On-demand" in styled  # elevated: the spent line stands out
 

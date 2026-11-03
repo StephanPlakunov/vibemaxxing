@@ -489,12 +489,10 @@ def _render_cursor(reading: launch.CursorReading) -> list[str]:
     used, cap = usage.on_demand_used_cents, usage.on_demand_limit_cents
     if used is not None:
         of = f" of {_money(cap)}" if cap else " (off)" if cap == 0 else ""
-        lines.append(f"    {'On-demand':<24}{_money(used)}{of}  billed to the company")
+        lines.append(f"    {'On-demand':<24}{_money(used)}{of}")
     if usage.cycle_end_s is not None:
         end = datetime.fromtimestamp(usage.cycle_end_s).strftime("%a %d %b %H:%M")
         lines.append(f"    resets {end}")
-    verdict = {True: "available", False: "spent", None: "unknown"}[reading.availability.ok]
-    lines.append(f"    routing: {verdict} ({reading.availability.why})")
     return lines
 
 

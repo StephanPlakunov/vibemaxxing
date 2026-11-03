@@ -156,18 +156,10 @@ def cursor_content(reading: launch.CursorReading, *, now_s: float) -> Content:
         spent = reading.availability.ok is False
         lines.append(
             Content.styled(
-                f"  {'On-demand':<{LABEL_WIDTH}}{_bar(share)} {_money(used)}{of}"
-                "  billed to the company",
+                f"  {'On-demand':<{LABEL_WIDTH}}{_bar(share)} {_money(used)}{of}",
                 _ELEVATED if spent else _CALM,
             )
         )
-    verdict = {True: "available", False: "spent", None: "unknown"}[reading.availability.ok]
-    lines.append(
-        Content.styled(
-            scrub(f"  routing: {verdict} ({reading.availability.why})"),
-            _ELEVATED if reading.availability.ok is not True else "dim",
-        )
-    )
     return Content("\n").join(lines)
 
 

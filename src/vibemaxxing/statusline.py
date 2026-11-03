@@ -103,7 +103,7 @@ def _account(entry: Mapping[str, object], models: set[str], now_s: float) -> str
         return f"{alias}: needs login"
     fetched = _number(entry.get("fetched_at"))
     rows = entry.get("rows")
-    cells: list[str] = []
+    cells: list[tuple[str, str, float | None]] = []
     for row in rows if isinstance(rows, list) and fetched is not None else []:
         if not isinstance(row, dict):
             continue
@@ -113,9 +113,16 @@ def _account(entry: Mapping[str, object], models: set[str], now_s: float) -> str
         if label is None or percent is None or (resets is not None and resets <= now_s):
             continue
         stale = fetched is not None and not 0 <= now_s - fetched <= STALE_S
-        cell = f"{label} {round(percent)}%{'?' if stale else ''}"
-        cells.append(cell if resets is None else f"{cell} (resets {_when(resets, now_s)})")
-    return f"{alias}: {' '.join(cells) or '-'}"
+        number = f"{round(percent)}%{'?' if stale else ''}"
+        cells.append((label, number, resets))
+    # An account with only its weekly window shows the bare number: nothing to tell it from.
+    if len(cells) == 1 and cells[0][0] == _LABELS["weekly_all"]:
+        return f"{alias}: {cells[0][1]}"
+    shown = [
+        f"{label} {number}" + ("" if resets is None else f" (resets {_when(resets, now_s)})")
+        for label, number, resets in cells
+    ]
+    return f"{alias}: {' '.join(shown) or '-'}"
 
 
 def _dollars(cents: float) -> str:

@@ -175,9 +175,10 @@ def test_list_shows_the_cursor_seat_with_its_real_numbers(
     out = capsys.readouterr().out
     assert "cursor  dev@example.com  Cursor · team Zvoove" in out
     assert "Included + bonus" in out and "42.4%" in out
-    assert "On-demand" in out and "$12.50 of $250.00" in out and "billed to the company" in out
+    assert "On-demand" in out and "$12.50 of $250.00" in out
+    assert "billed to the company" not in out
     assert "resets" in out
-    assert "routing: available (on-demand $237.50 of $250.00 left)" in out
+    assert "routing:" not in out
     assert "usage: see cursor.com/dashboard" not in out  # real numbers, not the fallback
 
 
