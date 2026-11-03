@@ -12,8 +12,13 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
   variables (`--pass-env` to pass one). Routing uses roles (`routing.roles`) and refuses a run that
   would reach Cursor only because main/extra are misnamed. Headless Cursor runs default to
   `--mode ask` and say what they may do; Cursor's cap is held to vibe's $250 ceiling with fresh
-  readings; an interactive move to Cursor prints one clear line first. The bridge pins settings
-  sources and permission mode and fails on a denial.
+  readings; an interactive move to Cursor prints one clear line first. The bridge pins setting
+  sources (`user`: measured, `project` alone hides the connectors) and permission mode, refuses a
+  user settings file with an MCP allow rule, and fails on a denial. It is disabled
+  (`bridge.ENABLED = False`) until a live run shows a non-allowed tool denied or absent: an init
+  listing showed the model is offered every connector tool. Its tool names and write-tool lists now
+  follow the live connectors (the Slack connector has no send or draft tool; the Atlassian server is
+  `Atlassian_Rovo`).
 
 ### Added
 

@@ -90,7 +90,7 @@ def test_the_listed_tools_are_reads_and_drafts_only() -> None:
 
     assert names == {
         "slack_read_channel", "slack_read_thread", "slack_search", "slack_read_profile",
-        "slack_create_draft", "atlassian_get_issue", "atlassian_search_jql",
+        "atlassian_get_issue", "atlassian_search_jql",
         "atlassian_get_page", "m365_search_mail", "m365_read_mail", "m365_search_chat",
         "m365_read_chat", "outlook_create_draft",
     }  # fmt: skip
@@ -365,7 +365,7 @@ def test_a_main_that_is_not_the_live_login_is_lent_its_token_for_the_call(world:
     [
         ("slack_search", {"query": "release"}),
         ("slack_read_profile", {"user": "U1"}),
-        ("slack_create_draft", {"channel": "C1", "text": "hi"}),
+        ("outlook_create_draft", {"to": "a@b.c", "subject": "s", "body": "b"}),
         ("atlassian_get_issue", {"issue": "ZAL-1"}),
     ],
 )
@@ -446,8 +446,8 @@ def test_the_nested_run_has_three_fences_and_an_empty_workspace(world: World) ->
     assert argv[argv.index("--tools") + 1] == ""
     assert argv[argv.index("--permission-prompts") + 1] == "none"  # nobody answers: deny, not ask
     denied = argv[argv.index("--disallowedTools") + 1].split(",")
-    assert "mcp__claude_ai_Slack__slack_send_message" in denied
-    assert "mcp__claude_ai_Slack__slack_add_reaction" in denied
+    assert "mcp__claude_ai_Slack__slack_create_conversation" in denied
+    assert "mcp__claude_ai_Slack__slack_update_list" in denied
     assert argv[argv.index("--allowedTools") + 1] not in denied
     assert Path(str(call["cwd"])).resolve() == (world.root / "bridge-workspace").resolve()
 
@@ -467,13 +467,14 @@ def test_every_allowlisted_tool_is_allowed_alone_and_every_write_of_its_server_i
         }
         assert set(denied) == expected
         assert "--permission-prompts" in argv and "--tools" in argv
-    send = bridge.claude_argv(config, bridge.BY_NAME["slack_create_draft"], "p")
-    assert "mcp__claude_ai_Slack__slack_send_message" in send[send.index("--disallowedTools") + 1]
+    draft = bridge.claude_argv(config, bridge.BY_NAME["outlook_create_draft"], "p")
+    deny = draft[draft.index("--disallowedTools") + 1].split(",")
     # a draft tool is itself on the write list, and is the one thing its own call allows
-    deny = send[send.index("--disallowedTools") + 1].split(",")
-    assert "mcp__claude_ai_Slack__slack_send_message_draft" not in deny
-    assert (
-        send[send.index("--allowedTools") + 1] == "mcp__claude_ai_Slack__slack_send_message_draft"
+    assert "mcp__claude_ai_Microsoft_365__outlook_create_draft" not in deny
+    assert "mcp__claude_ai_Microsoft_365__outlook_send_mail" in deny
+    assert "mcp__claude_ai_Microsoft_365__outlook_send_draft" in deny
+    assert draft[draft.index("--allowedTools") + 1] == (
+        "mcp__claude_ai_Microsoft_365__outlook_create_draft"
     )
 
 
@@ -567,7 +568,7 @@ def test_a_session_on_extra_calls_the_bridge_over_stdio_in_a_scratch_config(
     assert refused["isError"] is True and "ask the lead" in refused["content"][0]["text"]
     (call,) = world.claude_calls(full=True)
     assert call["argv"][call["argv"].index("--allowedTools") + 1] == (  # type: ignore[index]
-        "mcp__claude_ai_Atlassian__getJiraIssue"
+        "mcp__claude_ai_Atlassian_Rovo__getJiraIssue"
     )
     log = [json.loads(x) for x in bridge.log_path(world.root).read_text().splitlines()]
     assert [(e["tool"], e["outcome"]) for e in log] == [
@@ -602,7 +603,10 @@ def test_the_fences_do_not_depend_on_the_users_claude_settings() -> None:
     assert argv[argv.index("--permission-prompts") + 1] == "none"
     assert argv[argv.index("--tools") + 1] == ""
     assert argv[argv.index("--allowedTools") + 1] == "mcp__claude_ai_Slack__slack_read_user_profile"
-    assert "mcp__claude_ai_Slack__slack_send_message" in argv[argv.index("--disallowedTools") + 1]
+    assert (
+        "mcp__claude_ai_Slack__slack_create_conversation"
+        in argv[argv.index("--disallowedTools") + 1]
+    )
 
 
 def test_a_denied_call_is_a_failure_not_an_ok_result() -> None:
@@ -627,12 +631,12 @@ def test_run_headless_raises_on_a_denial_even_when_the_exit_code_is_zero(tmp_hom
 
 
 def test_a_tools_override_cannot_map_a_tool_onto_a_write_tool() -> None:
-    with pytest.raises(UsageError, match="write tool slack_send_message"):
-        parse_config({"tools": {"slack_search": "slack_send_message"}})
+    with pytest.raises(UsageError, match="write tool slack_create_conversation"):
+        parse_config({"tools": {"slack_search": "slack_create_conversation"}})
     with pytest.raises(UsageError, match="write tool createJiraIssue"):
         parse_config({"tools": {"atlassian_get_issue": "createJiraIssue"}})
     # a draft tool keeps its own default, and a harmless remap is fine
-    assert parse_config({"tools": {"slack_create_draft": "slack_send_message_draft"}})
+    assert parse_config({"tools": {"outlook_create_draft": "outlook_create_draft"}})
     assert parse_config({"tools": {"slack_search": "slack_search_public"}})
 
 

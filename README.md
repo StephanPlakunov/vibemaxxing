@@ -399,8 +399,16 @@ is logged in to it, so check `--needs` runs on Cursor before relying on them.
 
 **Disabled.** `vibe bridge serve` and `vibe bridge add-command` refuse until a live check has shown
 that a non-allowed tool of the same connector is denied (`bridge.ENABLED`, a constant: no setting
-switches it on). Reading through the connector works, measured live; the denial was not shown (two
-attempts: the nested run made no tool call at all, so there was nothing to deny).
+switches it on). Reading through the connector works, measured live. The denial was not shown (two
+attempts: the nested run made no tool call at all). A stream-json init listing of the production
+argv shows why this is not a stronger fence: **the model is offered every tool of every connector**
+(Slack, Atlassian Rovo, Microsoft 365, Google Calendar and Drive, Claude Docs, plus the user-scope
+`chrome-devtools` server), write tools included (Jira create/edit/transition, Outlook send/delete,
+Teams send, Slack list and conversation writers). `--tools ""` hides only built-in tools and
+`--setting-sources user` does not hide user-scope MCP servers. What stops a non-allowed call is
+`--permission-prompts none` alone, which is documented but unproven live. Next step: a deny list of
+every tool in that init except the allowed one, then a second init listing that must show only the
+allowed tool.
 
 A session on extra has no Slack, Atlassian or Microsoft 365, and a running Claude Code session
 cannot switch accounts mid-way (it keeps the login and connector list it started with, and
@@ -409,8 +417,8 @@ switching under it breaks Remote Control). So extra borrows a connector one call
 
 - **Reads**: `slack_read_channel`, `slack_read_thread`, `slack_search`, `slack_read_profile`,
   `atlassian_get_issue`, `atlassian_search_jql`, `atlassian_get_page`, `m365_search_mail`,
-  `m365_read_mail`, `m365_search_chat`, `m365_read_chat`. **Drafts**: `slack_create_draft`,
-  `outlook_create_draft`.
+  `m365_read_mail`, `m365_search_chat`, `m365_read_chat`. **Draft**: `outlook_create_draft` (the
+  Slack connector lists no draft tool).
 - **Never**: sending, posting, creating or transitioning tickets, deleting, reactions. Any other
   tool name is refused with "ask the lead".
 - Each call runs one headless **Claude Code** run on **main** and nowhere else, with only that one

@@ -1732,7 +1732,17 @@ Live record (3 Nov 2026, scratch cwd, live login main, strict env): reading `sla
 works without `--setting-sources` and with `--setting-sources user` (2 turns, tool data returned, 0
 denials); with `--setting-sources project` the model could not call the tool (1 turn). Denial of a
 non-allowed read tool: two attempts, both with no tool call (1 turn, 0 denials), so not shown.
-Enable only after a run shows `permission_denials >= 1` for a non-allowed read.
+Init listing (one run, production argv with `--output-format stream-json --verbose`, prompt "reply
+ok, call no tool", permission mode reported as `default`): the model is OFFERED about 150 tools:
+every tool of the claude.ai connectors Slack (21), Atlassian Rovo, Microsoft 365, Google Calendar,
+Google Drive and Claude Docs, write tools included, plus `chrome-devtools` (user-scope MCP). So
+`--tools ""` and `--setting-sources user` hide nothing of that, and a non-allowed call is stopped
+only by `--permission-prompts none` (documented; no denial observed yet). Connector names as
+listed: servers `claude_ai_Slack`, `claude_ai_Atlassian_Rovo`, `claude_ai_Microsoft_365`; Slack has no
+send-message or draft tool. Enable only after a run shows either `permission_denials >= 1` for a
+non-allowed read, or an init listing that holds only the allowed tool (planned: `--disallowedTools`
+= every tool of a discovery init minus the allowed one, then a verification init, cached per argv
+hash, refusing on any other tool).
 
 `vibe bridge serve` (`bridge.py`): newline-delimited JSON-RPC 2.0 on stdio (`initialize`,
 `ping`, `tools/list`, `tools/call`; notifications get no answer). `tools/list` is the allowlist

@@ -99,14 +99,11 @@ TOOLS: Final = (
           "Search Slack messages.", {"query": _S}, ["query"]),
     _tool("slack_read_profile", "slack", "Slack", "slack_read_user_profile",
           "Read a Slack user's profile.", {"user": _S}, ["user"]),
-    _tool("slack_create_draft", "slack", "Slack", "slack_send_message_draft",
-          "Create a Slack DRAFT (never sends).", {"channel": _S, "text": _S}, ["channel", "text"],
-          draft=True),
-    _tool("atlassian_get_issue", "atlassian", "Atlassian", "getJiraIssue",
+    _tool("atlassian_get_issue", "atlassian", "Atlassian Rovo", "getJiraIssue",
           "Read one Jira issue.", {"issue": _S}, ["issue"]),
-    _tool("atlassian_search_jql", "atlassian", "Atlassian", "searchJiraIssuesUsingJql",
+    _tool("atlassian_search_jql", "atlassian", "Atlassian Rovo", "searchJiraIssuesUsingJql",
           "Search Jira with JQL.", {"jql": _S, "limit": _I}, ["jql"]),
-    _tool("atlassian_get_page", "atlassian", "Atlassian", "getConfluencePage",
+    _tool("atlassian_get_page", "atlassian", "Atlassian Rovo", "getConfluencePage",
           "Read one Confluence page.", {"page": _S}, ["page"]),
     _tool("m365_search_mail", "m365", "Microsoft 365", "outlook_email_search",
           "Search Outlook mail.", {"query": _S}, ["query"]),
@@ -116,7 +113,7 @@ TOOLS: Final = (
           "Search Teams chats.", {"query": _S}, ["query"]),
     _tool("m365_read_chat", "m365", "Microsoft 365", "read_resource",
           "Read one Teams chat.", {"id": _S}, ["id"]),
-    _tool("outlook_create_draft", "m365", "Microsoft 365", "outlook_draft_message",
+    _tool("outlook_create_draft", "m365", "Microsoft 365", "outlook_create_draft",
           "Create an Outlook DRAFT (never sends).", {"to": _S, "subject": _S, "body": _S},
           ["to", "subject", "body"], draft=True),
 )  # fmt: skip
@@ -126,21 +123,33 @@ BY_NAME: Final = {tool.name: tool for tool in TOOLS}
 # --disallowedTools, which beats --allowedTools. Defaults, not verified against the live
 # connectors; the allowed tool of a call is always left out of its own list.
 WRITE_TOOLS: Final = {
+    # Names as the live connectors listed them (init event of a headless run, 3 Nov 2026): this
+    # Slack connector has no send-message or draft tool, only these writers.
     "Slack": (
-        "slack_send_message", "slack_schedule_message", "slack_send_message_draft",
-        "slack_post_message", "slack_update_message", "slack_delete_message",
-        "slack_add_reaction", "slack_remove_reaction", "slack_create_canvas",
-        "slack_update_canvas",
+        "slack_add_list_record", "slack_complete_file_upload", "slack_create_conversation",
+        "slack_create_list", "slack_get_file_upload_url", "slack_update_list",
+        "slack_update_list_record",
     ),
-    "Atlassian": (
-        "createJiraIssue", "editJiraIssue", "transitionJiraIssue", "addCommentToJiraIssue",
-        "addWorklogToJiraIssue", "createIssueLink", "deleteJiraIssue", "createConfluencePage",
-        "updateConfluencePage", "createConfluenceFooterComment", "createConfluenceInlineComment",
+    "Atlassian Rovo": (
+        "addCommentToJiraIssue", "addTeamworkGraphContext", "addWorklogToJiraIssue",
+        "createCompassComponent", "createCompassComponentRelationship",
+        "createCompassCustomFieldDefinition", "createConfluenceFooterComment",
+        "createConfluenceInlineComment", "createConfluencePage", "createIssueLink",
+        "createJiraIssue", "editJiraIssue", "transitionJiraIssue", "updateConfluencePage",
     ),
     "Microsoft 365": (
-        "outlook_email_send", "outlook_draft_message", "outlook_email_reply",
-        "outlook_email_forward", "outlook_email_delete", "send_message", "chat_send_message",
-        "calendar_create_event", "calendar_delete_event",
+        "outlook_batch_delete_messages", "outlook_batch_modify_labels", "outlook_create_draft",
+        "outlook_create_event", "outlook_create_filter", "outlook_create_label",
+        "outlook_create_reply_all_draft", "outlook_create_reply_draft", "outlook_delete_draft",
+        "outlook_delete_event", "outlook_delete_filter", "outlook_delete_label",
+        "outlook_forward_mail", "outlook_modify_labels", "outlook_modify_thread_labels",
+        "outlook_respond_to_event", "outlook_send_draft", "outlook_send_mail",
+        "outlook_set_vacation", "outlook_trash_thread", "outlook_untrash_thread",
+        "outlook_update_draft", "outlook_update_event", "outlook_update_label",
+        "sharepoint_copy_item", "sharepoint_create_folder", "sharepoint_delete_item",
+        "sharepoint_move_item", "sharepoint_rename_item", "sharepoint_update_file",
+        "sharepoint_upload_file", "teams_create_chat", "teams_reply_channel_message",
+        "teams_send_channel_message", "teams_send_chat_message",
     ),
 }  # fmt: skip
 
