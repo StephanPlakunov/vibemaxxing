@@ -269,6 +269,36 @@ def near_cap(usage: CursorUsage | None, *, margin_cents: int, ceiling_cents: int
     return cap - usage.on_demand_used_cents <= margin_cents * 5
 
 
+def usage_to_payload(usage: CursorUsage) -> dict[str, object]:
+    """What the shared usage cache holds for a Cursor seat: numbers only, never a token."""
+    return {
+        "included_percent": usage.included_percent,
+        "on_demand_used_cents": usage.on_demand_used_cents,
+        "on_demand_limit_cents": usage.on_demand_limit_cents,
+        "cycle_end_s": usage.cycle_end_s,
+        "plan": usage.plan,
+    }
+
+
+def _plain(value: object) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def usage_from_payload(payload: Mapping[str, object]) -> CursorUsage:
+    used, limit = (
+        _plain(payload.get("on_demand_used_cents")),
+        _plain(payload.get("on_demand_limit_cents")),
+    )
+    plan = payload.get("plan")
+    return CursorUsage(
+        included_percent=_plain(payload.get("included_percent")),
+        on_demand_used_cents=None if used is None else round(used),
+        on_demand_limit_cents=None if limit is None else round(limit),
+        cycle_end_s=_plain(payload.get("cycle_end_s")),
+        plan=plan if isinstance(plan, str) else None,
+    )
+
+
 # --- the request ---------------------------------------------------------------------
 
 

@@ -20,7 +20,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from vibemaxxing import auto, history, store
+from vibemaxxing import auto, history, launch, store
 from vibemaxxing.envelope import build, collect, dumps, error_payload, pool_weeks
 from vibemaxxing.errors import VibeError
 from vibemaxxing.poll import DASHBOARD_INTERVAL_S
@@ -145,6 +145,8 @@ def snapshot(ctx: Context, recorder: Recorder | None = None) -> dict[str, object
     # timestamp would evaluate every token's expiry against process start.
     now_s = ctx.clock()
     views = collect(ctx.root, client=ctx.client, port=ctx.port, now_s=now_s)
+    # Cursor seats before the publish, so status.json has their numbers (cached two minutes).
+    seats = ctx.cursor_readings(now_s=now_s)
     auto.publish(ctx.root, port=ctx.port, now_s=now_s)
     # A cycle where an account failed to fetch reports a pool that is missing
     # that account's headroom. Recording it would store a transient 429 as a
@@ -161,6 +163,7 @@ def snapshot(ctx: Context, recorder: Recorder | None = None) -> dict[str, object
         dry_in=forecast,
         auto=auto.read_settings(ctx.root),
         last_switch=auto.read_last(ctx.root),
+        cursor=[launch.cursor_entry(seat) for seat in seats],
     )
 
 

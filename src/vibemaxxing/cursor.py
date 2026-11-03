@@ -20,7 +20,7 @@ from difflib import get_close_matches
 from pathlib import Path
 from typing import Final, Protocol
 
-from vibemaxxing import store
+from vibemaxxing import cursor_usage, store
 from vibemaxxing.errors import NotFoundError, StoreError, UsageError, VibeError
 from vibemaxxing.fsutil import private_dir, write_private
 
@@ -305,3 +305,44 @@ def resolve_model(
             why += " - pass the matching vibe flag to allow it"
         raise _refusal(name, models, why)
     return max(candidates, key=lambda pair: pair[0])[1].id
+
+
+def status_entry(
+    root: Path, alias: str, *, margin_cents: int, ceiling_cents: int
+) -> dict[str, object]:
+    """One Cursor seat for ``status.json``, from the shared usage cache and nothing else.
+
+    No Keychain, no network, no process: the status line runs on every redraw. A seat nobody has
+    read yet, or whose numbers are not ours, has no figures. ``on_demand_cap_cents`` is the cap
+    vibe holds the seat to (the lower of Cursor's and vibe's own ceiling).
+    """
+    entry: dict[str, object] = {
+        "alias": alias,
+        "kind": KIND_CURSOR,
+        "fetched_at": None,
+        "included_percent": None,
+        "on_demand_used_cents": None,
+        "on_demand_cap_cents": None,
+        "cycle_end_s": None,
+        "available": None,
+    }
+    try:
+        added_at = read_added_at(root, alias)
+    except VibeError:
+        return entry
+    cached = store.read_usage_cache(root, alias)
+    if cached is None or cached.added_at != added_at or cached.payload is None:
+        return entry
+    usage = cursor_usage.usage_from_payload(cached.payload)
+    reported = usage.on_demand_limit_cents
+    entry.update(
+        fetched_at=cached.fetched_at,
+        included_percent=usage.included_percent,
+        on_demand_used_cents=usage.on_demand_used_cents,
+        on_demand_cap_cents=None if reported is None else min(reported, ceiling_cents),
+        cycle_end_s=usage.cycle_end_s,
+        available=cursor_usage.availability(
+            usage, margin_cents=margin_cents, ceiling_cents=ceiling_cents
+        ).ok,
+    )
+    return entry

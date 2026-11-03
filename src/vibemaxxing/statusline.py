@@ -118,6 +118,44 @@ def _account(entry: Mapping[str, object], models: set[str], now_s: float) -> str
     return f"{alias}: {' '.join(cells) or '-'}"
 
 
+def _dollars(cents: float) -> str:
+    return f"${cents / 100:g}"
+
+
+def _cursor(entry: Mapping[str, object], now_s: float) -> str | None:
+    """One Cursor seat: ``cursor: 0.1% $0/$250``, from the cached numbers only.
+
+    ``?`` when there are none, when they are older than STALE_S, or when the cycle they describe
+    has ended; ``spent`` (with when it resets) once routing counts the seat as used up.
+    """
+    alias = _text(entry.get("alias"))
+    if alias is None:
+        return None
+    fetched = _number(entry.get("fetched_at"))
+    cycle_end = _number(entry.get("cycle_end_s"))
+    percent = _number(entry.get("included_percent"))
+    used, cap = (
+        _number(entry.get("on_demand_used_cents")),
+        _number(entry.get("on_demand_cap_cents")),
+    )
+    if fetched is None or (cycle_end is not None and cycle_end <= now_s):
+        return f"{alias}: ?"
+    stale = "?" if not 0 <= now_s - fetched <= STALE_S else ""
+    if entry.get("available") is False:
+        when = "" if cycle_end is None else f" (resets {_when(cycle_end, now_s)})"
+        return f"{alias}: spent{when}{stale}"
+    cells: list[str] = []
+    if percent is not None:
+        cells.append(
+            f"{percent:.1f}%".replace(".0%", "%") if percent < 10 else f"{round(percent)}%"
+        )
+    if used is not None:
+        cells.append(_dollars(used) + (f"/{_dollars(cap)}" if cap else ""))
+    if not cells or entry.get("available") is None:
+        return f"{alias}: {' '.join(cells) or '-'}{stale or '?'}"
+    return f"{alias}: {' '.join(cells)}{stale}"
+
+
 def render(document: Mapping[str, object] | None, *, now_s: float) -> str:
     """One line: the live account, then each account's session and weekly rows."""
     if document is None:
@@ -131,6 +169,12 @@ def render(document: Mapping[str, object] | None, *, now_s: float) -> str:
     for entry in accounts if isinstance(accounts, list) else []:
         if isinstance(entry, dict):
             text = _account(entry, models, now_s)
+            if text is not None:
+                parts.append(text)
+    seats = document.get("cursor")
+    for seat in seats if isinstance(seats, list) else []:
+        if isinstance(seat, dict):
+            text = _cursor(seat, now_s)
             if text is not None:
                 parts.append(text)
     return " · ".join(parts) or NO_STATUS

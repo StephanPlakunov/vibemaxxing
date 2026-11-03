@@ -1646,7 +1646,16 @@ cannot point at Cursor, so Cursor is reached only per run (`vibe run`).
 the pool. Every key is present: `alias`, `kind` (`"cursor"`), `state` (`ok`, `needs_login`,
 `unknown`), `message`, `email`, `team`, `plan`, `included_percent`, `on_demand_used_cents`,
 `on_demand_limit_cents` (0: on-demand off; null: unnamed), `resets_at`, `available`
-(true/false/null) and `available_why`. The web dashboard and the TUI do not show Cursor.
+(true/false/null) and `available_why`. `/api/usage` carries the same `cursor` member (web.snapshot). The TUI paints a panel per seat; the
+web page shows each as one more ledger entry (two bars, reset, routing line; not in the pool or the
+week chart). `status.json` gains a `cursor` array (alias, fetched_at, included_percent,
+on_demand_used_cents, on_demand_cap_cents = the lower of Cursor's cap and vibe's ceiling, cycle_end_s,
+available), written by `auto.publish_status` from the usage cache only (no Keychain, request or
+process), and `vibe statusline` appends `cursor: 0.1% $0/$250` (`?` for no numbers, numbers older than
+15 minutes or a finished cycle; `spent (resets ...)` once routing counts the seat as used up). The
+numbers get there from `vibe list`, the TUI and web cycles, and the background tick, which re-reads a
+seat whose cache is older than three minutes (`Context.refresh_cursor_cache`; a failure leaves the
+old numbers to age into a `?`).
 
 ### Usage — `cursor_usage.py`
 

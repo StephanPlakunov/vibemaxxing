@@ -116,6 +116,40 @@ class Context:
             for alias in aliases
         ]
 
+    def refresh_cursor_cache(self, *, min_age_s: float = 180.0) -> None:
+        """Re-read each Cursor seat's usage into the cache once it is older than ``min_age_s``.
+
+        For the background tick, so `vibe statusline` (which only reads cached numbers) stays within
+        a few minutes of the truth without ever making a request itself. Never raises: a failed read
+        leaves the old numbers, which the status line marks with a "?" once they are old.
+        """
+        aliases = cursor.list_cursor_aliases(self.root)
+        if not aliases:
+            return
+        try:
+            routing = route.read_routing(self.root)
+        except UsageError:
+            routing = route.Routing()
+        svc = self.services()
+        for alias in aliases:
+            cached = store.read_usage_cache(self.root, alias)
+            if (
+                cached is not None
+                and cached.fetched_at is not None
+                and 0 <= self.now_s - cached.fetched_at < min_age_s
+            ):
+                continue
+            try:
+                launch.read_cursor(
+                    svc,
+                    alias,
+                    margin_cents=routing.cursor_margin_cents,
+                    ceiling_cents=routing.cursor_cap_cents,
+                    fresh=True,
+                )
+            except (VibeError, OSError):
+                continue
+
 
 def default_context() -> Context:
     return Context(
@@ -456,8 +490,9 @@ def _render_cursor(reading: launch.CursorReading) -> list[str]:
 
 
 def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
-    views, dry = _collect_and_record(ctx)
+    # Cursor first: the status file `_collect_and_record` writes should hold these numbers.
     readings = ctx.cursor_readings()
+    views, dry = _collect_and_record(ctx)
     human = _render_accounts(views, now_s=ctx.now_s, dry=dry)
     if readings:
         shown = [line for reading in readings for line in (*_render_cursor(reading), "")]
@@ -659,6 +694,7 @@ def cmd_auto_status(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def cmd_auto_tick(args: argparse.Namespace, ctx: Context) -> int:
+    ctx.refresh_cursor_cache()  # before the tick, so the status file it writes has fresh numbers
     result = auto.tick(
         ctx.root, client=ctx.client, port=ctx.port, now_s=ctx.now_s, notify=ctx.notify
     )

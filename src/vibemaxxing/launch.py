@@ -149,35 +149,6 @@ class CursorReading:
     availability: cursor_usage.Availability
 
 
-def _usage_to_payload(usage: CursorUsage) -> dict[str, object]:
-    return {
-        "included_percent": usage.included_percent,
-        "on_demand_used_cents": usage.on_demand_used_cents,
-        "on_demand_limit_cents": usage.on_demand_limit_cents,
-        "cycle_end_s": usage.cycle_end_s,
-        "plan": usage.plan,
-    }
-
-
-def _num(value: object) -> float | None:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
-
-
-def _usage_from_payload(payload: Mapping[str, object]) -> CursorUsage:
-    used, limit = (
-        _num(payload.get("on_demand_used_cents")),
-        _num(payload.get("on_demand_limit_cents")),
-    )
-    plan = payload.get("plan")
-    return CursorUsage(
-        included_percent=_num(payload.get("included_percent")),
-        on_demand_used_cents=None if used is None else round(used),
-        on_demand_limit_cents=None if limit is None else round(limit),
-        cycle_end_s=_num(payload.get("cycle_end_s")),
-        plan=plan if isinstance(plan, str) else None,
-    )
-
-
 def read_cursor(
     svc: Services,
     alias: str,
@@ -202,7 +173,11 @@ def read_cursor(
     if cached is not None and cached.added_at != added_at:
         cached = None
     age = None if cached is None or cached.fetched_at is None else svc.now_s - cached.fetched_at
-    held = None if cached is None or cached.payload is None else _usage_from_payload(cached.payload)
+    held = (
+        None
+        if cached is None or cached.payload is None
+        else cursor_usage.usage_from_payload(cached.payload)
+    )
     window = (
         cursor_usage.NEAR_CAP_FRESH_S
         if cursor_usage.near_cap(held, margin_cents=margin_cents, ceiling_cents=ceiling_cents)
@@ -215,7 +190,9 @@ def read_cursor(
         store.write_usage_cache(
             svc.root,
             alias,
-            store.UsageCache(added_at, svc.now_s, _usage_to_payload(usage), None, 0, None),
+            store.UsageCache(
+                added_at, svc.now_s, cursor_usage.usage_to_payload(usage), None, 0, None
+            ),
         )
         return _reading(alias, status, usage, "", margin_cents, ceiling_cents)
     if (

@@ -296,6 +296,19 @@ route a program that relies on Claude Code hooks for its safety policy: run it w
 `--claude-only`. `vibe switch` and `vibe auto tick` never touch a Cursor account (the Keychain
 login cannot point at Cursor).
 
+### Where Cursor shows
+
+The seat appears wherever the Claude accounts do. `vibe` (the TUI) and the web dashboard
+(`vibe usage web`) show it as one more entry: included allowance plus bonus, on-demand against the
+cap, when the cycle resets, and whether routing may use it (it is not in the pool or the week chart).
+`vibe statusline` appends a compact segment, e.g. `cursor: 0.1% $0/$250`; `?` means no numbers, numbers
+older than 15 minutes, or a finished cycle, and `spent (resets Wed 00:00)` means routing counts the
+seat as used up. The status line and the TUI never make a request or read a Keychain on a redraw: the
+line reads `~/.vibemaxxing/status.json`, which `vibe list`, the TUI, the web page and the background
+tick (`vibe auto tick`, via launchd) keep current; the tick re-reads a seat's usage only when its cached
+numbers are older than three minutes. Unknown usage is shown as unknown, never as a number. If your
+Claude Code status line already runs `vibe statusline`, the new segment needs no change to it.
+
 ### The child's environment
 
 Every child vibe starts gets an environment built on purpose. For Cursor (and for the bridge's

@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import envelope, oauth, pool, statusline, store, usage
+from vibemaxxing import cursor, envelope, oauth, pool, route, statusline, store, usage
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, UsageError, VibeError
 from vibemaxxing.fsutil import FILE_MODE, private_dir, write_private
@@ -510,6 +510,26 @@ def _status_account(root: Path, alias: str) -> dict[str, object]:
     }
 
 
+def _status_cursor(root: Path) -> list[dict[str, object]]:
+    """Each Cursor seat's last numbers, from the usage cache (never a request)."""
+    aliases = cursor.list_cursor_aliases(root)
+    if not aliases:
+        return []
+    try:
+        routing = route.read_routing(root)
+    except UsageError:
+        routing = route.Routing()  # a wrong routing must not blank the status line
+    return [
+        cursor.status_entry(
+            root,
+            alias,
+            margin_cents=routing.cursor_margin_cents,
+            ceiling_cents=routing.cursor_cap_cents,
+        )
+        for alias in aliases
+    ]
+
+
 def publish_status(root: Path, *, live: str | None, now_s: float) -> None:
     """Write status.json for `vibe statusline`: who is live, every account's rows, the policy.
 
@@ -525,6 +545,7 @@ def publish_status(root: Path, *, live: str | None, now_s: float) -> None:
         "live": live,
         "active": store.read_active(root),
         "accounts": [_status_account(root, alias) for alias in store.list_aliases(root)],
+        "cursor": _status_cursor(root),
         "policy": policy_document(settings.policy),
         "last_switch": None
         if last is None

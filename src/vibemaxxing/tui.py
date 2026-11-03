@@ -27,7 +27,7 @@ from textual.containers import VerticalScroll
 from textual.content import Content
 from textual.widgets import Static
 
-from vibemaxxing import auto, envelope, history, store
+from vibemaxxing import auto, cursor, cursor_usage, envelope, history, launch, store
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.poll import DASHBOARD_INTERVAL_S
 from vibemaxxing.pool import LastSwitch, Settings, dry_in
@@ -106,6 +106,85 @@ def account_content(view: AccountView, *, now_s: float) -> Content:
         line, style = _row_line(row, now_s)
         lines.append(Content.styled(line, style))
     return Content("\n").join(lines)
+
+
+def _money(cents: int) -> str:
+    return f"${cents / 100:,.2f}"
+
+
+def cursor_content(reading: launch.CursorReading, *, now_s: float) -> Content:
+    """A Cursor seat like an account: who, two bars, the reset, and whether routing may use it."""
+    team = f" · team {reading.team}" if reading.team else ""
+    lines: list[Content] = [
+        Content.assemble(
+            ("  ", _CALM),
+            (scrub(reading.alias), "bold"),
+            (f"  {scrub(reading.email or '—')}  Cursor{scrub(team)}", "dim"),
+        )
+    ]
+    if not reading.logged_in:
+        lines.append(Content.styled(f"  not logged in — run: {cursor.AGENT_LOGIN}", _ELEVATED))
+        return Content("\n").join(lines)
+    usage = reading.usage
+    if usage is None:
+        lines.append(
+            Content.styled(
+                scrub(f"  usage: unknown ({reading.note}); see cursor.com/dashboard"), _ELEVATED
+            )
+        )
+        return Content("\n").join(lines)
+    if reading.note:
+        lines.append(Content.styled(f"  {scrub(reading.note)}", _ELEVATED))
+    reset = ""
+    if usage.cycle_end_s is not None:
+        reset = _relative(
+            datetime.fromtimestamp(usage.cycle_end_s, UTC).isoformat(timespec="seconds"), now_s
+        )
+    if usage.included_percent is not None:
+        percent = round(usage.included_percent)
+        lines.append(
+            Content.styled(
+                f"  {'Included + bonus':<{LABEL_WIDTH}}{_bar(percent)} {percent:>3}%  {reset}",
+                _CALM,
+            )
+        )
+    used, cap = usage.on_demand_used_cents, usage.on_demand_limit_cents
+    if used is not None:
+        cap = None if cap is None else min(cap, cursor_usage.HARD_CAP_CENTS)
+        share = None if not cap else round(min(100, used / cap * 100))
+        of = f" of {_money(cap)}" if cap else " (off)" if cap == 0 else ""
+        spent = reading.availability.ok is False
+        lines.append(
+            Content.styled(
+                f"  {'On-demand':<{LABEL_WIDTH}}{_bar(share)} {_money(used)}{of}"
+                "  billed to the company",
+                _ELEVATED if spent else _CALM,
+            )
+        )
+    verdict = {True: "available", False: "spent", None: "unknown"}[reading.availability.ok]
+    lines.append(
+        Content.styled(
+            scrub(f"  routing: {verdict} ({reading.availability.why})"),
+            _ELEVATED if reading.availability.ok is not True else "dim",
+        )
+    )
+    return Content("\n").join(lines)
+
+
+def _cursor_shape(reading: launch.CursorReading) -> tuple[str, bool, tuple[str, ...] | None]:
+    usage = reading.usage
+    rows: list[str] = []
+    if reading.logged_in and usage is not None:
+        if usage.included_percent is not None:
+            rows.append("included")
+        if usage.on_demand_used_cents is not None:
+            rows.append("on-demand")
+    # A note or a missing login adds a line, which is a different panel height.
+    return (
+        reading.alias,
+        bool(reading.note) or not reading.logged_in or usage is None,
+        tuple(rows),
+    )
 
 
 def _shape(view: AccountView) -> tuple[str, bool, tuple[str, ...] | None]:
@@ -229,6 +308,9 @@ class Dashboard(App[None]):
             self._pool,
             partial(envelope.collect, ctx.root, client=ctx.client, port=ctx.port, now_s=now_s),
         )
+        # Cursor seats: cached for two minutes inside read_cursor, so a one-minute refresh makes
+        # a request at most every other cycle. Before the publish, so status.json has them.
+        readings = await loop.run_in_executor(self._pool, partial(ctx.cursor_readings, now_s=now_s))
         # It reads the Keychain to say who is live, so off the event loop as well.
         await loop.run_in_executor(
             self._pool, partial(auto.publish, ctx.root, port=ctx.port, now_s=now_s)
@@ -241,11 +323,13 @@ class Dashboard(App[None]):
             if views and all(view.summary is not None for view in views):
                 history.record(self._conn, at_s=now_s, pool=weeks)
             forecast = dry_in(history.samples(self._conn, since_s=now_s - _WINDOW_S))
-        rebuilt = await self._reshape(views)
+        rebuilt = await self._reshape(views, readings)
         # A panel's height follows its shape, so a cycle that only changes
         # values — a bar, a percent, a reset time — needs no layout pass.
         for view in views:
             self.panels[view.alias].update(account_content(view, now_s=now_s), layout=rebuilt)
+        for reading in readings:
+            self.panels[reading.alias].update(cursor_content(reading, now_s=now_s), layout=rebuilt)
         self.query_one("#footer", Static).update(
             footer_content(
                 weeks=weeks,
@@ -256,15 +340,18 @@ class Dashboard(App[None]):
             layout=False,
         )
 
-    async def _reshape(self, views: Sequence[AccountView]) -> bool:
-        shapes = [_shape(view) for view in views]
+    async def _reshape(
+        self, views: Sequence[AccountView], readings: Sequence[launch.CursorReading]
+    ) -> bool:
+        shapes = [_shape(view) for view in views] + [_cursor_shape(r) for r in readings]
         if shapes == self._shapes:
             return False
         self._shapes = shapes
         for panel in self.panels.values():
             await panel.remove()
-        self.panels = {view.alias: Static(classes="account") for view in views}
-        self.query_one("#empty", Static).display = not views
+        aliases = [view.alias for view in views] + [r.alias for r in readings]
+        self.panels = {alias: Static(classes="account") for alias in aliases}
+        self.query_one("#empty", Static).display = not aliases
         await self.query_one("#accounts", VerticalScroll).mount_all(self.panels.values())
         return True
 

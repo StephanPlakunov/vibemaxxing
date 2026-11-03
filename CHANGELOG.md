@@ -7,6 +7,12 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Cursor on every surface.** The TUI and the web dashboard show a Cursor seat as one more ledger
+  entry (included + bonus, on-demand against the cap, reset, routing state), `vibe statusline` appends
+  `cursor: 0.1% $0/$250` (`?` for unknown or old numbers, `spent (resets ...)`), and `status.json` has a
+  `cursor` array. The line and the TUI use cached numbers only; the background tick re-reads a seat
+  older than three minutes. `docs/CONTRACT.md` section 10 and 19.
+
 - Every child of `vibe run` gets an explicit environment (`childenv.py`): Claude credentials and
   config dir are never inherited, Cursor and the bridge's nested run also lose secret-looking
   variables (`--pass-env` to pass one). Routing uses roles (`routing.roles`) and refuses a run that
