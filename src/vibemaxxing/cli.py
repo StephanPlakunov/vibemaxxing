@@ -836,6 +836,7 @@ def _run_flags(args: argparse.Namespace) -> launch.RunFlags:
         allow_fast=args.allow_fast,
         allow_no_zdr=args.allow_no_zdr,
         trust_workspace=args.trust_workspace,
+        no_bridge=args.no_bridge,
         pass_env=tuple(name.strip() for name in (args.pass_env or "").split(",") if name.strip()),
         brief=args.brief,
         handover=args.handover,
@@ -1106,6 +1107,10 @@ def cmd_bridge_add(args: argparse.Namespace, ctx: Context) -> int:
     out(
         "run this yourself (vibe does not): it registers vibe-bridge with that config dir only\n"
         f"  {command}\n"
+        "note: `vibe run` and `vibe run auto` now add the bridge by themselves to a Claude run\n"
+        "on an account without Slack or Atlassian (a vibe-owned --mcp-config; `--no-bridge`\n"
+        "turns it off), because such a run does not read this config dir. Register it by hand\n"
+        "only for a session you start without `vibe run`.\n"
     )
     return 0
 
@@ -1258,6 +1263,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-fast", action="store_true", help='on Cursor: allow "-fast" models')
     run.add_argument(
         "--allow-no-zdr", action="store_true", help='on Cursor: allow "(NO ZDR)" models'
+    )
+    run.add_argument(
+        "--no-bridge",
+        action="store_true",
+        help="do not add vibe-bridge (Slack/Atlassian reads) to a Claude run that lacks them",
     )
     run.add_argument(
         "--pass-env",

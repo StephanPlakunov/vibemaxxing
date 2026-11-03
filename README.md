@@ -458,7 +458,16 @@ vibe bridge logout slack|atlassian|all
 vibe bridge add-command   # prints the line that registers the bridge for extra; it never runs it
 ```
 
-`vibe bridge add-command` prints, for `~/.claude-extra`:
+**You do not need to register it for `vibe run` sessions.** `vibe run <account> -- claude ...` (and
+`vibe run auto`) start claude with a token override and without `CLAUDE_CONFIG_DIR`, so Claude Code reads the
+default config and never the one in `~/.claude-extra`. So when the Claude run is on an account that lacks a
+connector the bridge offers (by `routing.connectors`: extra has none) and the bridge has a login for that
+upstream, vibe adds `--mcp-config=<~/.vibemaxxing/bridge/mcp-config.json>` to the claude arguments itself: a
+vibe-owned file holding only `vibe-bridge` (not `--strict-mcp-config`, so the account's own servers stay) and
+prints one line saying so. Never for Cursor runs; `vibe run --no-bridge ...` turns it off.
+
+`vibe bridge add-command` still prints the registration line, for a session you start **without** `vibe
+run`, for `~/.claude-extra`:
 
 ```
 CLAUDE_CONFIG_DIR=~/.claude-extra claude mcp add --scope user vibe-bridge -- vibe bridge serve

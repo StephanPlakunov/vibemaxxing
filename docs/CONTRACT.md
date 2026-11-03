@@ -1822,6 +1822,19 @@ tool or an upstream. Commands: `vibe bridge login <slack|atlassian> [--client-id
 `logout <upstream|all>`, `status`, `tools <upstream>`, `serve`, `add-command [--config-dir]` (prints the
 `claude mcp add` line for `~/.claude-extra`, runs nothing).
 
+**Reaching a `vibe run` session** (`launch._with_bridge`): a Claude run started by `vibe run` has a token
+override and no `CLAUDE_CONFIG_DIR`, so Claude Code reads the default config, not `~/.claude-extra`, and a
+bridge registered there is never seen. So for a Claude *session* (not `--version`, `mcp ...`, nor a
+non-claude program) on an account whose connectors (`routing.connectors[role or alias]`, default none for
+extra) lack an upstream the bridge has a login for (`mcp_oauth.has_login`: the description file), vibe
+prepends `--mcp-config=<root>/bridge/mcp-config.json` (the one-token form: a variadic `--mcp-config` would
+swallow a following prompt) and prints "added vibe-bridge to this run (...)". The file
+(`bridge.write_mcp_config`, 0600 in a 0700 dir, rewritten only on change) is `{"mcpServers": {"vibe-bridge":
+{"type": "stdio", "command": <sys.executable>, "args": ["-m", "vibemaxxing", "bridge", "serve"]}}}`: no
+secret. Not `--strict-mcp-config`; the user's own `--mcp-config` follows ours. Never for Cursor runs;
+`vibe run --no-bridge` turns it off; a wrong `routing` does not stop the run. Verified live once: a real
+`vibe run extra -- claude -p ... --allowedTools mcp__vibe-bridge__atlassian_atlassianUserInfo` called the tool.
+
 **Not verified live**: nobody has logged in to either upstream, so the upstreams' actual tool names and
 argument shapes, Slack's redirect-URL rules, Atlassian's
 acceptance of a loopback redirect and of these scopes, and the answers' exact shapes are from the

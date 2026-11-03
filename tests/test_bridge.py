@@ -987,7 +987,8 @@ def test_the_bridge_has_no_model_and_no_nested_claude_left() -> None:
     ):
         assert gone not in source, gone
     launch = (REPO / "src" / "vibemaxxing" / "launch.py").read_text()
-    assert "bridge" not in launch
+    for gone in ("bridge_pick", "bridge_execute", "bridge_workspace", "run_headless", "Fence"):
+        assert gone not in launch, gone  # launch only hands the bridge to a run (--mcp-config)
 
 
 # --- the HTTP layer the bridge relies on ---------------------------------------------------------------------

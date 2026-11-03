@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import Final
 
 from vibemaxxing import (
+    bridge,
     childenv,
     cursor,
     cursor_translate,
     cursor_usage,
     envelope,
+    mcp_oauth,
     route,
     store,
 )
@@ -47,6 +49,8 @@ class RunFlags:
     allow_fast: bool = False
     allow_no_zdr: bool = False
     trust_workspace: bool = False
+    # Do not add vibe-bridge to a Claude run that lacks the connectors the bridge offers.
+    no_bridge: bool = False
     # Environment variables to hand to a Cursor child although they look secret.
     pass_env: tuple[str, ...] = ()
     brief: str | None = None
@@ -473,7 +477,49 @@ def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags)
         )
     if alias not in store.list_aliases(svc.root):
         raise NotFoundError(f'there is no account named "{alias}"', "vibe list")
-    return Plan(alias, cursor.KIND_CLAUDE, tuple(command), claude_token=True)
+    argv, bridge_notes = _with_bridge(svc, alias, command, flags)
+    return Plan(alias, cursor.KIND_CLAUDE, argv, tuple(bridge_notes), claude_token=True)
+
+
+def _with_bridge(
+    svc: Services, alias: str, command: Sequence[str], flags: RunFlags
+) -> tuple[tuple[str, ...], list[str]]:
+    """``command``, with vibe-bridge added when this Claude run lacks what the bridge offers.
+
+    A session on an account without Slack or Atlassian (extra) cannot use a bridge registered in
+    that account's config dir: `vibe run` starts claude with a token override and without
+    CLAUDE_CONFIG_DIR, so Claude Code reads the default config. So the bridge is handed to the run
+    itself, as a vibe-owned config holding only vibe-bridge (`--mcp-config=PATH`, the one-token form
+    so a prompt after it is never read as a second config; not --strict-mcp-config, so the account's
+    own servers stay). Only for a Claude session, only for an upstream the bridge is logged in to
+    and the account lacks, never for Cursor, and `--no-bridge` turns it off.
+    """
+    unchanged: tuple[tuple[str, ...], list[str]] = (tuple(command), [])
+    if (
+        flags.no_bridge
+        or not cursor_translate.is_claude_command(command)
+        or cursor_translate.is_not_a_session(command[1:])
+    ):
+        return unchanged
+    try:
+        routing = route.read_routing(svc.root)
+    except UsageError:
+        routing = route.Routing()  # a wrong routing must not stop a session from starting
+    role = next((name for name, held in routing.roles.items() if held == alias), alias)
+    have = set(routing.connectors.get(role, routing.connectors.get(alias, ())))
+    missing = [
+        upstream.id
+        for upstream in bridge.UPSTREAMS.values()
+        if upstream.id not in have and mcp_oauth.has_login(svc.root, upstream)
+    ]
+    if not missing:
+        return unchanged
+    path = bridge.write_mcp_config(svc.root)
+    note = (
+        f"added vibe-bridge to this run ({alias} has no {', '.join(missing)} connector): "
+        "read-only tools, through your own login; --no-bridge turns it off"
+    )
+    return (command[0], f"--mcp-config={path}", *command[1:]), [note]
 
 
 def _ceiling_notes(svc: Services, alias: str) -> list[str]:
@@ -583,11 +629,12 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
             f"{chosen.alias} is Claude Code's own login: it runs as that, no token override "
             "(the inherited Claude variables are dropped)"
         )
+    argv, bridge_notes = _with_bridge(svc, chosen.alias, (command[0], *args), flags)
     return Plan(
         chosen.alias,
         cursor.KIND_CLAUDE,
-        (command[0], *args),
-        tuple(notes),
+        argv,
+        (*notes, *bridge_notes),
         chosen,
         claude_token=not live,
     )

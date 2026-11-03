@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
 import time
 from collections import deque
@@ -35,7 +36,7 @@ from typing import Final, TextIO
 
 from vibemaxxing import jsonutil, mcp_oauth
 from vibemaxxing.errors import DeadlineError, UsageError, VibeError
-from vibemaxxing.fsutil import FILE_MODE
+from vibemaxxing.fsutil import FILE_MODE, private_dir, write_private
 from vibemaxxing.httpclient import HttpClient
 from vibemaxxing.mcp_client import McpClient, ToolResult
 from vibemaxxing.mcp_oauth import SecretStore, Upstream
@@ -568,6 +569,39 @@ def append_log(root: Path, entry: Mapping[str, object]) -> None:
             handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
     except OSError:
         return
+
+
+def mcp_config_path(root: Path) -> Path:
+    return root / "bridge" / "mcp-config.json"
+
+
+def write_mcp_config(root: Path, *, python: str | None = None) -> Path:
+    """The vibe-owned MCP config that holds only vibe-bridge, for `claude --mcp-config=<path>`.
+
+    `vibe run` adds it to a Claude run whose account has no Slack or Atlassian connector. It names
+    the interpreter that is running vibe, so it works from a tool install or a checkout alike, and
+    holds nothing secret: the bridge reads its tokens from the Keychain itself.
+    """
+    document = {
+        "mcpServers": {
+            SERVER_NAME: {
+                "type": "stdio",
+                "command": python or sys.executable,
+                "args": ["-m", "vibemaxxing", "bridge", "serve"],
+            }
+        }
+    }
+    text = json.dumps(document, indent=2) + "\n"
+    path = mcp_config_path(root)
+    try:
+        if path.read_text(encoding="utf-8") == text:
+            return path
+    except OSError:
+        pass
+    private_dir(root)
+    private_dir(root / "bridge")
+    write_private(path, text)
+    return path
 
 
 def print_add_command(config_dir: str = "~/.claude-extra") -> str:

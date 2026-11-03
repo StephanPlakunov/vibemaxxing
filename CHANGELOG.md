@@ -7,6 +7,12 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The bridge reaches `vibe run` sessions by itself.** `vibe run` / `vibe run auto` start claude with a token
+  override and no `CLAUDE_CONFIG_DIR`, so a bridge registered in `~/.claude-extra` was never seen. A Claude
+  session on an account that lacks a connector the bridge offers now gets `--mcp-config=<vibe-owned file with
+  only vibe-bridge>` (one line printed; never for Cursor; `--no-bridge` turns it off), and `vibe bridge
+  add-command` says so.
+
 - **Atlassian allowlist = the live server.** Aligned with the real `tools/list` of the Atlassian MCP (read
   with a real read-only login): the nine read-only tools it offers (incl. `discover` and `executeRead`),
   with its own argument names, types and required; names it does not offer (`listJiraProjects`, ...) are
