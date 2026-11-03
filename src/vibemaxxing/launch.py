@@ -680,6 +680,10 @@ def bridge_execute(
             # Unreachable through bridge_pick; kept so no other caller can start a Cursor run here.
             raise bridge.BridgeError("the bridge never runs on Cursor")
         prompt = bridge.build_prompt(tool, bridge.upstream_name(config, tool), arguments)
+        # The nested run has no CLAUDE_CONFIG_DIR, so it reads the default one.
+        problem = bridge.settings_problem(svc.home / ".claude")
+        if problem:
+            raise bridge.BridgeError(f"refused: {problem}")
         try:
             # The nested run is its own Claude Code: not the config dir or token of the session
             # that called the bridge. The live login keeps itself; any other account is lent

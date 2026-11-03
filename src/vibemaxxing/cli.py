@@ -878,6 +878,10 @@ def _token_env(ctx: Context, alias: str) -> dict[str, str]:
 
 
 def cmd_bridge_serve(args: argparse.Namespace, ctx: Context) -> int:
+    if not bridge.ENABLED:
+        raise UsageError(
+            bridge.DISABLED_REASON, "vibe bridge add-command   (nothing to register yet)"
+        )
     routing = route.read_routing(ctx.root)
     config = bridge.parse_config(routing.bridge)
     svc = ctx.services()
@@ -893,6 +897,8 @@ def cmd_bridge_serve(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def cmd_bridge_add(args: argparse.Namespace, ctx: Context) -> int:
+    if not bridge.ENABLED:
+        raise UsageError(bridge.DISABLED_REASON, "vibe list")
     command = bridge.print_add_command(args.config_dir)
     out(
         "run this yourself (vibe does not): it registers vibe-bridge with that config dir only\n"

@@ -397,6 +397,11 @@ is logged in to it, so check `--needs` runs on Cursor before relying on them.
 
 ## The connector bridge (`vibe-bridge`)
 
+**Disabled.** `vibe bridge serve` and `vibe bridge add-command` refuse until a live check has shown
+that a non-allowed tool of the same connector is denied (`bridge.ENABLED`, a constant: no setting
+switches it on). Reading through the connector works, measured live; the denial was not shown (two
+attempts: the nested run made no tool call at all, so there was nothing to deny).
+
 A session on extra has no Slack, Atlassian or Microsoft 365, and a running Claude Code session
 cannot switch accounts mid-way (it keeps the login and connector list it started with, and
 switching under it breaks Remote Control). So extra borrows a connector one call at a time:
@@ -418,14 +423,14 @@ switching under it breaks Remote Control). So extra borrows a connector one call
 - Fences around the one allowed tool: `--tools ""` (no Claude Code tools),
   `--permission-prompts none` (in `-p` anything that would prompt is denied, so a tool outside
   `--allowedTools` is denied, not asked), and `--disallowedTools` with every known write tool of
-  the same connector. They do not depend on your settings: `--setting-sources project` (your
-  `~/.claude/settings.json` allow rules, default mode and hooks are not loaded) and an explicit
-  `--permission-mode manual`, in an empty directory (`~/.vibemaxxing/bridge-workspace`). The
-  nested run gets a scrubbed environment and main's token explicitly. A run that was denied or
-  reported an error is a failure, never an "ok" result. **Open: in the one live check of this
-  exact argv (3 Nov, round 3) the model could not call even the allowed read tool and nothing was
-  denied; the pin is the likely cause but was not isolated. Do not register the bridge until a
-  live read with this argv succeeds.**
+  the same connector. Settings: the connectors need the user settings source (measured live:
+  `--setting-sources project` alone hides them; `user`, and no flag, reach them), so the bridge uses
+  `--setting-sources user` (no project or local settings), an explicit `--permission-mode manual`,
+  and before every call reads `~/.claude/settings.json`: any MCP allow rule, or a file it cannot
+  read, refuses the call, because `--allowedTools` adds to allow rules and does not replace them.
+  `--settings '{"disableAllHooks": true}'` asks for no hooks (not verified to take effect). The run
+  starts in an empty directory (`~/.vibemaxxing/bridge-workspace`) with a scrubbed environment and
+  main's token explicitly. A run that was denied or reported an error is a failure, never "ok".
 - Cost guard: a timeout per call (90 s), at most 30 calls per hour per bridge process, both in
   `routing.bridge`. `~/.vibemaxxing/bridge.log` has one line per call: account, tool, duration,
   outcome. Never arguments, content or a secret.

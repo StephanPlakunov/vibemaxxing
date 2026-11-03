@@ -259,8 +259,9 @@ def test_config_defaults_and_overrides_and_refusals() -> None:
 
 
 def test_the_add_command_is_printed_not_run(
-    capsys: pytest.CaptureFixture[str], tmp_home: Path
+    capsys: pytest.CaptureFixture[str], tmp_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(bridge, "ENABLED", True)
     ctx = cli.Context(
         root=tmp_home / ".vibemaxxing",
         client=None,  # type: ignore[arg-type]
@@ -509,6 +510,8 @@ ctx = cli.Context(root=__import__("pathlib").Path(os.environ["VIBE_ROOT"]), clie
                   port=FakeKeychain(blob=os.environ["VIBE_BLOB"]), now_s=time.time(),
                   prompt=lambda _: "", browser=lambda _: True,
                   cursor_client=FakeHttpClient(), cursor_token=StubToken())
+from vibemaxxing import bridge
+bridge.ENABLED = True  # the test enables it in its own process; no setting can
 sys.exit(cli.main(["bridge", "serve"], context=ctx))
 """
 
@@ -592,8 +595,9 @@ def test_the_fences_do_not_depend_on_the_users_claude_settings() -> None:
 
     argv = bridge.claude_argv(config, bridge.BY_NAME["slack_read_profile"], "p")
 
-    # no user or local settings (allow rules, defaultMode, hooks): only the bridge's own project dir
-    assert argv[argv.index("--setting-sources") + 1] == "project"
+    # measured live: "project" alone hides the connectors; "user" reaches them and drops the rest
+    assert argv[argv.index("--setting-sources") + 1] == "user"
+    assert argv[argv.index("--settings") + 1] == '{"disableAllHooks": true}'
     assert argv[argv.index("--permission-mode") + 1] == "manual"  # explicit, not a settings default
     assert argv[argv.index("--permission-prompts") + 1] == "none"
     assert argv[argv.index("--tools") + 1] == ""
@@ -650,3 +654,78 @@ def test_a_nested_run_inherits_none_of_the_callers_secrets(
     assert not [
         name for name in seen if name != "CLAUDE_CODE_OAUTH_TOKEN" and name.endswith("_TOKEN")
     ]
+
+
+# --- the user settings preflight (connectors need the user source, so its rules still count) ---
+
+
+def settings(tmp_home: Path, document: object) -> Path:
+    config = tmp_home / ".claude"
+    config.mkdir(exist_ok=True)
+    (config / "settings.json").write_text(
+        document if isinstance(document, str) else json.dumps(document)
+    )
+    return config
+
+
+def test_settings_without_an_mcp_allow_rule_are_fine(tmp_home: Path) -> None:
+    assert bridge.settings_problem(tmp_home / ".claude") is None  # no file at all
+    ok = {"model": "sonnet", "permissions": {"allow": ["Bash(git status)", "Read"], "deny": ["x"]}}
+    assert bridge.settings_problem(settings(tmp_home, ok)) is None
+    assert bridge.settings_problem(settings(tmp_home, {"permissions": {}})) is None
+    assert bridge.settings_problem(settings(tmp_home, {"hooks": {}})) is None
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"permissions": {"allow": ["mcp__claude_ai_Slack__slack_send_message"]}},
+        {"permissions": {"allow": ["Read", "mcp__claude_ai_Slack"]}},
+        {"permissions": {"allow": ["MCP"]}},
+        {"permissions": {"allow": "mcp__x"}},
+        "{not json",
+        "[1]",
+    ],
+)
+def test_an_mcp_allow_rule_or_unreadable_settings_refuse_the_call(
+    tmp_home: Path, document: object
+) -> None:
+    config = settings(tmp_home, document)
+
+    if document == "[1]":
+        assert bridge.settings_problem(config) is None  # a list has no permissions: nothing allowed
+        return
+    assert bridge.settings_problem(config) is not None
+
+
+def test_a_call_with_such_a_settings_file_is_refused_before_anything_runs(
+    world: World, tmp_home: Path
+) -> None:
+    fresh_claude_account(world, "main", weekly=1, active=True)
+    settings(tmp_home, {"permissions": {"allow": ["mcp__claude_ai_Slack__slack_send_message"]}})
+
+    text, failed = bridge_for(world).call("slack_search", {"query": "x"})
+
+    assert failed and text.startswith("refused:") and "allow rule for an MCP tool" in text
+    assert world.claude_calls() == []
+    # and the unsafe file is the only reason: with it removed the same call runs
+    (tmp_home / ".claude" / "settings.json").unlink()
+    assert bridge_for(world).call("slack_search", {"query": "x"})[1] is False
+
+
+def test_the_bridge_is_disabled_until_a_live_denial_has_been_shown(
+    tmp_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ctx = cli.Context(
+        root=tmp_home / ".vibemaxxing",
+        client=None,  # type: ignore[arg-type]
+        port=None,  # type: ignore[arg-type]
+        now_s=NOW_S,
+    )
+
+    assert bridge.ENABLED is False  # the shipped value
+    assert cli.main(["bridge", "serve"], context=ctx) == 2
+    assert cli.main(["bridge", "add-command"], context=ctx) == 2
+    err = capsys.readouterr().err
+    assert err.count("the bridge is disabled") == 2 and "non-allowed tool" in err
+    assert "claude mcp add" not in err  # nothing to register

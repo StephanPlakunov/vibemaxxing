@@ -1727,6 +1727,13 @@ nothing.
 
 ## 20. vibe-bridge (fork)
 
+**Disabled** (`bridge.ENABLED = False`, a constant): `vibe bridge serve` and `add-command` refuse.
+Live record (3 Nov 2026, scratch cwd, live login main, strict env): reading `slack_read_user_profile`
+works without `--setting-sources` and with `--setting-sources user` (2 turns, tool data returned, 0
+denials); with `--setting-sources project` the model could not call the tool (1 turn). Denial of a
+non-allowed read tool: two attempts, both with no tool call (1 turn, 0 denials), so not shown.
+Enable only after a run shows `permission_denials >= 1` for a non-allowed read.
+
 `vibe bridge serve` (`bridge.py`): newline-delimited JSON-RPC 2.0 on stdio (`initialize`,
 `ping`, `tools/list`, `tools/call`; notifications get no answer). `tools/list` is the allowlist
 in `bridge.TOOLS`: reads and two drafts, each with a closed input schema. A call of any other name
@@ -1746,7 +1753,7 @@ write tool by a prompt-injected result. Reads and drafts alike stay off Cursor u
 shown.
 
 The run: `claude -p <prompt> --model haiku --output-format json --tools "" --setting-sources
-project --permission-mode manual --permission-prompts none --allowedTools <one tool> --disallowedTools <every known write tool of that connector>
+user --settings '{"disableAllHooks": true}' --permission-mode manual --permission-prompts none --allowedTools <one tool> --disallowedTools <every known write tool of that connector>
 --no-session-persistence`, started in `~/.vibemaxxing/bridge-workspace` with `CLAUDE_CONFIG_DIR`
 and `CLAUDE_CODE_OAUTH_TOKEN` of the caller removed; the account's token is lent only when it is
 not Claude Code's live login. `--permission-prompts none` is documented in `claude --help` as
@@ -1756,7 +1763,7 @@ not Claude Code's live login. `--permission-prompts none` is documented in `clau
 name). `bridge.log` (0600): `{at, account, kind, tool, ms, outcome}` with outcome `ok`, `failed`,
 `refused`, `limit` or `no-account`. `vibe bridge add-command` prints the `claude mcp add` line
 for `~/.claude-extra` and runs nothing. Connector tool names and write-tool lists are defaults;
-only `slack_read_user_profile` is checked against the live connector (with the round-2 argv, i.e.
-without `--setting-sources project` and `--permission-mode manual`). A denial or an error result is
-a `failed` call. With the pinned argv a live run could not call even the allowed tool (nothing
-denied); cause not isolated. `tools` cannot remap a tool onto a write tool.
+only `slack_read_user_profile` is checked against the live connector (with the final argv minus
+`--settings`). `settings_problem` reads `<home>/.claude/settings.json` before every call and refuses
+it if it holds an MCP allow rule or cannot be read (allow rules add to `--allowedTools`). A denial or
+an error result is a `failed` call. `tools` cannot remap a tool onto a write tool.

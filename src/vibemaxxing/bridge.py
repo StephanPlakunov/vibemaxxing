@@ -39,6 +39,16 @@ from vibemaxxing.errors import UsageError, VibeError
 from vibemaxxing.fsutil import FILE_MODE
 from vibemaxxing.redact import scrub
 
+# Off until a live run has shown BOTH that the nested run can read through the connector (it can:
+# measured 3 Nov 2026 with `--setting-sources user`) AND that a different, non-allowed read tool of
+# the same connector is denied (not shown: the two live attempts made no tool call at all, so there
+# was nothing to deny). `vibe bridge serve` and `add-command` refuse while this is False. It is a
+# constant on purpose: no setting, flag or environment variable can switch it on.
+ENABLED: Final = False
+DISABLED_REASON: Final = (
+    "the bridge is disabled: a live check has not yet shown that a non-allowed tool of the same "
+    "connector is denied (reading through the connector works). See docs/CONTRACT.md section 20."
+)
 PROTOCOL: Final = "2024-11-05"
 SERVER_NAME: Final = "vibe-bridge"
 LOG_NAME: Final = "bridge.log"
@@ -225,10 +235,13 @@ def claude_argv(config: BridgeConfig, tool: BridgeTool, prompt: str) -> list[str
        there to answer), so a tool outside ``--allowedTools`` is denied, never asked.
     3. ``--disallowedTools``: every known write tool of the same connector, which beats an allow.
 
-    Independent of the person's settings: ``--setting-sources project`` loads neither
-    ``~/.claude/settings.json`` (its allow rules, ``defaultMode`` and hooks) nor local settings;
-    the project source is the bridge's own empty workspace. ``--permission-mode manual`` is
-    explicit rather than whatever a settings file would have said.
+    Settings: ``--setting-sources user`` (measured live: ``project`` alone hides the connectors,
+    ``user`` and no flag both reach them) drops project and local settings, and
+    ``--permission-mode manual`` is explicit, so a settings ``defaultMode`` never decides. The
+    user's own ``settings.json`` is still loaded, so its allow rules would still count:
+    ``settings_problem`` reads it before every call and the call is refused if it holds an MCP
+    allow rule.
+    ``disableAllHooks`` asks for no hooks (not verified to take effect).
     """
     allowed_upstream = upstream_name(config, tool)
     denied = [
@@ -247,7 +260,9 @@ def claude_argv(config: BridgeConfig, tool: BridgeTool, prompt: str) -> list[str
         "--tools",
         "",
         "--setting-sources",
-        "project",
+        "user",
+        "--settings",
+        '{"disableAllHooks": true}',
         "--permission-mode",
         "manual",
         "--permission-prompts",
@@ -282,6 +297,40 @@ def verdict(stdout: str) -> str | None:
         return f"{len(denials)} tool call(s) denied by the permission fence"
     if parsed.get("is_error") is True:
         return "the run reported an error"
+    return None
+
+
+def settings_problem(config_dir: Path) -> str | None:
+    """Why the person's Claude settings make a bridge call unsafe, or None.
+
+    The nested run loads ``<config_dir>/settings.json`` (the connectors need the user source).
+    ``--allowedTools`` adds to its allow rules and does not replace them, so one rule for a
+    connector tool would let a poisoned message call a write tool. Built-in tools are off
+    (``--tools ""``), so only MCP rules matter. A file that cannot be read is "cannot tell".
+    """
+    path = config_dir / "settings.json"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError):
+        return f"{path} cannot be read, so its allow rules are unknown"
+    try:
+        parsed: object = json.loads(text)
+    except ValueError:
+        return f"{path} is not valid JSON, so its allow rules are unknown"
+    permissions = parsed.get("permissions") if isinstance(parsed, dict) else None
+    allow = permissions.get("allow") if isinstance(permissions, dict) else None
+    if allow is None:
+        return None
+    if not isinstance(allow, list):
+        return f"{path}: permissions.allow is not a list, so its rules are unknown"
+    held = sorted({str(rule) for rule in allow if str(rule).lower().startswith("mcp")})
+    if held:
+        return (
+            f"{path} has an allow rule for an MCP tool ({', '.join(held)[:80]}): it would add to "
+            "the one allowed tool; remove it or run the call by hand"
+        )
     return None
 
 
