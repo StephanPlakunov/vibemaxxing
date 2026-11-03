@@ -17,6 +17,15 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
   and its usage is read with the token in the dir's own Keychain item. Importing the same dir again converts an
   alias imported earlier. An interactive run on a vibe-owned account prints when its token ends.
 
+### Added
+
+- **`vibe add ALIAS --from-config-dir DIR --adopt-stored-login`** hands the login vibe has stored for ALIAS to a config
+  dir without a browser: it is written into the dir's own Claude Code Keychain item and `<dir>/.claude.json`, and the
+  account is marked as the dir's *before* Claude Code can refresh it (checked again under the refresh claim, so no
+  earlier-started refresh can post it). Never overwrites a dir's login; a dead lineage is found before anything is handed
+  over; a failed write gives the lineage back to vibe. Polls (tick, list, TUI, web) now refresh a vibe-owned account only
+  once its access token has ended, not in the five minutes before.
+
 ### Changed
 
 - **The bridge reaches `vibe run` sessions by itself.** `vibe run` / `vibe run auto` start claude with a token

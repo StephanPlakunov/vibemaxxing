@@ -1615,6 +1615,19 @@ refresher, Claude Code in that dir, and vibe never POSTs a refresh for it:
   built as for any Claude child (section 19) and the bridge is injected as before. The run is refused, naming
   `CLAUDE_CONFIG_DIR=<dir> claude`, when the dir has no login, or when `<dir>/.claude.json` names another uuid.
   A one-line note names what `~/.claude` has and the dir lacks among `CLAUDE.md`, `settings.json`, `skills`, `projects`.
+- `vibe add ALIAS --from-config-dir DIR --adopt-stored-login` (`adopt.adopt_stored_login`) writes the stored login into
+  `DIR`'s own item (`credential_to_blob`, the shape `vibe switch` writes: one `claudeAiOauth` object with
+  `accessToken`, `refreshToken`, `expiresAt`, `refreshTokenExpiresAt`, `scopes`, `subscriptionType`, `rateLimitTier`; the
+  real item was read once for member names and types, no value) and the identity into `DIR/.claude.json`
+  (`write_claude_identity`, other keys kept, `profileFetchedAt` dropped so Claude Code refetches). Order: refusals with
+  nothing written (active or live account, an item already in `DIR`, a profile naming another uuid, a rejected or lapsed
+  login, another dir); one refresh first when the access token has ended or a stash waits (`invalid_grant` or a transient
+  failure hands nothing over); then, under the alias's refresh claim, **mark `config_dir` first**, write the profile
+  (verified by reading it back), write the item (verified by reading it back). On failure the mark is taken back only when
+  the item is verifiably absent; otherwise it stays and a rerun finishes. `oauth.refresh` checks the mark again after it
+  takes the claim, so a refresh that read the account earlier cannot post the handed-over token.
+- `envelope._usable_credential` (every poll: tick, list, TUI, web, `run auto`'s candidates) refreshes only an access
+  token that has ended (buffer 0); `_fresh_token` (`vibe run`) keeps `EXPIRY_BUFFER_MS`.
 - An account vibe owns still runs on `CLAUDE_CODE_OAUTH_TOKEN`; an interactive `claude` on it prints when that token
   ends and that a longer session needs a config dir of its own.
 

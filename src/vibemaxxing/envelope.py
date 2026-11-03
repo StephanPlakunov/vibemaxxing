@@ -121,7 +121,11 @@ def _usable_credential(
     """Return the credential to use, or a message saying why there is none."""
     if credentials.login_lapsed(credential, now_ms=now_ms):
         return None, _needs_login(alias)
-    if not credentials.is_expired(credential, now_ms=now_ms):
+    # Not inside the 5-minute window before expiry: this is every poll (the tick, list, the TUI,
+    # the web page), and a refresh there takes a token that still works from a session started
+    # with it. Only once it has really ended is a refresh the poll's to make; `vibe run`, which
+    # hands a token to a child that cannot renew it, keeps the window.
+    if not credentials.is_expired(credential, now_ms=now_ms, buffer_ms=0):
         return credential, None
     outcome = oauth.refresh(root, alias, credential, client, now_ms=now_ms)
     if outcome.credential is not None:

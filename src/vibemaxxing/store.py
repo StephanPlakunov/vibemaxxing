@@ -437,6 +437,13 @@ def release_refresh(root: Path, alias: str) -> None:
     _claim_path(root, alias).unlink(missing_ok=True)
 
 
+def hold_refresh_claim(
+    root: Path, alias: str, recovery: str
+) -> contextlib.AbstractContextManager[None]:
+    """The refresh claim of ``alias`` for the length of a change to who holds its lineage."""
+    return _claims(root, (alias,), recovery)
+
+
 @contextlib.contextmanager
 def _claims(root: Path, names: Iterable[str | None], recovery: str) -> Iterator[None]:
     """Hold the refresh claims of ``names`` for the length of a change to `active`.
