@@ -1664,7 +1664,9 @@ JSON. The answer leaves out a field that is zero (proto3 JSON): no `individualUs
 `individualRemaining` (cap minus used) then carries the cap, so `used` is derived from it; with
 neither figure it is unknown, never 0. `spendLimitUsage.pooledUsed` is the team's, not ours.
 
-Availability: while on-demand spend is 0 the seat is on included usage plus Cursor's bonus
+Freshness: an answer is used for 120 s (30 s when within five margins of the cap); an older one
+(to 15 min) is shown with its time and never routes. `vibe run <cursor>` is refused at the limit
+(unknown only warns). Availability: while on-demand spend is 0 the seat is on included usage plus Cursor's bonus
 and is available. Once it is above 0 the personal cap decides: available while
 `cap - used > margin` (`routing.cursor_margin_cents`, 1000), spent after, and a cap of 0
 (on-demand off) means spent. On-demand is billed to the company.
@@ -1674,8 +1676,10 @@ and is available. Once it is above 0 the personal cap decides: available while
 `vibe run cursor -- claude <args>` becomes `cursor-agent <args>`: `-p`, `--output-format`,
 `--include-partial-messages` (as `--stream-partial-output`), `--resume <Cursor chat id>`
 (`~/.cursor/chats/*/<id>` must exist, else refused), `--permission-mode auto` as
-`--auto-review`, `plan` as `--plan`, `default`/`manual` as nothing, `bypassPermissions` and
-`--dangerously-skip-permissions` as `--force` only with `--allow-force`, `--add-dir`, `--model`
+`--auto-review`, `plan` as `--plan`, `default`/`manual` interactive as nothing, `bypassPermissions` and
+`--dangerously-skip-permissions` as `--force` only with `--allow-force`, `default`/`manual` in a
+headless run as `--mode ask` (Cursor's own help: `-p` "has access to all tools, including write and
+shell"), every translation with a "what it may do" sentence, `--add-dir`, `--model`
 and `--effort` as one model `claude-<family>-<version>-<effort>` picked from the live
 `cursor-agent models` (never `-fast` or `(NO ZDR)` without `--allow-fast` / `--allow-no-zdr`;
 else refused with the closest names). With no `--model`, the model and effort are Claude
@@ -1686,6 +1690,18 @@ other flag are refused by name. Anything but `claude` after a Cursor alias runs 
 `--needs` on a headless run adds `--approve-mcps`. A headless run in a workspace nobody trusted
 stops (exit 1, no output): `vibe run --trust-workspace` adds `--trust`, nothing else does.
 
+### The child's environment — `childenv.py`
+
+Every child `vibe run` starts gets `childenv.build(...)`: the Claude family
+(`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+Bedrock/Vertex/Foundry switches) is always dropped; a *strict* child (Cursor, the bridge's nested
+run) also loses every name ending `_TOKEN`, `_API_KEY`, `_SECRET`, `_SECRET_KEY`, `_ACCESS_KEY`,
+`_PASSWORD` not named in `--pass-env`; a Claude credential can never be passed. What the account
+needs is set last. Names are reported, values never. When the shell carries a Claude token or
+config dir (`parent_carries_claude_account`), the chosen Claude account runs on its own token set
+explicitly even if it is the live login. `claude --version` / `claude mcp ...` are passthrough:
+environment untouched.
+
 ### Routing — `route.py`, `vibe run auto`
 
 `settings.json` member `routing` (absent: the defaults; wrong anywhere: `vibe run auto` is
@@ -1695,7 +1711,10 @@ weekly usage allowed by the end of the day), `default_needs` (`["slack","atlassi
 `no_degrade` (`["m365"]`), `connectors` (main: slack, atlassian, m365; cursor: slack,
 atlassian, gcal; extra: none), `order` per class (`needs`, `no_needs`: lists of
 `{"account", "budget", "degraded", "last_resort"}`), `cursor_margin_cents`, `spent_percent`
-(99). Defaults: needs = main within budget, cursor, extra (degraded: runs without the
+(99), `roles` (role -> alias for `main`, `extra`, `cursor`; steps and `connectors` are written in
+roles; a Claude role naming no stored account makes a run that would end on Cursor refuse),
+`cursor_cap_cents` (25000: vibe's own ceiling over whatever Cursor reports). A Cursor step cannot
+be `last_resort`. Defaults: needs = main within budget, cursor, extra (degraded: runs without the
 connectors, with a warning), main (last resort); no needs = extra, main within budget,
 cursor, main (last resort). Unknown usage is unavailable and printed; only the last resort
 accepts an unknown or spent reading (with a warning), and only a dead login stops it. The
@@ -1726,8 +1745,8 @@ attempt to show it blocks MCP writes is not allowed; a Cursor run could therefor
 write tool by a prompt-injected result. Reads and drafts alike stay off Cursor until that is
 shown.
 
-The run: `claude -p <prompt> --model haiku --output-format json --tools "" --permission-prompts
-none --allowedTools <one tool> --disallowedTools <every known write tool of that connector>
+The run: `claude -p <prompt> --model haiku --output-format json --tools "" --setting-sources
+project --permission-mode manual --permission-prompts none --allowedTools <one tool> --disallowedTools <every known write tool of that connector>
 --no-session-persistence`, started in `~/.vibemaxxing/bridge-workspace` with `CLAUDE_CONFIG_DIR`
 and `CLAUDE_CODE_OAUTH_TOKEN` of the caller removed; the account's token is lent only when it is
 not Claude Code's live login. `--permission-prompts none` is documented in `claude --help` as
@@ -1737,4 +1756,7 @@ not Claude Code's live login. `--permission-prompts none` is documented in `clau
 name). `bridge.log` (0600): `{at, account, kind, tool, ms, outcome}` with outcome `ok`, `failed`,
 `refused`, `limit` or `no-account`. `vibe bridge add-command` prints the `claude mcp add` line
 for `~/.claude-extra` and runs nothing. Connector tool names and write-tool lists are defaults;
-only `slack_read_user_profile` is checked against the live connector.
+only `slack_read_user_profile` is checked against the live connector (with the round-2 argv, i.e.
+without `--setting-sources project` and `--permission-mode manual`). A denial or an error result is
+a `failed` call. With the pinned argv a live run could not call even the allowed tool (nothing
+denied); cause not isolated. `tools` cannot remap a tool onto a write tool.

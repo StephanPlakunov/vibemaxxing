@@ -183,6 +183,11 @@ def parse_config(raw: object) -> BridgeConfig:
         name in BY_NAME and isinstance(up, str) and up for name, up in tools.items()
     ):
         raise _bad("tools must map bridge tool names to the connector's tool name")
+    for name, upstream in tools.items():
+        if upstream != BY_NAME[name].upstream and upstream in WRITE_TOOLS.get(
+            BY_NAME[name].server, ()
+        ):
+            raise _bad(f"tools.{name} would map it onto the write tool {upstream}")
     return BridgeConfig(
         timeout_s=float(timeout),
         max_calls_per_hour=calls,
@@ -219,6 +224,11 @@ def claude_argv(config: BridgeConfig, tool: BridgeTool, prompt: str) -> list[str
     2. ``--permission-prompts none``: in ``-p`` anything that would prompt is denied (nobody is
        there to answer), so a tool outside ``--allowedTools`` is denied, never asked.
     3. ``--disallowedTools``: every known write tool of the same connector, which beats an allow.
+
+    Independent of the person's settings: ``--setting-sources project`` loads neither
+    ``~/.claude/settings.json`` (its allow rules, ``defaultMode`` and hooks) nor local settings;
+    the project source is the bridge's own empty workspace. ``--permission-mode manual`` is
+    explicit rather than whatever a settings file would have said.
     """
     allowed_upstream = upstream_name(config, tool)
     denied = [
@@ -236,6 +246,10 @@ def claude_argv(config: BridgeConfig, tool: BridgeTool, prompt: str) -> list[str
         "json",
         "--tools",
         "",
+        "--setting-sources",
+        "project",
+        "--permission-mode",
+        "manual",
         "--permission-prompts",
         "none",
         "--allowedTools",
@@ -253,6 +267,22 @@ def _unfenced(text: str) -> str:
     """A model likes to wrap JSON in a code fence; the bridge hands back the JSON itself."""
     found = _FENCE.match(text.strip())
     return found.group(1).strip() if found else text.strip()
+
+
+def verdict(stdout: str) -> str | None:
+    """Why a run that exited 0 still failed: an error result or a permission denial, else None."""
+    try:
+        parsed: object = json.loads(stdout)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    denials = parsed.get("permission_denials")
+    if isinstance(denials, list) and denials:
+        return f"{len(denials)} tool call(s) denied by the permission fence"
+    if parsed.get("is_error") is True:
+        return "the run reported an error"
+    return None
 
 
 def extract_result(stdout: str) -> str:
@@ -480,6 +510,9 @@ def run_headless(
         raise BridgeError(f"could not start {argv[0]}: {exc.__class__.__name__}") from None
     if done.returncode != 0:
         raise BridgeError(f"{argv[0]} exited with {done.returncode}")
+    problem = verdict(done.stdout)
+    if problem:
+        raise BridgeError(f"{argv[0]}: {problem}")
     text = extract_result(done.stdout)
     if not text:
         raise BridgeError(f"{argv[0]} returned nothing")

@@ -5,6 +5,16 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - fork `stephan/ordered-failover`
 
+### Changed
+
+- Every child of `vibe run` gets an explicit environment (`childenv.py`): Claude credentials and
+  config dir are never inherited, Cursor and the bridge's nested run also lose secret-looking
+  variables (`--pass-env` to pass one). Routing uses roles (`routing.roles`) and refuses a run that
+  would reach Cursor only because main/extra are misnamed. Headless Cursor runs default to
+  `--mode ask` and say what they may do; Cursor's cap is held to vibe's $250 ceiling with fresh
+  readings; an interactive move to Cursor prints one clear line first. The bridge pins settings
+  sources and permission mode and fails on a denial.
+
 ### Added
 
 - **`vibe bridge serve` (vibe-bridge).** A local stdio MCP server that lets a session on extra

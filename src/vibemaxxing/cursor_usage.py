@@ -40,6 +40,9 @@ SECURITY_ABSENT_CODE: Final = 44
 DEFAULT_MARGIN_CENTS: Final = 1000
 # A cached answer older than this is not used to route (cents move while sessions run).
 FRESH_S: Final = 120.0
+# Close to the cap a cached answer is trusted for this long only: dollars move while it runs.
+NEAR_CAP_FRESH_S: Final = 30.0
+# A cached answer older than FRESH_S is shown (with its time) up to this age, never routed by.
 STALE_S: Final = 900.0
 
 
@@ -223,28 +226,47 @@ class Availability:
     why: str
 
 
-def availability(usage: CursorUsage | None, *, margin_cents: int, reason: str = "") -> Availability:
+HARD_CAP_CENTS: Final = 25_000
+
+
+def availability(
+    usage: CursorUsage | None,
+    *,
+    margin_cents: int,
+    reason: str = "",
+    ceiling_cents: int = HARD_CAP_CENTS,
+) -> Availability:
     """Cursor is used until it is used up, on-demand included, to within ``margin_cents``.
 
     While on-demand spend is zero the seat is still on included usage plus Cursor's bonus,
     which is not visible as a number: it ends the moment on-demand starts counting. Then the
-    personal cap is the limit, and a cap of 0, or an unnamed one, means on-demand is not ours.
+    cap decides, and the cap is the lower of what Cursor reports and vibe's own ceiling
+    (``ceiling_cents``, $250): vibe never allows more than that, whatever the answer says, and
+    an answer that names no cap is held to the ceiling. A cap of 0 means on-demand is off.
     """
     if usage is None:
         return Availability(None, reason or "usage unknown")
-    used, cap = usage.on_demand_used_cents, usage.on_demand_limit_cents
+    used, reported = usage.on_demand_used_cents, usage.on_demand_limit_cents
     if used is None:
         return Availability(None, "usage unknown (no on-demand figure in the answer)")
     if used <= 0:
         return Availability(True, "included usage and bonus left, on-demand untouched")
-    if cap is None:
-        return Availability(None, "on-demand has started and the answer names no cap")
+    cap = ceiling_cents if reported is None else min(reported, ceiling_cents)
     if cap <= 0:
         return Availability(False, "included usage is used up and on-demand is off")
     left = cap - used
     if left > margin_cents:
         return Availability(True, f"on-demand ${left / 100:.2f} of ${cap / 100:.2f} left")
     return Availability(False, f"on-demand used to within ${margin_cents / 100:.2f} of its cap")
+
+
+def near_cap(usage: CursorUsage | None, *, margin_cents: int, ceiling_cents: int) -> bool:
+    """Whether a reading is close enough to the cap that only a very fresh one may route."""
+    if usage is None or usage.on_demand_used_cents is None or usage.on_demand_used_cents <= 0:
+        return False
+    reported = usage.on_demand_limit_cents
+    cap = ceiling_cents if reported is None else min(reported, ceiling_cents)
+    return cap - usage.on_demand_used_cents <= margin_cents * 5
 
 
 # --- the request ---------------------------------------------------------------------

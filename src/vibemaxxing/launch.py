@@ -14,7 +14,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import bridge, cursor, cursor_translate, cursor_usage, envelope, route, store
+from vibemaxxing import (
+    bridge,
+    childenv,
+    cursor,
+    cursor_translate,
+    cursor_usage,
+    envelope,
+    route,
+    store,
+)
 from vibemaxxing.cursor import AgentPort
 from vibemaxxing.cursor_usage import CursorTokenPort, CursorUsage
 from vibemaxxing.envelope import AccountView
@@ -41,6 +50,8 @@ class RunFlags:
     allow_fast: bool = False
     allow_no_zdr: bool = False
     trust_workspace: bool = False
+    # Environment variables to hand to a Cursor child although they look secret.
+    pass_env: tuple[str, ...] = ()
     brief: str | None = None
     handover: Path | None = None
 
@@ -83,6 +94,8 @@ class Plan:
     interactive: bool = False
     # Whether the child needs the Claude account's token in its environment.
     claude_token: bool = False
+    # `claude --version` and friends: no account, no environment of ours.
+    passthrough: bool = False
 
 
 # --- what Claude Code would run ------------------------------------------------------
@@ -166,9 +179,18 @@ def _usage_from_payload(payload: Mapping[str, object]) -> CursorUsage:
 
 
 def read_cursor(
-    svc: Services, alias: str, *, margin_cents: int, fresh: bool = False
+    svc: Services,
+    alias: str,
+    *,
+    margin_cents: int,
+    ceiling_cents: int = cursor_usage.HARD_CAP_CENTS,
+    fresh: bool = False,
 ) -> CursorReading:
-    """One Cursor account: logged in or not, and its usage (cached for two minutes)."""
+    """One Cursor account: logged in or not, and its usage.
+
+    A cached answer is used for two minutes, and for 30 seconds when it is close to the cap. An
+    older one (up to 15 minutes) is only shown, with its time: it never decides a run.
+    """
     status = svc.agent.status()
     if not status.logged_in:
         why = "not logged in"
@@ -180,15 +202,14 @@ def read_cursor(
     if cached is not None and cached.added_at != added_at:
         cached = None
     age = None if cached is None or cached.fetched_at is None else svc.now_s - cached.fetched_at
-    if (
-        not fresh
-        and cached is not None
-        and cached.payload is not None
-        and age is not None
-        and 0 <= age < cursor_usage.FRESH_S
-    ):
-        usage: CursorUsage | None = _usage_from_payload(cached.payload)
-        return _reading(alias, status, usage, "", margin_cents)
+    held = None if cached is None or cached.payload is None else _usage_from_payload(cached.payload)
+    window = (
+        cursor_usage.NEAR_CAP_FRESH_S
+        if cursor_usage.near_cap(held, margin_cents=margin_cents, ceiling_cents=ceiling_cents)
+        else cursor_usage.FRESH_S
+    )
+    if not fresh and held is not None and age is not None and 0 <= age < window:
+        return _reading(alias, status, held, "", margin_cents, ceiling_cents)
     usage, why = cursor_usage.fetch(svc.cursor_client, svc.cursor_token)
     if usage is not None:
         store.write_usage_cache(
@@ -196,19 +217,26 @@ def read_cursor(
             alias,
             store.UsageCache(added_at, svc.now_s, _usage_to_payload(usage), None, 0, None),
         )
-        return _reading(alias, status, usage, "", margin_cents)
+        return _reading(alias, status, usage, "", margin_cents, ceiling_cents)
     if (
-        cached is not None
-        and cached.payload is not None
+        held is not None
+        and cached is not None
         and cached.fetched_at is not None
         and age is not None
         and 0 <= age < cursor_usage.STALE_S
     ):
         at = datetime.fromtimestamp(cached.fetched_at).strftime("%H:%M")
-        return _reading(
-            alias, status, _usage_from_payload(cached.payload), f"{why}; showing {at}", margin_cents
+        return CursorReading(
+            alias,
+            True,
+            status.email,
+            status.team,
+            held,
+            f"{why}; showing {at}",
+            # Shown, never routed by: dollars move while an answer ages.
+            cursor_usage.Availability(None, f"{why}; the last answer ({at}) is too old to use"),
         )
-    return _reading(alias, status, None, why, margin_cents)
+    return _reading(alias, status, None, why, margin_cents, ceiling_cents)
 
 
 def _reading(
@@ -217,6 +245,7 @@ def _reading(
     usage: CursorUsage | None,
     note: str,
     margin_cents: int,
+    ceiling_cents: int,
 ) -> CursorReading:
     return CursorReading(
         alias,
@@ -225,7 +254,9 @@ def _reading(
         status.team,
         usage,
         note,
-        cursor_usage.availability(usage, margin_cents=margin_cents, reason=note),
+        cursor_usage.availability(
+            usage, margin_cents=margin_cents, reason=note, ceiling_cents=ceiling_cents
+        ),
     )
 
 
@@ -321,7 +352,12 @@ def candidates(svc: Services, routing: route.Routing) -> Callable[[str], route.C
         if alias in found:
             return found[alias]
         if alias in seats:
-            reading = read_cursor(svc, alias, margin_cents=routing.cursor_margin_cents)
+            reading = read_cursor(
+                svc,
+                alias,
+                margin_cents=routing.cursor_margin_cents,
+                ceiling_cents=routing.cursor_cap_cents,
+            )
             found[alias] = _cursor_candidate(reading)
         else:
             if not claude:
@@ -388,6 +424,8 @@ def _cursor_plan(
     notes: list[str],
     moved: bool,
     chosen: route.Route | None,
+    why_moved: str | None = None,
+    main_alias: str = "main",
 ) -> Plan:
     program = svc.agent.binary()
     if not cursor_translate.is_claude_command(command):
@@ -411,12 +449,16 @@ def _cursor_plan(
             "headless cursor-agent stops at a workspace it was never told to trust (exit 1, no "
             "output); trust this one once in `cursor-agent`, or pass --trust-workspace"
         )
-    if translation.interactive:
-        notes.append(
-            "starting cursor-agent's own terminal UI: no Claude skills, hooks or Remote Control "
-            "there"
-        )
     notes.append(f"model {translation.model} (Cursor's name for the Claude model)")
+    notes.append(f"what it may do: {translation.access}")
+    if translation.interactive:
+        # The last thing printed before cursor-agent's own UI takes the terminal.
+        lead = f"{why_moved} \u2192 s" if why_moved else "S"
+        notes.append(
+            f"{lead}tarting Cursor's agent with {translation.model}; no Claude hooks, skills or "
+            f"Remote Control here"
+            + (f"; `vibe run {main_alias} -- claude` to override" if why_moved else "")
+        )
     return Plan(
         alias,
         cursor.KIND_CURSOR,
@@ -443,8 +485,11 @@ def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags)
                 "--brief and --handover are for `vibe run auto`", "vibe run auto --help"
             )
         needs = _check_needs(svc.root, alias, flags)
+        notes: list[str] = []
+        if cursor_translate.is_claude_command(command):
+            notes += _ceiling_notes(svc, alias)
         return _cursor_plan(
-            svc, alias, command, flags, needs=needs, notes=[], moved=False, chosen=None
+            svc, alias, command, flags, needs=needs, notes=notes, moved=False, chosen=None
         )
     if flags.routing_flags:
         raise UsageError(
@@ -457,11 +502,36 @@ def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags)
     return Plan(alias, cursor.KIND_CLAUDE, tuple(command), claude_token=True)
 
 
+def _ceiling_notes(svc: Services, alias: str) -> list[str]:
+    """Refuse a Cursor run at the money limit; warn when the usage cannot be read.
+
+    The reading is fresh (two minutes, thirty seconds close to the cap). A seat whose on-demand
+    spend is within the margin of the cap, or of vibe's own ceiling, is spent. An unknown reading
+    does not stop a run the person asked for by name, but it is said.
+    """
+    routing = route.read_routing(svc.root)
+    reading = read_cursor(
+        svc,
+        alias,
+        margin_cents=routing.cursor_margin_cents,
+        ceiling_cents=routing.cursor_cap_cents,
+    )
+    if reading.logged_in and reading.availability.ok is False:
+        raise UsageError(
+            f"Cursor is at its on-demand limit: {reading.availability.why}",
+            "vibe list   (the cycle resets on the date it shows)",
+        )
+    if reading.logged_in and reading.availability.ok is None:
+        return [f"warning: Cursor usage unknown ({reading.availability.why}); running as asked"]
+    return []
+
+
 def _check_needs(root: Path, alias: str, flags: RunFlags) -> tuple[str, ...]:
     routing = route.read_routing(root)
     # An explicit Cursor account needs only what the caller declares: nothing by default.
     needs = route.needs_for(routing, needs=flags.needs or (), no_needs=False)
-    have = set(routing.connectors.get(alias, ()))
+    role = next((name for name, held in routing.roles.items() if held == alias), alias)
+    have = set(routing.connectors.get(role, routing.connectors.get(alias, ())))
     missing = sorted(set(needs) - have)
     if missing:
         raise UsageError(
@@ -480,7 +550,9 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
         )
     if cursor_translate.is_not_a_session(command[1:]):
         # `claude --version`, `claude mcp list`: nothing to route, and nothing to spend.
-        return Plan("-", cursor.KIND_CLAUDE, tuple(command), ("not a session: ran as is",))
+        return Plan(
+            "-", cursor.KIND_CLAUDE, tuple(command), ("not a session: ran as is",), passthrough=True
+        )
     routing = route.read_routing(svc.root)
     needs = route.needs_for(routing, needs=flags.needs, no_needs=flags.no_needs)
     if flags.needs is not None and flags.no_needs:
@@ -496,8 +568,18 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
     notes += [f"skipped {line}" for line in chosen.skipped if "Claude-only" not in line]
     notes += [f"warning: {warning}" for warning in chosen.warnings]
     if chosen.kind == cursor.KIND_CURSOR:
+        passed_over = next((line for line in chosen.skipped if "Claude-only" not in line), None)
         return _cursor_plan(
-            svc, chosen.alias, command, flags, needs=needs, notes=notes, moved=True, chosen=chosen
+            svc,
+            chosen.alias,
+            command,
+            flags,
+            needs=needs,
+            notes=notes,
+            moved=True,
+            chosen=chosen,
+            why_moved=passed_over,
+            main_alias=routing.roles["main"],
         )
     args = list(command[1:])
     given = cursor_translate.resume_id(args)
@@ -512,9 +594,20 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
     # The account Claude Code is logged in as right now keeps its own login: no token override,
     # so it refreshes itself and keeps the scopes (and connectors) of a normal login.
     live = store.live_alias(svc.root, svc.port) == chosen.alias
-    if live:
+    inherited = childenv.parent_carries_claude_account(svc.environ)
+    if live and inherited:
+        # This process runs inside a session pinned to an account by a token or a config dir.
+        # "The live login" would then depend on what is dropped, so the account is set
+        # explicitly instead.
+        live = False
         notes.append(
-            f"{chosen.alias} is Claude Code's own login: it runs as that, no token override"
+            f"this shell carries a Claude token or config dir: {chosen.alias} runs on its own "
+            "token, set explicitly, never on the inherited one"
+        )
+    elif live:
+        notes.append(
+            f"{chosen.alias} is Claude Code's own login: it runs as that, no token override "
+            "(the inherited Claude variables are dropped)"
         )
     return Plan(
         chosen.alias,
@@ -591,13 +684,13 @@ def bridge_execute(
             # The nested run is its own Claude Code: not the config dir or token of the session
             # that called the bridge. The live login keeps itself; any other account is lent
             # its token for this one call.
-            env = {
-                key: value
-                for key, value in svc.environ.items()
-                if key not in ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN")
-            }
-            if store.live_alias(svc.root, svc.port) != chosen.alias:
-                env.update(token_env(chosen.alias))
+            lent = {}
+            if store.live_alias(svc.root, svc.port) != chosen.alias or (
+                childenv.parent_carries_claude_account(svc.environ)
+            ):
+                lent = token_env(chosen.alias)
+            # Strict: the nested run holds none of the caller's secrets either.
+            env = childenv.build(svc.environ, strict=True, set_vars=lent).env
             return bridge.run_headless(
                 bridge.claude_argv(config, tool, prompt),
                 env,

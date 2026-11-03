@@ -391,3 +391,102 @@ def test_toggling_auto_switch_keeps_the_routing(tmp_path: Path) -> None:
     }
     assert auto.read_settings(tmp_path).auto_switch is True  # auto-switch ignores the member
     assert route.read_routing(tmp_path).weekday_budget == (1, 2, 3, 4, 5, 6, 7)
+
+
+# --- roles: routing never depends on the literal names main / extra / cursor ---------------------
+
+
+def cand(
+    alias: str, kind: str = "claude", health: Health = Health.OK, weekly: int | None = 10
+) -> Candidate:
+    return Candidate(alias, kind, health, "x", weekly, weekly is not None)
+
+
+ROLES = Routing(roles={"main": "stephan", "extra": "shared", "cursor": "zvoove"})
+
+
+def test_roles_map_the_order_onto_whatever_the_accounts_are_called() -> None:
+    cands = [cand("stephan", weekly=10), cand("shared", weekly=5), cand("zvoove", "cursor")]
+
+    assert pick(cands, needs=(), routing=ROLES).alias == "shared"  # the extra role first
+    assert pick(cands, needs=NEEDS, routing=ROLES).alias == "stephan"  # main within budget
+    over = [cand("stephan", weekly=90), cand("shared", weekly=5), cand("zvoove", "cursor")]
+    chosen = pick(over, needs=NEEDS, routing=ROLES)
+    assert chosen.alias == "zvoove" and chosen.kind == "cursor"
+
+
+def test_connectors_follow_the_role_not_the_alias() -> None:
+    cands = [cand("stephan", weekly=90), cand("shared"), cand("zvoove", "cursor")]
+
+    # m365 belongs to the main role: the alias "stephan" has it, "zvoove" (cursor role) does not
+    assert pick(cands, needs=("m365",), routing=ROLES).alias == "stephan"
+    assert pick(cands, needs=("gcal",), routing=ROLES).alias == "zvoove"
+
+
+def test_a_misnamed_account_never_falls_through_to_cursor() -> None:
+    """Review finding 4: accounts `stephan` and `shared`, default roles, one Cursor account."""
+    cands = [cand("stephan"), cand("shared"), cand("cursor", "cursor")]
+
+    for needs in ((), NEEDS):
+        with pytest.raises(UsageError) as caught:
+            pick(cands, needs=needs)  # main/extra name nothing; the order would end on Cursor
+        message = caught.value.message
+        assert "main -> 'main'" in message or "extra -> 'extra'" in message
+        assert "naming mismatch" in message and "not starting it" in message
+        assert caught.value.recovery is not None and "routing.roles" in caught.value.recovery
+
+
+def test_with_the_roles_set_the_same_accounts_route_normally() -> None:
+    cands = [cand("stephan"), cand("shared"), cand("cursor", "cursor")]
+
+    assert (
+        pick(
+            cands,
+            needs=(),
+            routing=Routing(roles={"main": "stephan", "extra": "shared", "cursor": "cursor"}),
+        ).alias
+        == "shared"
+    )
+
+
+def test_a_missing_extra_role_is_skipped_but_cursor_is_still_refused_while_it_is_missing() -> None:
+    # main is named right and has room: the run goes there; the missing extra is only reported
+    no_extra = Routing(roles={"main": "stephan", "extra": "nobody", "cursor": "zvoove"})
+    cands = [cand("stephan"), cand("zvoove", "cursor")]
+
+    chosen = pick(cands, needs=(), routing=no_extra)
+    assert chosen.alias == "stephan"
+    assert any("extra (alias 'nobody'): no such account" in line for line in chosen.skipped)
+    # main over budget, so the order would reach Cursor: refused, because a Claude role is missing
+    over = [cand("stephan", weekly=95), cand("zvoove", "cursor")]
+    with pytest.raises(UsageError, match="extra -> 'nobody'"):
+        pick(over, needs=(), routing=no_extra)
+
+
+def test_a_missing_cursor_role_just_skips_the_step() -> None:
+    no_cursor = Routing(roles={"main": "stephan", "extra": "shared", "cursor": "nothing"})
+    cands = [cand("stephan", weekly=95), cand("shared", health=Health.OUT)]
+
+    chosen = pick(cands, needs=NEEDS, routing=no_cursor)
+
+    assert chosen.alias == "stephan" and chosen.reason.startswith("last resort")
+    assert any("cursor (alias 'nothing'): no such account" in line for line in chosen.skipped)
+
+
+def test_roles_are_validated(tmp_path: Path) -> None:
+    for bad in (
+        {"roles": "main"},
+        {"roles": {"boss": "x"}},
+        {"roles": {"main": 3}},
+        {"roles": {"main": "Bad Alias"}},
+        {"roles": {"main": "same", "extra": "same"}},
+        {"cursor_cap_cents": -1},
+        {"order": {"needs": [{"account": "cursor", "last_resort": True}]}},
+    ):
+        write(tmp_path, {"routing": bad})
+        with pytest.raises(UsageError, match="routing"):
+            route.read_routing(tmp_path)
+    write(tmp_path, {"routing": {"roles": {"main": "stephan"}, "cursor_cap_cents": 20_000}})
+    routing = route.read_routing(tmp_path)
+    assert routing.roles == {"main": "stephan", "extra": "extra", "cursor": "cursor"}
+    assert routing.cursor_cap_cents == 20_000

@@ -72,6 +72,8 @@ class Translation:
     args: tuple[str, ...]  # the cursor-agent arguments, without the program
     interactive: bool
     model: str
+    # One sentence on what the Cursor run is allowed to do.
+    access: str = ""
 
 
 def refuse(flag: str, why: str) -> UsageError:
@@ -247,6 +249,10 @@ def translate(claude_args: Sequence[str], options: Options) -> Translation:
             )
         out += ["--resume", resume]
 
+    # What the Cursor run may do, said plainly in `vibe run`'s output. Headless Claude Code denies
+    # whatever is not allowed; Cursor's own help says `-p` "has access to all tools, including
+    # write and shell", and its docs say only that changes are proposed, not applied, without
+    # --force. So the default of a headless run is Cursor's most restrictive mode, not "nothing".
     if skip_permissions or permission == "bypassPermissions":
         if not options.allow_force:
             raise refuse(
@@ -254,12 +260,27 @@ def translate(claude_args: Sequence[str], options: Options) -> Translation:
                 "it would need cursor-agent --force; pass --allow-force to vibe run to allow it",
             )
         out.append("--force")
+        access = "--force: every command and edit runs without asking"
     elif permission == "auto":
         out.append("--auto-review")
+        access = (
+            "agent mode with --auto-review: tool calls Cursor's classifier judges safe run on "
+            "their own, the rest need an approval"
+            + (" that nobody can give in a headless run" if print_mode else "")
+        )
     elif permission == "plan":
         out.append("--plan")
+        access = "plan mode: read-only planning, no edits"
     elif permission is not None and permission not in _PERMISSION_NOTHING:
         raise refuse(f"--permission-mode {permission}", "only auto, plan and default are mapped")
+    elif print_mode:
+        out += ["--mode", "ask"]
+        access = (
+            "--mode ask, Cursor's most restrictive mode: read-only exploration per Cursor's docs, "
+            "like Claude's default in -p. For an agent that may act, use --permission-mode auto"
+        )
+    else:
+        access = "interactive agent: what it may do without asking is Cursor's own setting"
 
     chosen = model if model is not None else options.default_model
     if chosen is None:
@@ -284,7 +305,7 @@ def translate(claude_args: Sequence[str], options: Options) -> Translation:
     out += extra
     if prompt:
         out += ["--", *prompt] if any(word.startswith("-") for word in prompt) else prompt
-    return Translation(tuple(out), interactive=not print_mode, model=cursor_model)
+    return Translation(tuple(out), interactive=not print_mode, model=cursor_model, access=access)
 
 
 _WHY: Final = {

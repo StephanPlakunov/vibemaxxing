@@ -20,6 +20,7 @@ from vibemaxxing import (
     __version__,
     auto,
     bridge,
+    childenv,
     credentials,
     cursor,
     envelope,
@@ -98,14 +99,22 @@ class Context:
         if not aliases:
             return []
         try:
-            margin = route.read_routing(self.root).cursor_margin_cents
+            routing = route.read_routing(self.root)
         except UsageError:
             # A wrong routing stops `vibe run auto`; it must not stop `vibe list`.
-            margin = route.Routing().cursor_margin_cents
+            routing = route.Routing()
         svc = self.services()
         if now_s is not None:
             svc = replace(svc, now_s=now_s)
-        return [launch.read_cursor(svc, alias, margin_cents=margin) for alias in aliases]
+        return [
+            launch.read_cursor(
+                svc,
+                alias,
+                margin_cents=routing.cursor_margin_cents,
+                ceiling_cents=routing.cursor_cap_cents,
+            )
+            for alias in aliases
+        ]
 
 
 def default_context() -> Context:
@@ -782,6 +791,7 @@ def _run_flags(args: argparse.Namespace) -> launch.RunFlags:
         allow_fast=args.allow_fast,
         allow_no_zdr=args.allow_no_zdr,
         trust_workspace=args.trust_workspace,
+        pass_env=tuple(name.strip() for name in (args.pass_env or "").split(",") if name.strip()),
         brief=args.brief,
         handover=args.handover,
     )
@@ -810,7 +820,21 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
     command = args.command[1:] if args.command[:1] == ["--"] else list(args.command)
     if not command:
         raise UsageError("vibe run needs a command after --", "vibe run work -- claude")
-    plan = launch.plan_run(ctx.services(), args.alias, command, _run_flags(args))
+    flags = _run_flags(args)
+    plan = launch.plan_run(ctx.services(), args.alias, command, flags)
+    # The child's environment is built on purpose, never inherited whole (childenv.py).
+    # Passthrough (`claude --version`, `claude mcp ...`) is the person's own command: unchanged.
+    child: childenv.ChildEnv | None = None
+    if not plan.passthrough:
+        child = childenv.build(
+            os.environ, strict=plan.kind == cursor.KIND_CURSOR, pass_env=flags.pass_env
+        )
+        if child.dropped:
+            _say(
+                f"not passed to the child: {', '.join(child.dropped)} "
+                "(names only; --pass-env NAME passes one to Cursor)"
+            )
+    # Last, so the line about a move to Cursor's own UI is the final thing before it starts.
     for note in plan.notes:
         _say(note)
     if args.dry_run:
@@ -822,22 +846,26 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
                 argv=list(plan.argv),
                 dry_run=True,
                 notes=list(plan.notes),
+                env_dropped=list(child.dropped) if child else [],
             ),
             as_json=args.json,
             human=f"would run on {plan.alias} ({plan.kind}): {' '.join(plan.argv)}\n",
         )
         return 0
-    if plan.kind == cursor.KIND_CURSOR:
-        # No credential of ours goes anywhere: cursor-agent reads its own login.
-        code = _spawn(plan.argv, None)
-    elif not plan.claude_token:
+    if child is None:
         code = _spawn(plan.argv, None)  # `claude --version` and friends: no account involved
+    elif plan.kind == cursor.KIND_CURSOR:
+        # No credential of ours goes anywhere: cursor-agent reads its own login.
+        code = _spawn(plan.argv, child.env)
+    elif not plan.claude_token:
+        # Claude Code's own login: no token override, and no inherited Claude variable either.
+        code = _spawn(plan.argv, child.env)
     else:
         credential = _fresh_token(ctx, plan.alias)
         # The fifth permitted reveal() site: the child's environment. The
         # global Keychain credential is untouched, so other shells keep their account.
-        child_env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": credential.access_token.reveal()}
-        code = _spawn(plan.argv, child_env)
+        explicit = {childenv.TOKEN_VAR: credential.access_token.reveal()}
+        code = _spawn(plan.argv, {**child.env, **explicit})
     if args.json and code != 130:
         out(envelope.dumps(_action("run", alias=plan.alias, kind=plan.kind, exit_code=code)) + "\n")
     return code
@@ -846,7 +874,7 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
 def _token_env(ctx: Context, alias: str) -> dict[str, str]:
     credential = _fresh_token(ctx, alias)
     # Reveal site of the bridge's one nested run, same as `vibe run`: the child's environment.
-    return {"CLAUDE_CODE_OAUTH_TOKEN": credential.access_token.reveal()}
+    return {childenv.TOKEN_VAR: credential.access_token.reveal()}
 
 
 def cmd_bridge_serve(args: argparse.Namespace, ctx: Context) -> int:
@@ -1016,6 +1044,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-fast", action="store_true", help='on Cursor: allow "-fast" models')
     run.add_argument(
         "--allow-no-zdr", action="store_true", help='on Cursor: allow "(NO ZDR)" models'
+    )
+    run.add_argument(
+        "--pass-env",
+        metavar="NAMES",
+        help="on Cursor: environment variables to pass although they look secret (NAME,NAME)",
     )
     run.add_argument(
         "--trust-workspace",

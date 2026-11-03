@@ -267,7 +267,8 @@ It turns the Claude Code command line into a `cursor-agent` one. Every flag is m
 | `-p`, `--output-format text\|json\|stream-json` | the same |
 | `--include-partial-messages` | `--stream-partial-output` |
 | `--permission-mode auto` | `--auto-review` (never `--force`) |
-| `--permission-mode default` / `manual` | nothing |
+| `--permission-mode default` / `manual`, headless | `--mode ask` (Cursor's most restrictive mode, read-only exploration), see below |
+| `--permission-mode default` / `manual`, interactive | nothing (what it may do without asking is Cursor's own setting) |
 | `--permission-mode plan` | `--plan` |
 | `--permission-mode bypassPermissions`, `--dangerously-skip-permissions` | refused; `--force` only with `vibe run --allow-force` |
 | `--model`, `--effort` (or the model and effort Claude Code would use) | `--model claude-<family>-<version>-<effort>`, picked from the live `cursor-agent models` |
@@ -275,6 +276,12 @@ It turns the Claude Code command line into a `cursor-agent` one. Every flag is m
 | `--add-dir` | `--add-dir` |
 | no `-p` (interactive) | cursor-agent's own terminal UI, and vibe says so |
 | anything else (`--allowedTools`, `--mcp-config`, `-c`, `claude mcp ...`, ...) | refused, naming the flag |
+
+Headless Claude Code denies whatever it was not allowed to do. Cursor's own help says its `-p`
+"has access to all tools, including write and shell", and its docs say only that changes are
+proposed, not applied, without `--force`; vibe could not check more than that. So a headless run
+with no permission mode becomes `--mode ask`, and `vibe run` prints a "what it may do" line for
+every Cursor run. Use `--permission-mode auto` for an agent that may act (`--auto-review`).
 
 A model that is not in `cursor-agent models` is refused with the closest names. A `-fast`
 variant and any model marked `(NO ZDR)` (no zero data retention) are never picked unless you
@@ -288,6 +295,18 @@ Control, no `CLAUDE.md` memory; Cursor reads its own rules and its own MCP confi
 route a program that relies on Claude Code hooks for its safety policy: run it with
 `--claude-only`. `vibe switch` and `vibe auto tick` never touch a Cursor account (the Keychain
 login cannot point at Cursor).
+
+### The child's environment
+
+Every child vibe starts gets an environment built on purpose. For Cursor (and for the bridge's
+nested run) vibe drops `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, the Bedrock/Vertex switches and every `*_TOKEN`, `*_API_KEY`, `*_SECRET`,
+`*_PASSWORD` you did not pass on purpose (`vibe run cursor --pass-env NAME,NAME`; never a Claude
+credential). A Claude Code child loses only the Claude family and is then given its account's
+token explicitly. Output names what was dropped, never a value. A shell that carries a Claude
+token or config dir (a session vibe started on extra) never decides the account: a run on main
+uses main's own token, set explicitly, not "the live login". Claude's own commands
+(`claude --version`, `claude mcp ...`) keep your environment untouched.
 
 ### Usage
 
@@ -315,13 +334,24 @@ Defaults, all configurable under `routing` in `~/.vibemaxxing/settings.json`:
 - **Budget**: the share of main's weekly usage allowed by the end of each day, Berlin time:
   Mon 20%, Tue 40%, Wed 60%, Thu 80%, Fri-Sun 100%.
 - **Cursor has usage left** while its included usage and bonus last, and then its personal
-  on-demand cap (minus a margin, default $10). **On-demand is billed to the company.** It
+  on-demand cap (minus a margin, default $10). vibe also holds the cap to its own $250 ceiling
+  (`routing.cursor_cap_cents`) whatever Cursor reports, uses an answer at most two minutes old
+  (30 seconds close to the cap; an older one is shown, never routed by), and refuses even
+  `vibe run cursor` at the limit. **On-demand is billed to the company.** It
   counts as spent after that, until the cycle resets.
 - `--needs m365` can only go to main. `--claude-only` never picks Cursor.
 - An account with unknown usage is unavailable, and vibe prints why it was skipped.
-- When a run moves between Claude and Cursor, vibe prints which account and why. A Claude session
+- When a run moves between Claude and Cursor, vibe prints which account and why. An interactive
+move prints one last line before Cursor's own UI starts: why main was passed over, which model,
+that there are no Claude hooks, skills or Remote Control there, and `vibe run main -- claude` to
+override. A Claude session
   id cannot be resumed on Cursor, nor the reverse: it starts a fresh run with `--brief "<task>"`
   and `--handover <file>` instead, and says so.
+
+Routing names three **roles**, `main`, `extra` and `cursor`, and `routing.roles` maps each to the
+alias it is stored under (`{"main": "stephan", "extra": "shared", "cursor": "zvoove"}`; default:
+the same names). A Claude role that names no stored account makes the run refuse, not fall
+through to Cursor. A Cursor step cannot be the last resort.
 
 ```json
 {"routing": {"weekday_budget": [20, 40, 60, 80, 100, 100, 100], "timezone": "Europe/Berlin",
@@ -385,10 +415,17 @@ switching under it breaks Remote Control). So extra borrows a connector one call
   prompt-injected result could otherwise make a Cursor run call a write tool. This is fixed in
   code; no setting changes it. When main cannot take the call (spent, usage unknown, login gone)
   the call is refused with the reason.
-- Three fences around the one allowed tool: `--tools ""` (no Claude Code tools),
+- Fences around the one allowed tool: `--tools ""` (no Claude Code tools),
   `--permission-prompts none` (in `-p` anything that would prompt is denied, so a tool outside
   `--allowedTools` is denied, not asked), and `--disallowedTools` with every known write tool of
-  the same connector. The run starts in an empty directory (`~/.vibemaxxing/bridge-workspace`).
+  the same connector. They do not depend on your settings: `--setting-sources project` (your
+  `~/.claude/settings.json` allow rules, default mode and hooks are not loaded) and an explicit
+  `--permission-mode manual`, in an empty directory (`~/.vibemaxxing/bridge-workspace`). The
+  nested run gets a scrubbed environment and main's token explicitly. A run that was denied or
+  reported an error is a failure, never an "ok" result. **Open: in the one live check of this
+  exact argv (3 Nov, round 3) the model could not call even the allowed read tool and nothing was
+  denied; the pin is the likely cause but was not isolated. Do not register the bridge until a
+  live read with this argv succeeds.**
 - Cost guard: a timeout per call (90 s), at most 30 calls per hour per bridge process, both in
   `routing.bridge`. `~/.vibemaxxing/bridge.log` has one line per call: account, tool, duration,
   outcome. Never arguments, content or a secret.

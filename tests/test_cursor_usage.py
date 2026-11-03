@@ -136,7 +136,8 @@ def test_on_demand_is_used_up_to_the_cap_minus_the_margin() -> None:
 
 def test_on_demand_off_or_unnamed_once_it_has_started() -> None:
     assert avail(100, 0).ok is False
-    assert avail(100, None).ok is None
+    assert avail(100, None).ok is True  # no cap named: held to vibe's own $250 ceiling
+    assert avail(24_500, None).ok is False
     assert avail(None, 25_000).ok is None
 
 
@@ -310,3 +311,29 @@ def test_the_pooled_team_spend_is_not_mistaken_for_ours() -> None:
     parsed = parse_usage(real_answer(), None)
 
     assert parsed is not None and parsed.on_demand_used_cents == 0  # pooledUsed is 1587827
+
+
+def test_vibes_own_ceiling_beats_a_higher_reported_cap() -> None:
+    # Cursor says the cap is $500; vibe never allows more than $250 whatever it says.
+    assert avail(24_500, 50_000).ok is False
+    assert avail(20_000, 50_000).ok is True
+    assert (
+        availability(
+            CursorUsage(1.0, 40_000, 100_000, None), margin_cents=1000, ceiling_cents=50_000
+        ).ok
+        is True
+    )  # a deliberately raised ceiling is a setting, not a default
+    assert (
+        availability(CursorUsage(1.0, 10, 5_000, None), margin_cents=1000, ceiling_cents=50_000).ok
+        is True
+    )
+    assert cursor_usage.near_cap(
+        CursorUsage(1.0, 22_000, 25_000, None), margin_cents=1000, ceiling_cents=25_000
+    )
+    assert not cursor_usage.near_cap(
+        CursorUsage(1.0, 1_000, 25_000, None), margin_cents=1000, ceiling_cents=25_000
+    )
+    assert not cursor_usage.near_cap(
+        CursorUsage(1.0, 0, 25_000, None), margin_cents=1000, ceiling_cents=25_000
+    )
+    assert not cursor_usage.near_cap(None, margin_cents=1000, ceiling_cents=25_000)

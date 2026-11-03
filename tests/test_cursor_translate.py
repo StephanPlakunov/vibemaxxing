@@ -32,7 +32,14 @@ def run(*args: str, **kw: object) -> Translation:
 def test_print_and_a_prompt() -> None:
     result = run("-p", "fix the bug")
 
-    assert result.args == ("-p", "--model", "claude-sonnet-5-5-medium", "fix the bug")
+    assert result.args == (
+        "-p",
+        "--mode",
+        "ask",
+        "--model",
+        "claude-sonnet-5-5-medium",
+        "fix the bug",
+    )
     assert not result.interactive
 
 

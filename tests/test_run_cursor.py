@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -22,8 +23,9 @@ from tests.cursor_fakes import (
     usage_answer,
 )
 from tests.fakes import FakeHttpClient, FakeKeychain, make_credential, seed_account
-from vibemaxxing import cli, cursor, store
+from vibemaxxing import cli, cursor, launch, store
 from vibemaxxing.credentials import Identity, credential_to_blob
+from vibemaxxing.errors import NetworkError
 
 CHAT = "8ecd5bf4-84eb-4551-a928-e0f5e14044d0"
 # Tuesday 3 Nov 2026, 12:00 Berlin: main's budget is 40%.
@@ -111,6 +113,7 @@ class World:
             for call in calls:
                 call.pop("has_config_dir", None)
                 call.pop("cwd", None)
+                call.pop("env", None)
         return calls
 
 
@@ -166,7 +169,7 @@ def test_interactive_claude_starts_the_cursor_tui_and_says_so(
     assert world.main("run", "cursor", "--", "claude", "--model", "opus") == 0
 
     assert world.fake.calls() == [["--model", "claude-opus-5-5-medium"]]
-    assert "no Claude skills, hooks or Remote Control" in capsys.readouterr().err
+    assert "no Claude hooks, skills or Remote Control here" in capsys.readouterr().err
 
 
 def test_the_exit_code_of_cursor_agent_is_the_exit_code(
@@ -174,6 +177,7 @@ def test_the_exit_code_of_cursor_agent_is_the_exit_code(
 ) -> None:
     world = World(tmp_home, monkeypatch, exit_code=7)
     world.add_cursor()
+    world.cursor_usage()
 
     assert world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku") == 7
 
@@ -381,7 +385,7 @@ def test_auto_over_budget_moves_a_needs_run_to_cursor_and_translates(
     assert code == 0
     assert world.claude_calls() == []
     assert world.fake.calls() == [
-        ["-p", "--model", "claude-haiku-5-5-medium", "--approve-mcps", "hi"]
+        ["-p", "--mode", "ask", "--model", "claude-haiku-5-5-medium", "--approve-mcps", "hi"]
     ]
     err = capsys.readouterr().err
     assert "auto picked cursor (cursor): included usage and bonus left, on-demand untouched" in err
@@ -427,7 +431,9 @@ def test_auto_no_needs_extra_spent_main_over_budget_goes_to_cursor(
 
     err = capsys.readouterr().err
     assert "auto picked cursor" in err
-    assert world.fake.calls() == [["-p", "--model", "claude-opus-5-5-medium", "hi"]]
+    assert world.fake.calls() == [
+        ["-p", "--mode", "ask", "--model", "claude-opus-5-5-medium", "hi"]
+    ]
 
 
 def test_auto_claude_only_never_goes_to_cursor(
@@ -603,3 +609,167 @@ def test_headless_cursor_runs_say_the_workspace_must_be_trusted_and_the_flag_pas
     world.main("run", "cursor", "--trust-workspace", "--", "claude", "-p", "x", "--model", "haiku")
     assert "--trust" in world.fake.calls()[-1]
     assert "never told to trust" not in capsys.readouterr().err
+
+
+# --- round 3: roles, what a Cursor run may do, the money ceiling, the interactive line ---------
+
+
+def test_differently_named_accounts_are_refused_not_sent_to_cursor(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.claude_account("stephan", session=5, weekly=5, active=True)
+    world.claude_account("shared", session=5, weekly=5)
+
+    assert (
+        world.main("run", "auto", "--no-needs", "--", "claude", "-p", "hi", "--model", "haiku") == 2
+    )
+
+    err = capsys.readouterr().err
+    assert "naming mismatch" in err and "routing.roles" in err
+    assert world.fake.calls() == [] and world.claude_calls() == []
+
+    (world.root / "settings.json").write_text(
+        json.dumps({"schema": 1, "routing": {"roles": {"main": "stephan", "extra": "shared"}}})
+    )
+    assert world.main("run", "auto", "--no-needs", "--", "claude", "-p", "hi") == 0
+    assert "auto picked shared (claude)" in capsys.readouterr().err
+
+
+def test_a_headless_run_says_what_cursor_may_do(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku")
+    assert world.fake.calls()[-1][:3] == ["-p", "--mode", "ask"]
+    err = capsys.readouterr().err
+    assert "what it may do: --mode ask, Cursor's most restrictive mode" in err
+
+    world.main(
+        "run", "cursor", "--", "claude", "-p", "x", "--model", "haiku", "--permission-mode", "auto"
+    )
+    assert "--mode" not in world.fake.calls()[-1] and "--auto-review" in world.fake.calls()[-1]
+    assert "auto-review: tool calls Cursor's classifier judges safe run on their own" in (
+        capsys.readouterr().err
+    )
+
+    world.main("run", "cursor", "--allow-force", "--", "claude", "-p", "x", "--model", "haiku",
+               "--dangerously-skip-permissions")  # fmt: skip
+    assert "--force: every command and edit runs without asking" in capsys.readouterr().err
+    assert "--mode" not in world.fake.calls()[-1]
+
+
+def test_on_demand_at_the_cap_refuses_a_named_cursor_run_and_starts_nothing(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = World(tmp_home, monkeypatch)
+    world.add_cursor()
+    world.cursor_usage(on_demand_used=24_500, on_demand_limit=25_000)  # within $10 of the cap
+
+    assert world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku") == 2
+
+    assert "on-demand limit" in capsys.readouterr().err
+    assert world.fake.calls() == []
+
+
+def test_vibes_ceiling_holds_when_cursor_reports_a_higher_cap(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = World(tmp_home, monkeypatch)
+    world.add_cursor()
+    world.cursor_usage(on_demand_used=24_500, on_demand_limit=100_000)  # Cursor says $1000
+
+    assert world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku") == 2
+    assert world.fake.calls() == []
+
+
+def test_an_unreadable_usage_warns_but_does_not_stop_a_run_you_named(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = World(tmp_home, monkeypatch)
+    world.add_cursor()
+    world.cursor_client.queue_json(200, {"shape": "changed"})
+    world.cursor_client.queue_json(200, {})
+
+    assert world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku") == 0
+
+    assert "warning: Cursor usage unknown" in capsys.readouterr().err
+    assert len(world.fake.calls()) == 1
+
+
+def test_a_cached_answer_near_the_cap_is_only_trusted_for_thirty_seconds(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = World(tmp_home, monkeypatch)
+    world.add_cursor()
+    world.cursor_usage(on_demand_used=21_000, on_demand_limit=25_000)  # $40 left: near the cap
+    ctx = world.ctx()
+    svc = ctx.services()
+    launch.read_cursor(svc, "cursor", margin_cents=1000)
+    assert len(world.cursor_client.requests) == 2
+
+    launch.read_cursor(replace(svc, now_s=NOW_S + 20), "cursor", margin_cents=1000)
+    assert len(world.cursor_client.requests) == 2  # 20 s old: used
+
+    world.cursor_usage(on_demand_used=24_800, on_demand_limit=25_000)
+    reading = launch.read_cursor(replace(svc, now_s=NOW_S + 60), "cursor", margin_cents=1000)
+    assert len(world.cursor_client.requests) == 4  # 60 s old and close to the cap: fetched again
+    assert reading.availability.ok is False
+
+
+def test_a_stale_answer_is_shown_but_never_routed_by(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = World(tmp_home, monkeypatch)
+    world.add_cursor()
+    world.cursor_usage()
+    svc = world.ctx().services()
+    launch.read_cursor(svc, "cursor", margin_cents=1000)
+
+    world.cursor_client.queue(NetworkError("offline", "x"))
+    reading = launch.read_cursor(replace(svc, now_s=NOW_S + 300), "cursor", margin_cents=1000)
+
+    assert reading.usage is not None and "showing" in reading.note  # still displayed
+    assert reading.availability.ok is None and "too old to use" in reading.availability.why
+
+
+def test_moved_to_cursors_tui_one_clear_line_is_the_last_thing_printed(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    auto_world(world, main_weekly=48)  # Tuesday's budget is 40%
+
+    assert world.main("run", "auto", "--needs", "slack", "--", "claude", "--model", "opus") == 0
+
+    lines = capsys.readouterr().err.strip().splitlines()
+    last = lines[-1]
+    assert last.startswith("vibe: main: weekly 48% is over today's 40% budget")
+    assert "→ starting Cursor's agent with claude-opus-5-5-medium;" in last
+    assert "no Claude hooks, skills or Remote Control here" in last
+    assert last.endswith("`vibe run main -- claude` to override")
+    assert world.fake.calls() == [["--model", "claude-opus-5-5-medium"]]  # interactive: no -p
+
+
+def test_the_override_names_the_main_role_alias(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.claude_account("stephan", session=5, weekly=48, active=True)
+    (world.root / "settings.json").write_text(
+        json.dumps({"schema": 1, "routing": {"roles": {"main": "stephan"}}})
+    )
+
+    world.main("run", "auto", "--needs", "slack", "--", "claude", "--model", "opus")
+
+    assert (
+        "`vibe run stephan -- claude` to override"
+        in capsys.readouterr().err.strip().splitlines()[-1]
+    )
+
+
+def test_a_named_interactive_cursor_run_prints_the_line_without_an_override(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.main("run", "cursor", "--", "claude", "--model", "opus")
+
+    last = capsys.readouterr().err.strip().splitlines()[-1]
+    assert last == (
+        "vibe: Starting Cursor's agent with claude-opus-5-5-medium; "
+        "no Claude hooks, skills or Remote Control here"
+    )

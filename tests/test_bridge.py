@@ -342,7 +342,11 @@ def test_the_callers_config_dir_and_token_do_not_leak_into_the_nested_run(
     bridge_for(world).call("slack_search", {"query": "x"})
 
     (call,) = world.claude_calls(full=True)
-    assert call["has_config_dir"] is False and call["has_token"] is False
+    # never the caller's (extra's) token or config dir: main's own token, lent explicitly
+    env = call["env"]
+    assert isinstance(env, dict)
+    assert call["has_config_dir"] is False
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "main-lent" and "EXTRATOKEN" not in json.dumps(env)
 
 
 def test_a_main_that_is_not_the_live_login_is_lent_its_token_for_the_call(world: World) -> None:
@@ -578,3 +582,71 @@ def test_a_fenced_answer_is_handed_back_as_the_json_inside() -> None:
     assert bridge.extract_result(json.dumps({"result": '{"a": 1}'})) == '{"a": 1}'
     assert bridge.extract_result("plain text") == "plain text"
     assert bridge.extract_result("```\nx\n```") == "x"
+
+
+# --- round 3: fences that do not depend on the person's settings ---------------------------------
+
+
+def test_the_fences_do_not_depend_on_the_users_claude_settings() -> None:
+    config = BridgeConfig()
+
+    argv = bridge.claude_argv(config, bridge.BY_NAME["slack_read_profile"], "p")
+
+    # no user or local settings (allow rules, defaultMode, hooks): only the bridge's own project dir
+    assert argv[argv.index("--setting-sources") + 1] == "project"
+    assert argv[argv.index("--permission-mode") + 1] == "manual"  # explicit, not a settings default
+    assert argv[argv.index("--permission-prompts") + 1] == "none"
+    assert argv[argv.index("--tools") + 1] == ""
+    assert argv[argv.index("--allowedTools") + 1] == "mcp__claude_ai_Slack__slack_read_user_profile"
+    assert "mcp__claude_ai_Slack__slack_send_message" in argv[argv.index("--disallowedTools") + 1]
+
+
+def test_a_denied_call_is_a_failure_not_an_ok_result() -> None:
+    denied = json.dumps({"result": "I could not", "permission_denials": [{"tool_name": "x"}]})
+    errored = json.dumps({"result": "boom", "is_error": True})
+
+    assert bridge.verdict(denied) == "1 tool call(s) denied by the permission fence"
+    assert bridge.verdict(errored) == "the run reported an error"
+    assert bridge.verdict(json.dumps({"result": "ok", "permission_denials": []})) is None
+    assert bridge.verdict("not json") is None and bridge.verdict("[1]") is None
+
+
+def test_run_headless_raises_on_a_denial_even_when_the_exit_code_is_zero(tmp_home: Path) -> None:
+    script = tmp_home / "denier"
+    script.write_text(
+        '#!/bin/sh\necho \'{"result":"no","permission_denials":[{"tool_name":"t"}]}\'\n'
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    with pytest.raises(BridgeError, match="denied by the permission fence"):
+        bridge.run_headless([str(script)], None, 5.0)
+
+
+def test_a_tools_override_cannot_map_a_tool_onto_a_write_tool() -> None:
+    with pytest.raises(UsageError, match="write tool slack_send_message"):
+        parse_config({"tools": {"slack_search": "slack_send_message"}})
+    with pytest.raises(UsageError, match="write tool createJiraIssue"):
+        parse_config({"tools": {"atlassian_get_issue": "createJiraIssue"}})
+    # a draft tool keeps its own default, and a harmless remap is fine
+    assert parse_config({"tools": {"slack_create_draft": "slack_send_message_draft"}})
+    assert parse_config({"tools": {"slack_search": "slack_search_public"}})
+
+
+def test_a_nested_run_inherits_none_of_the_callers_secrets(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh_claude_account(world, "main", weekly=1, active=True)
+    monkeypatch.setenv("GH_TOKEN", "GHTOKEN0000000000")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPICKEY00000000")
+    monkeypatch.setenv("HARMLESS", "kept")
+
+    bridge_for(world).call("slack_search", {"query": "x"})
+
+    (call,) = world.claude_calls(full=True)
+    seen = call["env"]
+    assert isinstance(seen, dict)
+    assert "GH_TOKEN" not in seen and "ANTHROPIC_API_KEY" not in seen
+    assert seen["HARMLESS"] == "kept"
+    assert not [
+        name for name in seen if name != "CLAUDE_CODE_OAUTH_TOKEN" and name.endswith("_TOKEN")
+    ]

@@ -61,6 +61,8 @@ if args[:1] == ["models"]:
     sys.exit(0)
 with open(state["record"], "a") as handle:
     handle.write(json.dumps(args) + "\\n")
+with open(state["record"] + ".env", "a") as handle:
+    handle.write(json.dumps(dict(os.environ)) + "\\n")
 print(json.dumps({{"result": json.dumps({{"from": "cursor"}})}}))
 sys.exit(state.get("exit", 0))
 """
@@ -79,6 +81,13 @@ class FakeAgent:
         if not self.record.exists():
             return []
         return [json.loads(line) for line in self.record.read_text().splitlines()]
+
+    def envs(self) -> list[dict[str, str]]:
+        """The environment each cursor-agent run was started with."""
+        path = Path(str(self.record) + ".env")
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines()]
 
     def set_state(self, **changes: object) -> None:
         state = json.loads(self.state_path.read_text())
@@ -198,6 +207,7 @@ seen = {{
     "has_token": bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")),
     "has_config_dir": "CLAUDE_CONFIG_DIR" in os.environ,
     "cwd": os.getcwd(),
+    "env": dict(os.environ),
 }}
 with open({record!r}, "a") as handle:
     handle.write(json.dumps(seen) + "\\n")

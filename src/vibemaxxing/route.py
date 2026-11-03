@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from vibemaxxing import store
 from vibemaxxing.cursor import KIND_CLAUDE, KIND_CURSOR
 from vibemaxxing.errors import UsageError
 
@@ -44,6 +45,10 @@ DEFAULT_CONNECTORS: Final[Mapping[str, tuple[str, ...]]] = {
     "extra": (),
 }
 CONNECTORS: Final = ("slack", "atlassian", "m365", "gcal")
+# The three roles an order names. `routing.roles` maps each to the alias it is stored under;
+# without it a role is the alias of the same name.
+ROLES: Final = ("main", "extra", "cursor")
+CLAUDE_ROLES: Final = ("main", "extra")
 NEEDS_CLASS: Final = "needs"
 NO_NEEDS_CLASS: Final = "no_needs"
 
@@ -57,7 +62,7 @@ class Health(StrEnum):
 
 @dataclass(frozen=True)
 class Step:
-    """One rung of an order. ``account`` is an alias."""
+    """One rung of an order. ``account`` is a role (main, extra, cursor), else an alias."""
 
     account: str
     # Only while main's weekly use is within today's budget (Claude accounts).
@@ -94,6 +99,11 @@ class Routing:
         default_factory=lambda: dict(DEFAULT_CONNECTORS)
     )
     order: Mapping[str, tuple[Step, ...]] = field(default_factory=lambda: dict(DEFAULT_ORDER))
+    # role -> alias. The order and the connectors are written in roles, so renaming an account
+    # means changing this one member, not the order.
+    roles: Mapping[str, str] = field(default_factory=lambda: {role: role for role in ROLES})
+    # The most Cursor on-demand spend vibe will ever allow, in cents, whatever Cursor reports.
+    cursor_cap_cents: int = 25_000
     # Cursor on-demand is spent to within this many cents of the personal cap.
     cursor_margin_cents: int = 1000
     # The percent at which a Claude account counts as spent (session or weekly).
@@ -161,6 +171,8 @@ def parse_routing(raw: object, path: Path) -> Routing:
         "order",
         "cursor_margin_cents",
         "spent_percent",
+        "roles",
+        "cursor_cap_cents",
         "bridge",
     }
     unknown = sorted(set(raw) - known)
@@ -193,6 +205,17 @@ def parse_routing(raw: object, path: Path) -> Routing:
             if parsed is None or any(name not in CONNECTORS for name in parsed):
                 raise _fail(path, f"connectors.{alias} must be a list of {', '.join(CONNECTORS)}")
             connectors[str(alias)] = parsed
+    roles = {role: role for role in ROLES}
+    given_roles = raw.get("roles")
+    if given_roles is not None:
+        if not isinstance(given_roles, dict) or set(given_roles) - set(ROLES):
+            raise _fail(path, f"roles must map only {', '.join(ROLES)} to an account alias")
+        for role, alias in given_roles.items():
+            if not isinstance(alias, str) or not store.valid_alias(alias):
+                raise _fail(path, f"roles.{role} must be an account alias")
+            roles[str(role)] = alias
+        if len(set(roles.values())) != len(roles):
+            raise _fail(path, "two roles name the same account")
     order: dict[str, tuple[Step, ...]] = dict(DEFAULT_ORDER)
     given_order = raw.get("order")
     if given_order is not None:
@@ -200,6 +223,9 @@ def parse_routing(raw: object, path: Path) -> Routing:
             raise _fail(path, f"order must have only {NEEDS_CLASS} and {NO_NEEDS_CLASS}")
         for cls, steps in given_order.items():
             order[str(cls)] = _parse_steps(steps, path, str(cls))
+    cap = _int(raw.get("cursor_cap_cents", 25_000))
+    if cap is None or cap < 0:
+        raise _fail(path, "cursor_cap_cents must be a number of cents, 0 or more")
     margin = _int(raw.get("cursor_margin_cents", 1000))
     spent = _int(raw.get("spent_percent", 99))
     if margin is None or margin < 0:
@@ -213,6 +239,8 @@ def parse_routing(raw: object, path: Path) -> Routing:
         no_degrade=no_degrade,
         connectors=connectors,
         order=order,
+        roles=roles,
+        cursor_cap_cents=cap,
         cursor_margin_cents=margin,
         spent_percent=spent,
         bridge=raw.get("bridge"),
@@ -230,6 +258,9 @@ def _parse_steps(raw: object, path: Path, cls: str) -> tuple[Step, ...]:
         flags = [item.get(key, False) for key in ("budget", "degraded", "last_resort")]
         if extra or not all(isinstance(flag, bool) for flag in flags):
             raise _fail(path, f"order.{cls} has a step with a wrong member")
+        if flags[2] and str(item["account"]) == "cursor":
+            # The last resort runs on a spent or unknown reading; Cursor's would cost money.
+            raise _fail(path, f"order.{cls}: a Cursor step cannot be the last resort")
         steps.append(Step(str(item["account"]), bool(flags[0]), bool(flags[1]), bool(flags[2])))
     return tuple(steps)
 
@@ -292,10 +323,18 @@ def decide(
     wanted = set(needs)
     exclusive = wanted & set(routing.no_degrade)
 
+    # Claude roles (main, extra) that name no stored account. If the order then ends on Cursor,
+    # the run is refused: a misnamed account must never quietly become a company-billed run.
+    unresolved: list[str] = []
+
     for step in routing.order[cls]:
-        candidate = lookup(step.account)
+        alias = routing.roles.get(step.account, step.account)
+        candidate = lookup(alias)
         if candidate is None:
-            skipped.append(f"{step.account}: no such account")
+            what = step.account if alias == step.account else f"{step.account} (alias {alias!r})"
+            skipped.append(f"{what}: no such account")
+            if step.account in CLAUDE_ROLES:
+                unresolved.append(f"{step.account} -> {alias!r}")
             continue
         if claude_only and candidate.kind == KIND_CURSOR:
             skipped.append(f"{candidate.alias}: the program is Claude-only")
@@ -303,7 +342,7 @@ def decide(
         if candidate.health is Health.DEAD:
             skipped.append(f"{candidate.alias}: {candidate.why}")
             continue
-        have = set(routing.connectors.get(candidate.alias, ()))
+        have = set(routing.connectors.get(step.account, routing.connectors.get(alias, ())))
         missing = sorted(wanted - have)
         warnings: list[str] = []
         if missing:
@@ -313,6 +352,12 @@ def decide(
                 continue
             warnings.append(
                 f"{candidate.alias} has no {', '.join(missing)}: this session runs without it"
+            )
+        if candidate.kind == KIND_CURSOR and unresolved:
+            raise UsageError(
+                f"{', '.join(unresolved)} is not a stored account, so this run would have gone "
+                "to Cursor only because of a naming mismatch; not starting it",
+                "set routing.roles in ~/.vibemaxxing/settings.json to your account aliases",
             )
         if step.last_resort:
             return _chosen(candidate, step, skipped, routing, budget, warnings)
