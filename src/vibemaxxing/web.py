@@ -144,7 +144,7 @@ def snapshot(ctx: Context, recorder: Recorder | None = None) -> dict[str, object
     # A live clock, not ctx.now_s: this process stays up for days, and a frozen
     # timestamp would evaluate every token's expiry against process start.
     now_s = ctx.clock()
-    views = collect(ctx.root, client=ctx.client, port=ctx.port, now_s=now_s)
+    views = collect(ctx.root, client=ctx.client, port=ctx.port, now_s=now_s, port_for=ctx.port_for)
     # Cursor seats before the publish, so status.json has their numbers (cached two minutes).
     seats = ctx.cursor_readings(now_s=now_s)
     auto.publish(ctx.root, port=ctx.port, now_s=now_s)

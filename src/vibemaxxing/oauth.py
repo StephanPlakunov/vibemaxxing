@@ -219,6 +219,17 @@ def refresh(
     # copy, and the refresh token survives only one refresher. CONTRACT section 8.
     if store.read_active(root) == alias:
         return RefreshOutcome(None, "active")
+    # So is the lineage of an account imported from a config dir: Claude Code sessions run
+    # with that dir hold its refresh token, and a refresh here would log every one of them
+    # out ("OAuth token revoked"). The check is here, at the one place that POSTs, so no
+    # caller (run, list, the tick, the TUI, a switch) can forget it.
+    try:
+        owned = store.read_account(root, alias).config_dir is not None
+    except VibeError:
+        # Unreadable: not knowing who holds the lineage is no licence to POST it.
+        return RefreshOutcome(None, "transient")
+    if owned:
+        return RefreshOutcome(None, "owned")
     # A stash means the last run was interrupted after the server rotated the
     # token. Posting the predecessor again would just earn an invalid_grant.
     successor = store.read_stash(root, alias)
@@ -312,6 +323,7 @@ def ensure_usable(root: Path, alias: str, client: HttpClient, *, now_ms: int) ->
         # when Claude Code runs another account; then nothing resyncs it.
         return
     account = store.read_account(root, alias)
+    store.refuse_owned(account)
     store.require_usable(account, now_ms=now_ms)
     if not is_expired(account.credential, now_ms=now_ms):
         return

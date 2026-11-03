@@ -120,6 +120,41 @@ def test_import_stores_the_login_and_touches_nothing_else(
     assert "extra-at" not in out and "extra-rt" not in out
 
 
+def test_import_records_the_dir_so_vibe_never_refreshes_that_login(rig: Rig) -> None:
+    assert (
+        cli.main(["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context())
+        == 0
+    )
+
+    account = store.read_account(rig.root, "extra")
+    assert account.config_dir == str(rig.directory)
+    assert json.loads(store.account_path(rig.root, "extra").read_text())["config_dir"] == str(
+        rig.directory
+    )
+
+
+def test_a_fresh_login_in_the_dir_replaces_the_copy_vibe_owned_and_its_stash(rig: Rig) -> None:
+    """The way back after the 3 Nov incident: log in again in the dir, import over the alias."""
+    seed_account(
+        rig.root,
+        "extra",
+        identity=EXTRA,
+        credential=make_credential(access="old-at", refresh="old-rt"),
+    )
+    store.write_stash(rig.root, "extra", make_credential(access="stash-at", refresh="stash-rt"))
+
+    code = cli.main(
+        ["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context()
+    )
+
+    assert code == 0
+    account = store.read_account(rig.root, "extra")
+    assert account.credential.refresh_token.reveal() == "extra-rt"  # the dir's, not the old copy's
+    assert account.config_dir == str(rig.directory)
+    assert store.read_stash(rig.root, "extra") is None  # a stale successor would undo the import
+    assert rig.client.requests == []
+
+
 def test_import_resolves_the_dir_as_claude_code_was_given_it(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -164,6 +199,15 @@ def test_a_login_already_stored_is_not_stored_twice(
     )
 
     assert store.list_aliases(rig.root) == ["other"]
+    # Imported before accounts knew their dir: it now belongs to that dir, and vibe stops refreshing
+    assert store.read_account(rig.root, "other").config_dir == str(rig.directory)
+    assert "is now the login in" in capsys.readouterr().out
+
+    # The second time there is nothing left to do
+    assert (
+        cli.main(["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context())
+        == 0
+    )
     assert 'already stored as "other"' in capsys.readouterr().out
 
 

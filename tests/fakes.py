@@ -106,6 +106,7 @@ def seed_account(
     identity: Identity | None = None,
     active: bool = False,
     added_at: float = 1_757_930_000.0,
+    config_dir: str | None = None,
 ) -> Account:
     account = Account(
         alias=alias,
@@ -114,6 +115,7 @@ def seed_account(
         state=AccountState.OK,
         message=None,
         added_at=added_at,
+        config_dir=config_dir,
     )
     store.write_account(root, account)
     if active:

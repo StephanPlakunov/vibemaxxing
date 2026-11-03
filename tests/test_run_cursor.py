@@ -43,7 +43,13 @@ class World:
         self.cursor_client = FakeHttpClient()
         self.port = FakeKeychain()
         self.token = StubToken()
+        # Claude Code's login per config dir. A dir nobody set up has none; nothing here ever
+        # reaches the real Keychain.
+        self.dirs: dict[str, FakeKeychain] = {}
         monkeypatch.chdir(tmp_home)
+
+    def port_for(self, directory: Path) -> FakeKeychain:
+        return self.dirs.setdefault(str(directory), FakeKeychain())
 
     def ctx(self) -> cli.Context:
         return cli.Context(
@@ -57,6 +63,7 @@ class World:
             # the default agent: `cursor-agent` resolved on PATH, which is the fake
             cursor_client=self.cursor_client,
             cursor_token=self.token,
+            port_for=self.port_for,
         )
 
     def main(self, *argv: str) -> int:

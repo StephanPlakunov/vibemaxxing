@@ -1,8 +1,9 @@
 """`vibe run` hands vibe-bridge to a Claude run whose account lacks what the bridge offers.
 
-A run on extra starts claude with a token override and without CLAUDE_CONFIG_DIR, so a bridge
-registered in ~/.claude-extra is never read. Fakes only: a fake claude and cursor-agent record their
-argv; nothing reaches a vendor or the Keychain.
+A run on an account vibe owns starts claude with a token override and without CLAUDE_CONFIG_DIR, so
+a bridge registered in ~/.claude-extra is never read (a run in a config dir of its own may read it).
+Fakes only: a fake claude and cursor-agent record their argv; nothing reaches a vendor or the
+Keychain.
 """
 
 from __future__ import annotations
