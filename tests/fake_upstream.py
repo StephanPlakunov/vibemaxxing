@@ -53,6 +53,25 @@ class FakeSecrets:
         self.items.pop(service, None)
 
 
+class Kill(BaseException):
+    """A process killed between two Keychain writes."""
+
+
+class KillingSecrets(FakeSecrets):
+    """FakeSecrets that is killed by the (die_at+1)-th write; nothing of that write lands."""
+
+    def __init__(self, die_at: int | None = None) -> None:
+        super().__init__()
+        self.die_at = die_at
+        self.writes = 0
+
+    def write(self, service: str, value: str) -> None:
+        if self.die_at is not None and self.writes >= self.die_at:
+            raise Kill
+        self.writes += 1
+        super().write(service, value)
+
+
 class FakeReceiver:
     """A CodeReceiver that hands back a code as if the browser had been redirected."""
 
@@ -81,7 +100,8 @@ class FakeUpstream:
     tools: dict[str, tuple[str, dict[str, object], ToolHandler]] = field(default_factory=dict)
     access: str = "ACCESS0000000001"
     refresh: str = "REFRESH000000001"
-    expires_in: int = 3600
+    expires_in: object = 3600
+    granted_scope: object = "granted"
     sse: bool = False
     dcr: bool = True
     issuer: str | None = None
@@ -95,6 +115,8 @@ class FakeUpstream:
     refresh_fails: bool = False
     page_size: int = 0
     session: str = "sess-1"
+    raw_mcp: bytes | None = None  # answer every MCP POST with exactly this body
+    raw_prm: bytes | None = None
 
     # --- the documents -----------------------------------------------------------------------
 
@@ -136,10 +158,13 @@ class FakeUpstream:
         body: bytes | None = None,
         timeout_s: float = 10.0,
         max_bytes: int = 8 * 1024 * 1024,
+        deadline: float | None = None,
     ) -> HttpResponse:
         self.requests.append(Seen(method, url, dict(headers), body))
         path = urllib.parse.urlsplit(url).path
         if method == "GET" and url == self.upstream.prm_url:
+            if self.raw_prm is not None:
+                return HttpResponse(200, self.raw_prm, {"content-type": "application/json"})
             return self._json(self.prm())
         if method == "GET" and path.endswith("/.well-known/oauth-authorization-server"):
             return self._json(self.as_metadata())
@@ -188,7 +213,7 @@ class FakeUpstream:
                 "access_token": self.access,
                 "refresh_token": self.refresh,
                 "expires_in": self.expires_in,
-                "scope": "granted",
+                "scope": self.granted_scope,
                 "token_type": "Bearer",
             }
         )
@@ -203,6 +228,8 @@ class FakeUpstream:
         if self.reject_next_mcp > 0:
             self.reject_next_mcp -= 1
             raise HTTPError(401, b"{}", None, {"www-authenticate": "Bearer"})
+        if self.raw_mcp is not None:
+            return HttpResponse(200, self.raw_mcp, {"content-type": "application/json"})
         message = json.loads(body or b"{}")
         if "id" not in message:
             return HttpResponse(202, b"", {})

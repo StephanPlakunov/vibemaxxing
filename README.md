@@ -415,9 +415,13 @@ client, straight to the vendor's own remote MCP server**, as exactly one allowli
 the arguments given. **No model is in the path**: nothing sees the upstream's tool list, so there is
 nothing for a prompt injection to widen and nothing to fence with a prompt or a deny list.
 
-- **The allowlist is code** (`bridge.TOOLS`): reads, and the upstream's own draft tool
-  (`slack_send_message_draft`). A name not on it is refused before any network is touched, whatever the
-  upstream offers. Never send, schedule, post, react, create, update or delete.
+- **The allowlist is code** (`bridge.TOOLS`): **reads only. No draft tool, no write tool of any kind.**
+  A name not on it is refused before any network is touched, whatever the upstream offers. `tools/list`
+  shows our own fixed descriptions and argument schemas (written in this repo, no network), never the
+  vendor's text.
+- **Read-only logins only.** vibe asks for read scopes, and **refuses to store a login whose granted
+  scope can write** (`write`, `delete`, `manage`, `admin`, `chat`, ...): a token that can write must never
+  sit in a Keychain item the extra session's shell might be able to read.
 - **Upstreams**: Slack's official MCP (`https://mcp.slack.com/mcp`) and Atlassian Rovo MCP v2
   (`https://mcp.atlassian.com/v2/mcp`). **Microsoft 365 is left out**: Microsoft's own remote MCP (Work IQ)
   needs a Global Administrator's consent, which is not your own OAuth.
@@ -425,10 +429,13 @@ nothing for a prompt injection to widen and nothing to fence with a prompt or a 
   dynamic client registration if offered, PKCE S256, the browser, a one-shot listener on `127.0.0.1`
   for the redirect). Tokens live only in the macOS Keychain under `vibemaxxing-bridge-<upstream>-*`:
   handed to the Keychain tool on its standard input, never a file, a log, an error or a command line.
-  Refresh is handled (the rotated token is stored before it is used, under a lock). Every endpoint a
+  Refresh is handled under a lock and is crash-safe: the new refresh token is stored first, so a kill
+  at any point after that leaves a login that refreshes on its own (the one instant before the first
+  write, the length of a Keychain call, is not recoverable by any ordering). Every endpoint a
   discovery document names must be on that upstream's own hosts, or nothing is sent.
-- **Each call**: a timeout (60 s), at most 30 calls per hour per bridge process, a result size cap
-  (100 kB: refused, not cut), results returned as data, and one log line in `~/.vibemaxxing/bridge.log`
+- **Each call**: a deadline (60 s) that binds every request, the body read and the wait for the
+  refresh lock, so a timed-out call is not left running; at most 30 calls per hour per bridge process, a
+  result size cap (100 kB: refused, not cut), results returned as data, and one log line in `~/.vibemaxxing/bridge.log`
   (upstream, tool, duration, bytes, outcome; never arguments or content). `routing.bridge` can set
   `timeout_s`, `max_calls_per_hour`, `max_result_bytes`; it cannot add a tool or an upstream.
 
@@ -440,12 +447,13 @@ vibe bridge login atlassian
 
 # Slack has NO dynamic client registration: it needs a Slack app of your own (an internal app in
 # your workspace, approved by its admin) with the redirect URL below. vibe asks for its client id and
-# secret (the secret is typed hidden, never an argument). Reads only; add --drafts for chat:write.
-vibe bridge login slack [--drafts] [--client-id ID] [--port N]
+# secret (the secret is typed hidden, never an argument). Reads only.
+vibe bridge login slack [--client-id ID] [--port N]
 #   redirect URL to register on the Slack app: http://127.0.0.1:8765/callback
 
 vibe bridge status        # who is logged in, token expiry, allowlist size; never a token
-vibe bridge tools slack   # which allowlisted tools the live upstream really offers (names only)
+vibe bridge tools slack   # which allowlisted tools the live upstream offers, and whether our
+                          # argument names match its own (names only; none of its text)
 vibe bridge logout slack|atlassian|all
 vibe bridge add-command   # prints the line that registers the bridge for extra; it never runs it
 ```
@@ -456,9 +464,8 @@ vibe bridge add-command   # prints the line that registers the bridge for extra;
 CLAUDE_CONFIG_DIR=~/.claude-extra claude mcp add --scope user vibe-bridge -- vibe bridge serve
 ```
 
-`--drafts` adds `chat:write`, the scope Slack's draft tool presumably needs (its documentation names the
-tool's scope nowhere), and with it the token could also send a message; the bridge never calls a send
-tool, but anyone who can read the Keychain item could. Text an upstream returns (a Slack message, a Jira
+Nothing in the bridge can write, so no Slack app needs a write scope: give it the read user scopes only.
+Text an upstream returns (a Slack message, a Jira
 description) reaches the extra session as the tool result: data, and the same prompt-injection surface any
 connector has. It does not widen what the bridge can do.
 

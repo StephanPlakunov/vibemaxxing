@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final, cast
 
+from vibemaxxing import jsonutil
 from vibemaxxing.errors import NeedsLoginError, NetworkError, VibeError
 from vibemaxxing.httpclient import HttpClient, HTTPError, HttpResponse
 from vibemaxxing.redact import Secret
@@ -21,8 +22,9 @@ from vibemaxxing.redact import Secret
 PROTOCOL_VERSION: Final = "2025-06-18"
 CLIENT_INFO: Final = {"name": "vibemaxxing-bridge", "version": "1"}
 MAX_PAGES: Final = 5
-# A token provider: called with True after a 401, when the stored token should be refreshed first.
-TokenProvider = Callable[[bool], Secret]
+# A token provider: (force, deadline). force is True after a 401, when the stored token should be
+# refreshed first; the deadline is the call's, so a refresh cannot outlast it.
+TokenProvider = Callable[[bool, float | None], Secret]
 
 
 class McpError(VibeError):
@@ -46,7 +48,7 @@ def _sse_messages(body: str) -> list[object]:
             data.append(line[5:].lstrip(" "))
         elif not line.strip() and data:
             with contextlib.suppress(ValueError):
-                messages.append(json.loads("\n".join(data)))
+                messages.append(jsonutil.loads("\n".join(data)))
             data = []
     return messages
 
@@ -60,7 +62,7 @@ def _message_for(response: HttpResponse, ident: int) -> Mapping[str, object]:
         candidates = _sse_messages(text)
     else:
         try:
-            candidates = [json.loads(text)]
+            candidates = [jsonutil.loads(text)]
         except ValueError:
             raise McpError(
                 "the upstream sent a body that is not JSON", "vibe bridge status"
@@ -86,13 +88,15 @@ class McpClient:
         self._client, self._url, self._token = client, url, token
         self._timeout_s, self._max_bytes = timeout_s, max_bytes
         self._next_id = 0
+        # The moment (time.monotonic) every request of the current call must be over by.
+        self._deadline: float | None = None
 
     def _post(
         self, payload: Mapping[str, object], session: str | None, *, force_token: bool = False
     ) -> HttpResponse:
         headers = {
             # A permitted reveal() site (CONTRACT section 5): the bearer header, nowhere else.
-            "Authorization": f"Bearer {self._token(force_token).reveal()}",
+            "Authorization": f"Bearer {self._token(force_token, self._deadline).reveal()}",
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": PROTOCOL_VERSION,
@@ -106,6 +110,7 @@ class McpClient:
             body=json.dumps(payload).encode(),
             timeout_s=self._timeout_s,
             max_bytes=self._max_bytes,
+            deadline=self._deadline,
         )
 
     def _request(
@@ -171,14 +176,16 @@ class McpClient:
                 "DELETE",
                 self._url,
                 headers={
-                    "Authorization": f"Bearer {self._token(False).reveal()}",
+                    "Authorization": f"Bearer {self._token(False, self._deadline).reveal()}",
                     "Mcp-Session-Id": session,
                 },
                 timeout_s=5.0,
                 max_bytes=4096,
+                deadline=self._deadline,
             )
 
-    def list_tools(self) -> list[dict[str, object]]:
+    def list_tools(self, *, deadline: float | None = None) -> list[dict[str, object]]:
+        self._deadline = deadline
         session = self._open()
         tools: list[dict[str, object]] = []
         try:
@@ -199,7 +206,10 @@ class McpClient:
             self._close(session)
         return tools
 
-    def call_tool(self, name: str, arguments: Mapping[str, object]) -> ToolResult:
+    def call_tool(
+        self, name: str, arguments: Mapping[str, object], *, deadline: float | None = None
+    ) -> ToolResult:
+        self._deadline = deadline
         session = self._open()
         try:
             message, _ = self._request(

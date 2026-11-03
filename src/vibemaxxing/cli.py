@@ -6,11 +6,12 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import re
 import subprocess
 import sys
 import time
 import webbrowser
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -945,7 +946,7 @@ def cmd_bridge_serve(args: argparse.Namespace, ctx: Context) -> int:
     server = bridge.Bridge(
         config=config,
         forward=upstreams.forward,
-        catalog=upstreams.catalog,
+        logged_in=upstreams.logged_in,
         log=lambda entry: bridge.append_log(ctx.root, entry),
     )
     # The protocol owns stdout; vibe's own words go to stderr.
@@ -980,12 +981,11 @@ def cmd_bridge_login(args: argparse.Namespace, ctx: Context) -> int:
             now_s=ctx.clock(),
             client_id=client_id or None,
             client_secret=client_secret,
-            drafts=args.drafts,
         )
     finally:
         receiver.close()
     _emit(
-        _action("bridge login", upstream=upstream.id, scope=tokens.scope, drafts=args.drafts),
+        _action("bridge login", upstream=upstream.id, scope=tokens.scope),
         as_json=args.json,
         human=f"logged in to {upstream.name}; the token is in the Keychain\n",
     )
@@ -1035,8 +1035,7 @@ def cmd_bridge_status(args: argparse.Namespace, ctx: Context) -> int:
                 else "access token expired (refreshes on use)"
             )
             lines.append(f"{upstream.id:<10}logged in; {when}; scopes: {tokens.scope or 'default'}")
-        drafts = sum(1 for t in bridge.TOOLS if t.upstream == upstream.id and t.draft)
-        lines.append(f"{'':<10}{len(allowed)} allowlisted tools ({drafts} draft)")
+        lines.append(f"{'':<10}{len(allowed)} allowlisted tools, all reads")
         entries.append(
             {
                 "upstream": upstream.id,
@@ -1053,25 +1052,49 @@ def cmd_bridge_status(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
+def _property_names(tool: Mapping[str, object]) -> set[str]:
+    """The argument names in a vendor's input schema; only plain identifiers, nothing else."""
+    schema = tool.get("inputSchema")
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    return {
+        name
+        for name in (properties if isinstance(properties, dict) else {})
+        if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_]{1,40}", name)
+    }
+
+
 def cmd_bridge_tools(args: argparse.Namespace, ctx: Context) -> int:
-    """After a login: which allowlisted tools the live upstream really offers. Names only."""
+    """After a login: which allowlisted tools the live upstream offers, and whether our argument
+    names match its own. Names only: nothing the vendor wrote is printed."""
     upstream = _bridge_upstream(args.upstream)
-    offered = {
-        str(tool.get("name"))
+    live = {
+        str(tool.get("name")): tool
         for tool in _bridge_upstreams(ctx, _bridge_config(ctx)).upstream_tools(upstream)
     }
     lines: list[str] = []
     for tool in bridge.TOOLS:
-        if tool.upstream == upstream.id:
-            mark = "offered" if tool.upstream_tool in offered else "NOT offered"
-            lines.append(f"  {tool.name:<40}{mark}{'  (draft)' if tool.draft else ''}")
-    others = len(offered - {t.upstream_tool for t in bridge.TOOLS if t.upstream == upstream.id})
+        if tool.upstream != upstream.id:
+            continue
+        found = live.get(tool.upstream_tool)
+        if found is None:
+            lines.append(f"  {tool.name:<42}NOT offered")
+            continue
+        ours, theirs = {name for name, _ in tool.args}, _property_names(found)
+        if not ours or ours <= theirs:
+            mark = "offered, arguments match"
+        else:
+            mark = (
+                f"offered, arguments DIFFER: ours {sorted(ours - theirs)} "
+                f"not in its {sorted(theirs)}"
+            )
+        lines.append(f"  {tool.name:<42}{mark}")
+    reachable = {t.upstream_tool for t in bridge.TOOLS if t.upstream == upstream.id}
     lines.append(
-        f"{upstream.name} offers {len(offered)} tools; {others} others are not reachable "
-        "through the bridge"
+        f"{upstream.name} offers {len(live)} tools; {len(set(live) - reachable)} others are not "
+        "reachable through the bridge"
     )
     _emit(
-        _action("bridge tools", upstream=upstream.id, offered=len(offered)),
+        _action("bridge tools", upstream=upstream.id, offered=len(live)),
         as_json=args.json,
         human="\n".join(lines) + "\n",
     )
@@ -1269,9 +1292,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     login.add_argument("upstream", choices=list(bridge.UPSTREAMS))
     login.add_argument("--client-id", help="the client id of an app of your own (Slack)")
-    login.add_argument(
-        "--drafts", action="store_true", help="also ask for the scope a draft needs (chat:write)"
-    )
     login.add_argument(
         "--port", type=int, default=mcp_oauth.DEFAULT_PORT, help="127.0.0.1 port for the redirect"
     )

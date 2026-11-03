@@ -25,10 +25,12 @@ import fcntl
 import hashlib
 import http.server
 import json
+import math
 import re
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -36,8 +38,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
-from vibemaxxing import oauth
-from vibemaxxing.errors import NeedsLoginError, NetworkError, UsageError, VibeError
+from vibemaxxing import jsonutil, oauth
+from vibemaxxing.errors import DeadlineError, NeedsLoginError, NetworkError, UsageError, VibeError
 from vibemaxxing.fsutil import private_dir, write_private
 from vibemaxxing.httpclient import HttpClient, HTTPError
 from vibemaxxing.redact import Secret, scrub
@@ -48,7 +50,7 @@ SECURITY_BIN: Final = "/usr/bin/security"
 SECURITY_TIMEOUT_S: Final = 10.0
 SECURITY_ABSENT_CODE: Final = 44
 # What a token may be made of to go through the Keychain tool unquoted (JWTs, xoxp-..., opaque ids).
-_SAFE_SECRET: Final = re.compile(r"^[A-Za-z0-9._~+/=-]{8,3500}$")
+_SAFE_SECRET: Final = re.compile(r"[A-Za-z0-9._~+/=-]{8,3500}")
 REFRESH_SKEW_S: Final = 60.0
 LOGIN_TIMEOUT_S: Final = 300.0
 DEFAULT_PORT: Final = 8765
@@ -70,8 +72,6 @@ class Upstream:
     # (and secret) from an app of their own, because the server has no dynamic registration.
     registration: str
     read_scopes: tuple[str, ...]
-    # Extra scopes only a draft needs; asked for only with `vibe bridge login --drafts`.
-    draft_scopes: tuple[str, ...] = ()
     # Whether to send the RFC 8707 `resource` parameter.
     send_resource: bool = True
 
@@ -144,7 +144,7 @@ class MacSecretStore:
         return done.stdout[:-1] if done.stdout.endswith("\n") else done.stdout
 
     def write(self, service: str, value: str) -> None:
-        if not _SAFE_SECRET.match(value):
+        if not _SAFE_SECRET.fullmatch(value):
             raise VibeError(
                 "a token has characters or a length vibe will not hand to the Keychain tool",
                 "vibe bridge login",
@@ -228,10 +228,26 @@ def _recovery(upstream: Upstream) -> str:
     return f"vibe bridge login {upstream.id}"
 
 
+def _finite(value: object) -> float | None:
+    """A JSON number as a finite float; None for a bool, a string, NaN, infinity or an overflow."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def has_login(root: Path, upstream: Upstream) -> bool:
+    """Whether a login is on record (the description exists). No Keychain read, no request."""
+    return meta_path(root, upstream).is_file()
+
+
 def load(root: Path, secrets: SecretStore, upstream: Upstream) -> Tokens | None:
     """The stored login, or None when there is none or it is incomplete."""
     try:
-        parsed: object = json.loads(meta_path(root, upstream).read_text(encoding="utf-8"))
+        parsed: object = jsonutil.loads(meta_path(root, upstream).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(parsed, dict) or parsed.get("schema") != SCHEMA_VERSION:
@@ -246,7 +262,7 @@ def load(root: Path, secrets: SecretStore, upstream: Upstream) -> Tokens | None:
     return Tokens(
         access=Secret(access),
         refresh=Secret(refresh) if refresh else None,
-        expires_at=float(expires) if isinstance(expires, (int, float)) else None,
+        expires_at=_finite(expires),
         client_id=client_id,
         client_secret=Secret(client_secret) if client_secret else None,
         scope=scope if isinstance(scope, str) else "",
@@ -256,14 +272,20 @@ def load(root: Path, secrets: SecretStore, upstream: Upstream) -> Tokens | None:
 
 
 def save(root: Path, secrets: SecretStore, upstream: Upstream, tokens: Tokens) -> None:
-    """Secrets to the Keychain first, the non-secret description after."""
-    # A permitted reveal() site (CONTRACT section 5): a token on its way
-    # into the Keychain tool's standard input.
-    secrets.write(service(upstream, "access"), tokens.access.reveal())
+    """Secrets to the Keychain, the refresh token FIRST, the non-secret description last.
+
+    A kill between two writes must never cost a browser login. The server has already rotated the
+    refresh token by the time this runs, so the new one goes in before anything else (a stale access
+    token beside a fresh refresh token heals itself on the next 401); the access token follows, the
+    client secret never changes, and the metadata, which only describes them, is last.
+    """
+    # A permitted reveal() site (CONTRACT section 5): a token on its way into the Keychain tool's
+    # standard input.
     if tokens.refresh is not None:
         secrets.write(service(upstream, "refresh"), tokens.refresh.reveal())
     else:
         secrets.delete(service(upstream, "refresh"))
+    secrets.write(service(upstream, "access"), tokens.access.reveal())
     if tokens.client_secret is not None:
         secrets.write(service(upstream, "client-secret"), tokens.client_secret.reveal())
     private_dir(root)
@@ -309,8 +331,22 @@ class AuthServer:
 
 
 def _host_ok(upstream: Upstream, url: str) -> bool:
-    parts = urllib.parse.urlsplit(url)
-    return parts.scheme == "https" and parts.hostname in upstream.hosts
+    # urlsplit and urllib read a backslash or userinfo differently: refuse both outright, and any
+    # port but the default, so the host that was checked is the host that is contacted.
+    if "\\" in url or any(ord(char) < 33 for char in url):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and parts.hostname in upstream.hosts
+        and parts.username is None
+        and parts.password is None
+        and port in (None, 443)
+    )
 
 
 def _checked(upstream: Upstream, url: object, what: str) -> str:
@@ -397,14 +433,19 @@ class CodeReceiver(Protocol):
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     server: _Server
+    # A connection that sends nothing is dropped after this long, and each connection has a thread
+    # of its own, so an idle one can neither block the real redirect nor the listener's close.
+    timeout = 5
 
     def do_GET(self) -> None:
-        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-        if urllib.parse.urlsplit(self.path).path != "/callback":
+        parts = urllib.parse.urlsplit(self.path)
+        if parts.path != "/callback":
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        self.server.result = {key: values[0] for key, values in query.items() if values}
+        query = urllib.parse.parse_qs(parts.query)
+        self.server.arrive({key: values[0] for key, values in query.items() if values})
         body = b"vibe bridge: you can close this tab and go back to the terminal.\n"
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -412,21 +453,41 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
-        self.server.arrived.set()
 
     def log_message(self, format: str, *args: object) -> None:
         return  # the redirect carries a code: nothing of it is logged
 
 
-class _Server(http.server.HTTPServer):
+class _Server(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+
     def __init__(self, port: int) -> None:
         super().__init__(("127.0.0.1", port), _Handler)
-        self.result: dict[str, str] = {}
-        self.arrived = threading.Event()
+        self._arrivals: list[dict[str, str]] = []
+        self._changed = threading.Condition()
+
+    def arrive(self, result: dict[str, str]) -> None:
+        with self._changed:
+            self._arrivals.append(result)
+            self._changed.notify_all()
+
+    def next_arrival(self, wait_until: float) -> dict[str, str] | None:
+        with self._changed:
+            while not self._arrivals:
+                left = wait_until - time.monotonic()
+                if left <= 0:
+                    return None
+                self._changed.wait(left)
+            return self._arrivals.pop(0)
 
 
 class LoopbackReceiver:
-    """A one-shot HTTP listener on 127.0.0.1 for the browser's redirect (RFC 8252)."""
+    """A one-shot HTTP listener on 127.0.0.1 for the browser's redirect (RFC 8252).
+
+    Only an answer that carries this login's state counts. Anything else that reaches the port (a
+    stray request, a probe, another page) is answered and ignored: it cannot end the login.
+    """
 
     def __init__(self, port: int = DEFAULT_PORT) -> None:
         try:
@@ -441,25 +502,27 @@ class LoopbackReceiver:
         self._thread.start()
 
     def wait(self, state: str, timeout_s: float) -> str:
-        if not self._server.arrived.wait(timeout_s):
-            raise UsageError("no answer from the browser in time", "vibe bridge login <upstream>")
-        result = self._server.result
-        if result.get("state") != state:
-            raise UsageError(
-                "the browser's answer did not carry this login's state", "vibe bridge login"
-            )
-        if "error" in result:
-            raise UsageError(
-                f"the upstream refused the login: {scrub(result['error'])[:80]}",
-                "vibe bridge login",
-            )
-        code = result.get("code")
-        if not code:
-            raise UsageError("the browser's answer carried no code", "vibe bridge login")
-        return code
+        until = time.monotonic() + timeout_s
+        while True:
+            result = self._server.next_arrival(until)
+            if result is None:
+                raise UsageError(
+                    "no answer from the browser in time", "vibe bridge login <upstream>"
+                )
+            if result.get("state") != state:
+                continue  # not this login's: ignored, and the wait goes on
+            if "error" in result:
+                raise UsageError(
+                    f"the upstream refused the login: {scrub(result['error'])[:80]}",
+                    "vibe bridge login",
+                )
+            code = result.get("code")
+            if not code:
+                raise UsageError("the browser's answer carried no code", "vibe bridge login")
+            return code
 
     def close(self) -> None:
-        self._server.shutdown()
+        self._server.shutdown()  # the accept loop only: handler threads are daemons
         self._server.server_close()
 
 
@@ -535,7 +598,11 @@ def authorize_url(
 
 
 def _token_request(
-    client: HttpClient, endpoint: str, form: Mapping[str, str], upstream: Upstream
+    client: HttpClient,
+    endpoint: str,
+    form: Mapping[str, str],
+    upstream: Upstream,
+    deadline: float | None = None,
 ) -> Mapping[str, object]:
     try:
         answer = client.request(
@@ -547,6 +614,7 @@ def _token_request(
             },
             body=urllib.parse.urlencode(form).encode(),
             timeout_s=20.0,
+            deadline=deadline,
         ).json()
     except HTTPError as exc:
         error = _error_code(exc.body)
@@ -568,11 +636,53 @@ def _token_request(
 
 def _error_code(body: bytes) -> str:
     try:
-        parsed: object = json.loads(body)
+        parsed: object = jsonutil.loads(body)
     except ValueError:
         return ""
     code = parsed.get("error") if isinstance(parsed, dict) else None
     return code[:40] if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", code) else ""
+
+
+DEFAULT_LIFETIME_S: Final = 3600.0
+MAX_LIFETIME_S: Final = 30 * 86_400.0
+# A scope that can change something: write, delete, manage, admin, chat (Slack's chat:write), ...
+_WRITE_SCOPE: Final = re.compile(
+    r"(?:^|[:._-])(?:write|delete|manage|admin|modify|chat|post|send|upload|create|edit)(?:$|[:._-])",
+    re.IGNORECASE,
+)
+
+
+def write_scopes(scopes: Sequence[str]) -> list[str]:
+    return [scope for scope in scopes if _WRITE_SCOPE.search(scope)]
+
+
+def _refuse_write_scope(granted: object, *, client_id: str) -> None:
+    """A login that can write is never stored: the token would sit in a Keychain item that any
+    process of the user (the extra session's shell included) may be able to read."""
+    if not isinstance(granted, str):
+        return
+    found = write_scopes([part for part in re.split(r"[\s,]+", granted) if part])
+    if found:
+        raise UsageError(
+            f"the upstream granted a scope that can write ({', '.join(found)[:80]}): the bridge "
+            "stores read-only logins only, so nothing was stored",
+            "vibe bridge login <upstream>   (and remove the write scopes from the app)",
+        )
+
+
+def _lifetime(value: object) -> float:
+    """Seconds a token lives, from an untrusted ``expires_in``: finite, positive, at most 30 days.
+
+    A bool, a string, NaN, infinity, a number too large for a float, zero or a negative number
+    is "an hour": short enough to be refreshed soon, never an instant that is already past.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_LIFETIME_S
+    if isinstance(value, int):
+        return float(min(value, int(MAX_LIFETIME_S))) if value > 0 else DEFAULT_LIFETIME_S
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_LIFETIME_S
+    return min(value, MAX_LIFETIME_S)
 
 
 def _tokens_from(
@@ -589,17 +699,15 @@ def _tokens_from(
     if not isinstance(access, str) or not access:
         raise NeedsLoginError("the token answer has no access token", "vibe bridge login")
     refresh = answer.get("refresh_token")
-    expires = answer.get("expires_in")
     scope = answer.get("scope")
+    _refuse_write_scope(scope, client_id=client_id)
     return Tokens(
         access=Secret(access),
         # A refresh answer may leave the refresh token out: then the old one is still the one.
         refresh=Secret(refresh)
         if isinstance(refresh, str) and refresh
         else (previous.refresh if previous else None),
-        expires_at=now_s + float(expires)
-        if isinstance(expires, (int, float)) and not isinstance(expires, bool)
-        else None,
+        expires_at=now_s + _lifetime(answer.get("expires_in")),
         client_id=client_id,
         client_secret=client_secret,
         scope=scope if isinstance(scope, str) else (previous.scope if previous else ""),
@@ -620,7 +728,6 @@ def login(
     now_s: float,
     client_id: str | None = None,
     client_secret: Secret | None = None,
-    drafts: bool = False,
 ) -> Tokens:
     """The whole login: discovery, a client, the browser, the code, the token, the Keychain."""
     server = discover(client, upstream)
@@ -636,7 +743,7 @@ def login(
         used_id = client_id
     else:
         used_id = client_id or register_client(client, upstream, server, redirect_uri)
-    scopes = [*upstream.read_scopes, *(upstream.draft_scopes if drafts else ())]
+    scopes = list(upstream.read_scopes)
     verifier, state = oauth.new_verifier(), oauth.new_state()
     url = authorize_url(
         upstream,
@@ -683,13 +790,27 @@ def login(
 
 
 @contextmanager
-def _refresh_lock(root: Path, upstream: Upstream) -> Iterator[None]:
-    """One refresh at a time across every bridge process: a refresh rotates the refresh token."""
+def _refresh_lock(root: Path, upstream: Upstream, deadline: float | None) -> Iterator[None]:
+    """One refresh at a time across every bridge process: a refresh rotates the refresh token.
+
+    Waited for only until ``deadline``: a call that has timed out must not start a refresh, or a
+    request, after the session was told it failed.
+    """
     private_dir(root)
     private_dir(root / "locks")
     path = root / "locks" / f"bridge-{upstream.id}.lock"
     with path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise DeadlineError(
+                        f"the {upstream.name} login is being refreshed by another process too long",
+                        "vibe bridge status",
+                    ) from None
+                time.sleep(0.05)
         try:
             yield
         finally:
@@ -704,6 +825,7 @@ def refresh_tokens(
     root: Path,
     now_s: float,
     force: bool = False,
+    deadline: float | None = None,
 ) -> Tokens:
     """A usable token: the stored one, or a refreshed one written before it is used.
 
@@ -715,7 +837,7 @@ def refresh_tokens(
         raise NeedsLoginError(f"not logged in to {upstream.name}", _recovery(upstream))
     if not force and not _stale(tokens, now_s):
         return tokens
-    with _refresh_lock(root, upstream):
+    with _refresh_lock(root, upstream, deadline):
         tokens = load(root, secrets, upstream)
         if tokens is None:
             raise NeedsLoginError(f"not logged in to {upstream.name}", _recovery(upstream))
@@ -737,7 +859,7 @@ def refresh_tokens(
             raise UsageError(
                 f"the stored {upstream.name} token endpoint is not trusted", _recovery(upstream)
             )
-        answer = _token_request(client, tokens.token_endpoint, form, upstream)
+        answer = _token_request(client, tokens.token_endpoint, form, upstream, deadline)
         fresh = _tokens_from(
             answer,
             now_s=now_s,

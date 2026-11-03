@@ -1753,48 +1753,71 @@ offered tool set is partial and varies between runs, and is removed with no fall
 `slack_read_user_profile`, `slack_search_public`, `slack_search_public_and_private`,
 `slack_search_channels`, `slack_search_users`, `slack_list_channel_members`,
 `slack_list_user_channels`, `slack_get_reactions`, `slack_read_canvas`, `slack_read_file`,
-`slack_read_list`), the draft `slack_send_message_draft`, and Atlassian v2 reads (names prefixed
+`slack_read_list`) and Atlassian v2 reads (names prefixed
 `atlassian_`: `atlassianUserInfo`, `getAccessibleAtlassianResources`, `getJiraIssue`,
 `searchJiraIssuesUsingJql`, `listJiraProjects`, `listJiraIssueTransitions`, `listJiraIssueComments`,
 `lookupJiraAccountId`, `getConfluenceContent`, `searchConfluence`, `listConfluenceContent`,
 `listConfluenceSpaces`, `getConfluenceSpace`, `listConfluenceComments`, `search`). A test pins that each
-non-draft name starts with a read verb and holds no write word. Any other name is a result with
+name starts with a read verb and holds no write word (there is no draft tool: `BridgeTool` has no
+`draft` field and `Upstream` no draft scopes). Any other name is a result with
 `isError: true` and "ask the lead", before any network. `tools/list` shows the allowlisted tools of the
-upstreams the user is logged in to, with the upstream's own description and input schema (read from its
-own `tools/list`, cached 600 s, 60 s after a failure), leaving out a tool the upstream does not offer; an
-unreadable catalog lists the allowlist with a permissive schema. Arguments are passed verbatim (at most
-20 kB). No Microsoft 365: Work IQ MCP needs a Global Administrator's consent.
+upstreams the user has a login for (the login's description file exists: no Keychain read), with **our
+own** fixed description and input schema (names and JSON types of the arguments best known, plus
+`additionalProperties: true`), written in `bridge.TOOLS`: no network, nothing the vendor wrote reaches the
+model, and a vendor that changes a tool changes nothing in the listing. The argument names are not
+verified; `vibe bridge tools <upstream>` compares them with the live server's (names that are plain
+identifiers, and nothing else of its text). Arguments are passed verbatim (at most 20 kB of UTF-8). No
+Microsoft 365: Work IQ MCP needs a Global Administrator's consent.
 
 **Auth (`mcp_oauth.py`)**: `Upstream` (id, MCP URL, protected-resource-metadata URL, host list,
-registration `dcr` | `preregistered`, read scopes, draft scopes). Slack: preregistered (its metadata
+registration `dcr` | `preregistered`, read scopes). Slack: preregistered (its metadata
 offers no registration endpoint; MCP clients must be backed by a registered Slack app), redirect URL
 `http://127.0.0.1:<port>/callback`, `client_secret_post`; Atlassian: dynamic registration as a public
 client, resource `https://mcp.atlassian.com/v2/mcp`, issuer from its metadata. Authorization code with
 PKCE S256 (`oauth.new_verifier`), state checked by the one-shot `LoopbackReceiver`; token exchange and
-refresh as form posts. Scopes asked: read scopes only; `vibe bridge login --drafts` adds the draft
-scopes. Every URL in a discovery document must be `https` on the upstream's own hosts, else nothing is
+refresh as form posts. Scopes asked: read scopes only (no `--drafts`), and `_refuse_write_scope` refuses to store a token whose
+granted `scope` holds a write-like scope (`write`, `delete`, `manage`, `admin`, `chat`, `post`, `send`,
+`upload`, `create`, `edit`, `modify`), on login and on refresh. Every URL in a discovery document must be `https` on the upstream's own hosts, else nothing is
 sent (`BRIDGE_HOSTS`, a client of its own like Cursor's). **Storage**: three Keychain items per
 upstream (`vibemaxxing-bridge-<id>-access|refresh|client-secret`, account `vibemaxxing`), written
 through `security -i` on its standard input (a value is never in argv; it is read back and compared,
 since `security -i` truncates long lines; a value must match `[A-Za-z0-9._~+/=-]{8,3500}`), and a non-secret
 `~/.vibemaxxing/bridge/<id>.json` (client id, expiry, scopes, endpoints). `refresh_tokens` refreshes
-within 60 s of expiry, under a lock file, re-reading what is stored first (another bridge process may
-have rotated the token), and stores the rotated pair before use; a 401 refreshes once and retries; a dead
-refresh token is "log in again". Errors carry the OAuth error code and status, never a body or a value.
+within 60 s of expiry, under a lock file (waited for only until the call's deadline), re-reading what is
+stored first (another bridge process may have rotated the token), and stores the rotated pair before use.
+**Crash-safe order**: the refresh token FIRST (the server has already rotated it), then the access
+token, the client secret, and the description file last; a kill after the first write leaves a login that
+heals itself (a stale access token gets a 401, which forces a refresh with the stored refresh token). The
+one instant before the first write is not recoverable by any ordering. A 401 refreshes once and retries; a
+dead refresh token is "log in again". `expires_in` is clamped (finite, positive, at most 30 days; anything
+else is an hour), and so is a stored expiry. Errors carry the OAuth error code and status, never a body or a value.
 New permitted `reveal()` sites (§5): the Authorization header (`mcp_client`), the Keychain write
 (`mcp_oauth.save`), the token-endpoint bodies (`mcp_oauth.login`, `refresh_tokens`).
 
-**Per call**: a deadline (`routing.bridge.timeout_s`, 60; a daemon thread), a calls-per-hour cap per
+**Robustness**: everything read from a vendor, from the session or from disk goes through
+`jsonutil.loads`, which refuses a document nested deeper than 64 before the decoder sees it (Python before
+3.14 raises `RecursionError`, not a `ValueError`); `Bridge.call` and `serve` catch every `Exception` (an error
+result, or a JSON-RPC -32603), so no input ends `vibe bridge serve`; a client line over 2 MB is refused.
+**Hosts**: `_host_ok` accepts `https`, the upstream's own host, no userinfo, no backslash or control
+character and no port but 443. **Login listener**: threaded (idle connections cannot block it or its
+close), only an answer carrying this login's state counts (a stray request is ignored and the wait goes
+on), a busy port is a clear error.
+
+**Per call**: a deadline (`routing.bridge.timeout_s`, 60) that is an absolute `time.monotonic()` moment
+passed to every request (`HttpClient.request(deadline=)`: the whole exchange, body read in chunks with
+`read1`, is cut off at it, so a server answering a byte a second does not outlast it) and to the refresh
+lock; the worker thread is a daemon and the caller only waits `WORKER_GRACE_S` (3 s) past it; a calls-per-hour cap per
 bridge process (30), a result size cap (`max_result_bytes`, 100 kB; larger is refused, never cut), text
 content returned as data (other content replaced by a note), an upstream `isError` result returned as an
 error result, and one log line in `bridge.log` (0600): `{at, upstream, tool, ms, bytes, outcome}` with
-outcome `ok`, `upstream-error`, `failed`, `timeout`, `too-large`, `limit` or `refused`. No arguments, no
+outcome `ok`, `upstream-error`, `failed`, `timeout`, `too-large`, `limit`, `refused` (the first 50 per
+process, then one `refused-suppressed`). No arguments, no
 content, no token. `routing.bridge` (`timeout_s`, `max_calls_per_hour`, `max_result_bytes`) cannot add a
-tool or an upstream. Commands: `vibe bridge login <slack|atlassian> [--client-id] [--drafts] [--port]`,
+tool or an upstream. Commands: `vibe bridge login <slack|atlassian> [--client-id] [--port]`,
 `logout <upstream|all>`, `status`, `tools <upstream>`, `serve`, `add-command [--config-dir]` (prints the
 `claude mcp add` line for `~/.claude-extra`, runs nothing).
 
 **Not verified live**: nobody has logged in to either upstream, so the upstreams' actual tool names and
-argument shapes, Slack's redirect-URL rules and the scope its draft tool needs, Atlassian's
+argument shapes, Slack's redirect-URL rules, Atlassian's
 acceptance of a loopback redirect and of these scopes, and the answers' exact shapes are from the
 vendors' documents and metadata only (`vibe bridge tools <upstream>` checks the names after a login).

@@ -53,3 +53,9 @@ class StoreError(VibeError):
 class NetworkError(VibeError):
     exit_code: ClassVar[int] = 6
     code: ClassVar[str] = "network"
+
+
+class DeadlineError(NetworkError):
+    """A call ran out of its time. Raised by the HTTP layer, the refresh lock, the bridge."""
+
+    code: ClassVar[str] = "timeout"

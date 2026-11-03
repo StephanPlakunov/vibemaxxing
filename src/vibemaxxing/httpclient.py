@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import json
 import math
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Final, Protocol
+from typing import IO, Final, Protocol
 
-from vibemaxxing import __version__
-from vibemaxxing.errors import NetworkError
+from vibemaxxing import __version__, jsonutil
+from vibemaxxing.errors import DeadlineError, NetworkError
 
 ALLOWED_HOSTS: Final = frozenset({"claude.ai", "platform.claude.com", "api.anthropic.com"})
 # The Cursor seat's usage, and nothing else. A second client with its own list, so the
@@ -58,6 +58,35 @@ def _headers(raw: object) -> dict[str, str]:
     return {str(name).lower(): str(value) for name, value in items()}
 
 
+def _clamped(timeout_s: float, deadline: float | None) -> float:
+    if deadline is None:
+        return timeout_s
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise DeadlineError("the call ran out of time", "vibe bridge status")
+    return min(timeout_s, left)
+
+
+def _read(stream: IO[bytes], limit: int, deadline: float | None) -> bytes:
+    """Up to ``limit`` bytes, in chunks, checking the deadline between them."""
+    if deadline is None:
+        return stream.read(limit)
+    chunks: list[bytes] = []
+    total = 0
+    while total < limit:
+        if time.monotonic() >= deadline:
+            raise DeadlineError("the call ran out of time", "vibe bridge status")
+        # read1: whatever has arrived, so a server that sends a byte at a time cannot make one
+        # read wait for a whole chunk and carry the loop past the deadline.
+        reader = getattr(stream, "read1", stream.read)
+        chunk = reader(min(16_384, limit - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
 def _retry_after_s(raw: str | None) -> float | None:
     # ponytail: delta-seconds only. RFC 9110 also allows an HTTP-date, which the
     # usage endpoint has not been observed to send; parse it when one shows up.
@@ -78,7 +107,7 @@ class HttpResponse:
     def json(self) -> dict[str, object]:
         parsed: object
         try:
-            parsed = json.loads(self.body)
+            parsed = jsonutil.loads(self.body)
         except ValueError as exc:
             raise NetworkError(
                 "the server sent a body that is not JSON",
@@ -102,6 +131,7 @@ class HttpClient(Protocol):
         body: bytes | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_bytes: int = DEFAULT_MAX_BYTES,
+        deadline: float | None = None,
     ) -> HttpResponse: ...
 
 
@@ -145,7 +175,10 @@ class UrllibClient:
         body: bytes | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_bytes: int = DEFAULT_MAX_BYTES,
+        deadline: float | None = None,
     ) -> HttpResponse:
+        """``deadline`` is an absolute ``time.monotonic()`` moment. The whole exchange, body read
+        included, ends by then: a server that answers one byte a second does not outlast it."""
         host = urllib.parse.urlsplit(url).hostname
         allowed = ALLOWED_HOSTS if self._hosts is None else self._hosts
         if host not in allowed:
@@ -156,9 +189,10 @@ class UrllibClient:
             )
         sent = {"User-Agent": USER_AGENT, **headers}
         request = urllib.request.Request(url, data=body, headers=sent, method=method)
+        timeout_s = _clamped(timeout_s, deadline)
         try:
             with _OPENER.open(request, timeout=timeout_s) as response:
-                data = response.read(max_bytes + 1)
+                data = _read(response, max_bytes + 1, deadline)
                 if len(data) > max_bytes:
                     raise NetworkError(
                         f"the answer from {host} is larger than {max_bytes} bytes", "vibe list"
@@ -172,7 +206,7 @@ class UrllibClient:
                 # headers carry the bearer token.
                 raise HTTPError(
                     int(exc.code),
-                    exc.read(max_bytes + 1)[:max_bytes],
+                    _read(exc, max_bytes + 1, deadline)[:max_bytes],
                     _retry_after_s(exc.headers.get("Retry-After")),
                     _headers(exc.headers),
                 ) from None
