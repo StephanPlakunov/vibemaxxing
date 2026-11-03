@@ -1753,13 +1753,18 @@ offered tool set is partial and varies between runs, and is removed with no fall
 `slack_read_user_profile`, `slack_search_public`, `slack_search_public_and_private`,
 `slack_search_channels`, `slack_search_users`, `slack_list_channel_members`,
 `slack_list_user_channels`, `slack_get_reactions`, `slack_read_canvas`, `slack_read_file`,
-`slack_read_list`) and Atlassian v2 reads (names prefixed
-`atlassian_`: `atlassianUserInfo`, `getAccessibleAtlassianResources`, `getJiraIssue`,
-`searchJiraIssuesUsingJql`, `listJiraProjects`, `listJiraIssueTransitions`, `listJiraIssueComments`,
-`lookupJiraAccountId`, `getConfluenceContent`, `searchConfluence`, `listConfluenceContent`,
-`listConfluenceSpaces`, `getConfluenceSpace`, `listConfluenceComments`, `search`). A test pins that each
-name starts with a read verb and holds no write word (there is no draft tool: `BridgeTool` has no
-`draft` field and `Upstream` no draft scopes). Any other name is a result with
+`slack_read_list`; not verified live) and Atlassian v2 (names prefixed `atlassian_`), **exactly the
+read-only tools the live server offers** (read from its `tools/list` with a real login on 3 Nov 2026: 11
+tools): `atlassianUserInfo`, `getAccessibleAtlassianResources`, `discover`, `executeRead`, `getJiraIssue`,
+`searchJiraIssuesUsingJql`, `listJiraIssueComments`, `getConfluenceContent`, `searchConfluence`, with the
+server's own argument names, JSON types and `required` (fixture `tests/fixtures/atlassian_live_tools.json`:
+names, types and two annotations only). `executeWrite` and `executeDestructive` are offered by the server and
+never allowlisted. `executeRead` takes the name of another operation, so `BridgeTool.rules` limits its `name`
+argument in code to `atlassianUserInfo|(get|list|search|lookup|query|describe)[A-Z]…`; anything else is
+refused ("ask the lead") before any network, whatever the vendor's `executeRead` would accept. A test pins
+that every Atlassian tool allowlisted is `readOnlyHint` on the live fixture, that every read-only tool the
+server offers is allowlisted, and that each other name starts with a read verb and holds no write word
+(there is no draft tool: `BridgeTool` has no `draft` field and `Upstream` no draft scopes). Any other name is a result with
 `isError: true` and "ask the lead", before any network. `tools/list` shows the allowlisted tools of the
 upstreams the user has a login for (the login's description file exists: no Keychain read), with **our
 own** fixed description and input schema (names and JSON types of the arguments best known, plus

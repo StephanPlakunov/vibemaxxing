@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -94,15 +95,26 @@ class BridgeTool:
     # Our own argument list (name, JSON type). The vendor validates the values; any other argument
     # is still passed through, so a wrong guess here costs a hint, not a refusal.
     args: tuple[tuple[str, str], ...] = ()
+    required: tuple[str, ...] = ()
+    # (argument, regex): the argument must be a string that fully matches. For a tool that takes the
+    # name of another operation, so that what it may name is limited in code, not by the vendor.
+    rules: tuple[tuple[str, str], ...] = ()
 
 
-_S, _I = "string", "integer"
+_S, _I, _N, _B, _A, _O = "string", "integer", "number", "boolean", "array", "object"
 
 
 def _t(
     upstream: str, prefix: str, tool: str, description: str, *args: tuple[str, str]
 ) -> BridgeTool:
     return BridgeTool(f"{prefix}{tool}", upstream, tool, description, args)
+
+
+# What `executeRead` may be asked to run: an operation that starts with a read verb. A writer
+# (createJiraIssue, editJiraIssue, transitionJiraIssue, delete..., execute...) never matches.
+READ_OPERATION: Final = (
+    r"(?:atlassianUserInfo|(?:get|list|search|lookup|query|describe)[A-Z][A-Za-z0-9]{0,80})"
+)
 
 
 # The allowlist: READS ONLY. There is no draft tool and no write tool of any kind; a token that can
@@ -132,34 +144,60 @@ TOOLS: Final = (
     _t("slack", "", "slack_read_canvas", "Read a canvas.", ("canvas_id", _S)),
     _t("slack", "", "slack_read_file", "Read a file's content.", ("file_id", _S)),
     _t("slack", "", "slack_read_list", "Read a list.", ("list_id", _S)),
+    # Atlassian v2, as the live server offers it (read from its tools/list with a real login, 3 Nov
+    # 2026: 11 tools, of which these 9 are read-only by its own annotation; executeWrite and
+    # executeDestructive are never listed here). Argument names and types are the live ones.
     _t("atlassian", "atlassian_", "atlassianUserInfo", "Who the logged-in user is."),
     _t("atlassian", "atlassian_", "getAccessibleAtlassianResources",
        "The sites (cloud ids) the user can reach."),
-    _t("atlassian", "atlassian_", "getJiraIssue", "Read one Jira issue.",
-       ("cloudId", _S), ("issueIdOrKey", _S)),
-    _t("atlassian", "atlassian_", "searchJiraIssuesUsingJql", "Search Jira with JQL.",
-       ("cloudId", _S), ("jql", _S), ("maxResults", _I)),
-    _t("atlassian", "atlassian_", "listJiraProjects", "List Jira projects.", ("cloudId", _S)),
-    _t("atlassian", "atlassian_", "listJiraIssueTransitions",
-       "List the transitions an issue could take (reads; moves nothing).",
-       ("cloudId", _S), ("issueIdOrKey", _S)),
-    _t("atlassian", "atlassian_", "listJiraIssueComments", "List an issue's comments.",
-       ("cloudId", _S), ("issueIdOrKey", _S)),
-    _t("atlassian", "atlassian_", "lookupJiraAccountId", "Find a Jira account id by name.",
-       ("cloudId", _S), ("searchString", _S)),
-    _t("atlassian", "atlassian_", "getConfluenceContent", "Read a Confluence page.",
-       ("cloudId", _S), ("contentId", _S)),
-    _t("atlassian", "atlassian_", "searchConfluence", "Search Confluence.",
-       ("cloudId", _S), ("cql", _S)),
-    _t("atlassian", "atlassian_", "listConfluenceContent", "List Confluence content.",
-       ("cloudId", _S), ("spaceId", _S)),
-    _t("atlassian", "atlassian_", "listConfluenceSpaces", "List Confluence spaces.",
-       ("cloudId", _S)),
-    _t("atlassian", "atlassian_", "getConfluenceSpace", "Read one Confluence space.",
-       ("cloudId", _S), ("spaceId", _S)),
-    _t("atlassian", "atlassian_", "listConfluenceComments", "List a page's comments.",
-       ("cloudId", _S), ("contentId", _S)),
-    _t("atlassian", "atlassian_", "search", "Search Atlassian products.", ("query", _S)),
+    BridgeTool(
+        "atlassian_discover", "atlassian", "discover",
+        "Find which read operations exist for a topic (then run one with atlassian_executeRead).",
+        (("query", _S),), ("query",),
+    ),
+    BridgeTool(
+        "atlassian_executeRead", "atlassian", "executeRead",
+        "Run one READ operation by name (found with atlassian_discover); the name must start with "
+        "get, list, search, lookup, query or describe, anything else is refused here.",
+        (("cloudId", _S), ("name", _S), ("inputs", _O), ("responseFields", _A), ("view", _S)),
+        ("name",), (("name", READ_OPERATION),),
+    ),
+    BridgeTool(
+        "atlassian_getJiraIssue", "atlassian", "getJiraIssue", "Read one Jira issue.",
+        (("cloudId", _S), ("issueIdOrKey", _S), ("fields", _A), ("includeEditableFields", _B),
+         ("fieldsByKeys", _B), ("expand", _S), ("properties", _A), ("failFast", _B),
+         ("responseContentFormat", _S), ("actionSource", _S), ("view", _S)),
+        ("cloudId", "issueIdOrKey"),
+    ),
+    BridgeTool(
+        "atlassian_searchJiraIssuesUsingJql", "atlassian", "searchJiraIssuesUsingJql",
+        "Search Jira with JQL.",
+        (("cloudId", _S), ("jql", _S), ("searchResultMode", _S), ("maxResults", _N), ("fields", _A),
+         ("nextPageToken", _S), ("responseContentFormat", _S), ("actionSource", _S), ("view", _S)),
+        ("cloudId", "jql"),
+    ),
+    BridgeTool(
+        "atlassian_listJiraIssueComments", "atlassian", "listJiraIssueComments",
+        "List an issue's comments.",
+        (("cloudId", _S), ("issueIdOrKey", _S), ("startAt", _I), ("maxResults", _I),
+         ("orderBy", _S), ("expand", _S), ("responseContentFormat", _S), ("reactionDetail", _S),
+         ("view", _S)),
+        ("cloudId", "issueIdOrKey"),
+    ),
+    BridgeTool(
+        "atlassian_getConfluenceContent", "atlassian", "getConfluenceContent",
+        "Read a Confluence page.",
+        (("cloudId", _S), ("content_id", _S), ("content_url", _S), ("detail", _S),
+         ("content_format", _S), ("draft", _B)),
+        ("cloudId",),
+    ),
+    BridgeTool(
+        "atlassian_searchConfluence", "atlassian", "searchConfluence",
+        "Search Confluence with CQL.",
+        (("cloudId", _S), ("cql", _S), ("cqlcontext", _S), ("expand", _S), ("limit", _I),
+         ("cursor", _S)),
+        ("cloudId", "cql"),
+    ),
 )  # fmt: skip
 BY_NAME: Final = {tool.name: tool for tool in TOOLS}
 
@@ -393,6 +431,7 @@ class Bridge:
                     "inputSchema": {
                         "type": "object",
                         "properties": {name: {"type": kind} for name, kind in tool.args},
+                        "required": list(tool.required),
                         "additionalProperties": True,
                     },
                 }
@@ -407,6 +446,15 @@ class Bridge:
         if tool is None:
             self._log_refused(name, started)
             return REFUSAL.format(name=name[:64] or "(no name)"), True
+        for argument, pattern in tool.rules:
+            value = arguments.get(argument)
+            if not isinstance(value, str) or not re.fullmatch(pattern, value):
+                self._log_refused(f"{tool.name}:{argument}", started)
+                return (
+                    f"refused: {tool.name} may only be asked for a read operation; "
+                    f"`{argument}` is not one. ask the lead",
+                    True,
+                )
         try:
             size = len(json.dumps(arguments, ensure_ascii=False).encode("utf-8"))
         except (TypeError, ValueError, RecursionError):

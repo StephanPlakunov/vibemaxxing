@@ -7,6 +7,12 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Atlassian allowlist = the live server.** Aligned with the real `tools/list` of the Atlassian MCP (read
+  with a real read-only login): the nine read-only tools it offers (incl. `discover` and `executeRead`),
+  with its own argument names, types and required; names it does not offer (`listJiraProjects`, ...) are
+  gone; `executeWrite`/`executeDestructive` stay unreachable, and `executeRead` may only name a read
+  operation (enforced in code). One real read through `vibe bridge serve` worked.
+
 - **vibe-bridge v2: no model in the bridge.** `vibe bridge serve` now forwards each call, as an MCP client,
   straight to Slack's and Atlassian's own remote MCP servers with the user's own OAuth login (`vibe bridge
   login|logout|status|tools`), exactly one allowlisted upstream tool per call (reads only), tokens only in the Keychain, a timeout, a per-hour cap, a size cap and a content-free

@@ -130,18 +130,29 @@ def slack() -> FakeUpstream:
     )  # fmt: skip
 
 
+LIVE_ATLASSIAN = json.loads(
+    (Path(__file__).with_name("fixtures") / "atlassian_live_tools.json").read_text()
+)["tools"]
+
+
+def atlassian_server(*, without: tuple[str, ...] = ()) -> FakeUpstream:
+    """An Atlassian MCP that offers exactly what the real one offered on 3 Nov 2026 (11 tools)."""
+    fake = FakeUpstream(ATLASSIAN)
+    for name, spec in LIVE_ATLASSIAN.items():
+        if name in without:
+            continue
+        schema = {
+            "type": "object",
+            "properties": {k: {"type": v} for k, v in spec["properties"].items()},
+            "required": spec["required"],
+        }
+        fake.tools[name] = (f"{name} (recorded)", schema, echo)
+    return fake
+
+
 @pytest.fixture
 def atlassian() -> FakeUpstream:
-    return upstream_with(
-        ATLASSIAN,
-        [
-            "getJiraIssue",
-            "searchJiraIssuesUsingJql",
-            "createJiraIssue",
-            "executeWrite",
-            "deleteJiraIssue",
-        ],
-    )
+    return atlassian_server()
 
 
 def call(rig: Rig, name: str, **arguments: object) -> tuple[str, bool]:
@@ -910,11 +921,10 @@ def test_status_login_tools_logout_through_the_cli(
 
     assert rig.main("bridge", "tools", "atlassian") == 0
     tools = capsys.readouterr().out
-    assert "atlassian_getJiraIssue" in tools and "offered" in tools
-    assert (
-        "atlassian_listJiraProjects" in tools and "NOT offered" in tools
-    )  # allowlisted, not on this fake
-    assert "createJiraIssue" not in tools  # a writer is never even named
+    assert "atlassian_getJiraIssue" in tools and "offered, arguments match" in tools
+    assert "NOT offered" not in tools  # the fake offers what the real server offered
+    assert "Atlassian offers 11 tools; 2 others are not reachable through the bridge" in tools
+    assert "executeWrite" not in tools and "executeDestructive" not in tools  # never even named
 
     assert rig.main("bridge", "logout", "atlassian") == 0
     assert "logged out of atlassian" in capsys.readouterr().out
@@ -1089,7 +1099,8 @@ from vibemaxxing import jsonutil  # noqa: E402
 from vibemaxxing.errors import DeadlineError  # noqa: E402
 
 READ_NAME = re.compile(
-    r"^(slack_(read|search|list|get)_|get[A-Z]|list[A-Z]|search([A-Z]|$)|lookup[A-Z]|atlassianUserInfo$)"
+    r"^(slack_(read|search|list|get)_|get[A-Z]|list[A-Z]|search([A-Z]|$)|lookup[A-Z]|"
+    r"atlassianUserInfo$|discover$|executeRead$)"
 )
 WRITE_WORDS = re.compile(
     r"(send|schedule|post|create|update|delete|remove|add[A-Z_]|edit|upload|write|manage|execute|"
@@ -1102,14 +1113,35 @@ DEEP = 100_000
 # --- no drafts, and never a token that can write -----------------------------------------------------
 
 
+def _json_type(kind: str | None) -> str:
+    return kind or "string"
+
+
 def test_the_allowlist_is_reads_only_with_no_draft_tool_at_all() -> None:
     names = [tool.name for tool in TOOLS]
     assert len(names) == len(set(names))
     assert not hasattr(TOOLS[0], "draft") and not hasattr(SLACK, "draft_scopes")
     for tool in TOOLS:
         assert READ_NAME.match(tool.upstream_tool), tool.upstream_tool  # a read verb first
-        assert not WRITE_WORDS.search(tool.upstream_tool), tool.upstream_tool
-        assert not WRITE_WORDS.search(tool.name) and "draft" not in tool.description.lower()
+        if tool.upstream_tool == "executeRead":
+            # the one tool that names another operation: limited in code to read operations
+            assert tool.rules == (("name", bridge.READ_OPERATION),)
+        else:
+            assert not WRITE_WORDS.search(tool.upstream_tool), tool.upstream_tool
+            assert not WRITE_WORDS.search(tool.name) and not tool.rules
+        assert "draft" not in tool.description.lower()
+    live_readonly = {n for n, spec in LIVE_ATLASSIAN.items() if spec["readOnlyHint"] is True}
+    mine = {t.upstream_tool for t in TOOLS if t.upstream == "atlassian"}
+    assert (
+        mine <= live_readonly
+    )  # every Atlassian tool allowlisted is read-only by the server's own hint
+    assert not mine & {"executeWrite", "executeDestructive"}
+    assert mine == live_readonly  # and every read-only tool the live server offers is allowlisted
+    for tool in TOOLS:  # our argument lists are the live server's own (names, types, required)
+        if tool.upstream == "atlassian":
+            spec = LIVE_ATLASSIAN[tool.upstream_tool]
+            assert dict(tool.args) == {k: _json_type(v) for k, v in spec["properties"].items()}
+            assert list(tool.required) == spec["required"]
     assert {tool.upstream for tool in TOOLS} == {"slack", "atlassian"}  # no Microsoft 365
 
 
@@ -1753,6 +1785,7 @@ def test_the_listing_is_ours_not_the_vendors(tmp_path: Path, slack: FakeUpstream
             "limit": {"type": "integer"},
             "cursor": {"type": "string"},
         },
+        "required": [],
         "additionalProperties": True,
     }
     assert "Arguments go to the upstream unchanged" in str(entry["description"])
@@ -1803,6 +1836,7 @@ def test_bridge_tools_compares_our_argument_names_with_the_live_servers_names_on
         {"type": "object", "properties": {"cloudId": {}, "query": {}}},
         echo,
     )
+    del atlassian.tools["searchConfluence"]  # allowlisted, but this server no longer offers it
     rig = CliRig(tmp_path, atlassian)
     rig.main("bridge", "login", "atlassian")
     capsys.readouterr()
@@ -1811,7 +1845,11 @@ def test_bridge_tools_compares_our_argument_names_with_the_live_servers_names_on
 
     out = capsys.readouterr().out
     assert "atlassian_getJiraIssue" in out and "offered, arguments match" in out
-    assert "arguments DIFFER: ours ['jql', 'maxResults'] not in its ['cloudId', 'query']" in out
+    assert (
+        "atlassian_searchJiraIssuesUsingJql" in out
+        and "arguments DIFFER: ours ['actionSource'" in out
+    )
+    assert "'jql'" in out and "not in its ['cloudId', 'query']" in out
     assert "IGNORE" not in out and "rm -rf" not in out  # nothing the vendor wrote is printed
     assert "NOT offered" in out
 
@@ -1820,3 +1858,137 @@ def test_status_says_all_reads(tmp_path: Path, capsys: pytest.CaptureFixture[str
     CliRig(tmp_path).main("bridge", "status")
 
     assert "allowlisted tools, all reads" in capsys.readouterr().out
+
+
+# --- Atlassian as the live server offers it (3 Nov 2026) ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "createJiraIssue", "editJiraIssue", "transitionJiraIssue", "addOrEditJiraIssueComment",
+        "deleteJiraIssue", "executeWrite", "executeDestructive", "executeRead", "manageJiraSprint",
+        "createConfluenceContent", "updateConfluenceContent", "mergeBitbucketRepoPullRequest",
+        "getJiraIssue; createJiraIssue", "getJiraIssue createJiraIssue", "get", "getjira", "GetJiraIssue",
+        "listJiraIssues\n", " getJiraIssue", "getJiraIssue" + "x" * 90, "", 5, None, ["getJiraIssue"],
+        {"name": "getJiraIssue"},
+    ],
+)  # fmt: skip
+def test_execute_read_may_only_be_asked_for_a_read_operation(
+    tmp_path: Path, atlassian: FakeUpstream, operation: object
+) -> None:
+    rig = Rig(tmp_path, atlassian)
+
+    text, failed = rig.bridge().call(
+        "atlassian_executeRead", {"cloudId": "c1", "name": operation, "inputs": {}}
+    )
+
+    assert failed and "refused" in text and "ask the lead" in text
+    assert atlassian.requests == []  # not even a token refresh
+    assert rig.entries[-1]["outcome"] == "refused"
+
+
+def test_execute_read_without_a_name_is_refused_too(
+    tmp_path: Path, atlassian: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, atlassian)
+
+    text, failed = rig.bridge().call("atlassian_executeRead", {"cloudId": "c1", "inputs": {"a": 1}})
+
+    assert failed and "refused" in text and atlassian.requests == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["getJiraIssue", "listJiraProjects", "searchConfluence", "lookupJiraAccountId", "queryAssetsObjects",
+     "describeJiraAlignItemType", "atlassianUserInfo"],
+)  # fmt: skip
+def test_execute_read_forwards_a_read_operation_unchanged(
+    tmp_path: Path, atlassian: FakeUpstream, operation: str
+) -> None:
+    rig = Rig(tmp_path, atlassian)
+
+    _, failed = rig.bridge().call(
+        "atlassian_executeRead", {"cloudId": "c1", "name": operation, "inputs": {"k": "v"}}
+    )
+
+    assert not failed
+    assert atlassian.calls() == [
+        {
+            "name": "executeRead",
+            "arguments": {"cloudId": "c1", "name": operation, "inputs": {"k": "v"}},
+        }
+    ]
+
+
+def test_the_two_write_meta_tools_cannot_be_reached_by_any_name(
+    tmp_path: Path, atlassian: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, atlassian)
+
+    for name in (
+        "atlassian_executeWrite",
+        "atlassian_executeDestructive",
+        "executeWrite",
+        "executeDestructive",
+    ):
+        text, failed = rig.bridge().call(
+            name, {"cloudId": "c1", "name": "createJiraIssue", "inputs": {}}
+        )
+        assert failed and "ask the lead" in text
+    assert atlassian.requests == []
+
+
+def test_the_listing_gives_the_live_argument_names_types_and_required(
+    tmp_path: Path, atlassian: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, atlassian)
+
+    listing = {t["name"]: t for t in rig.bridge().listing()}
+
+    assert set(listing) == {t.name for t in TOOLS if t.upstream == "atlassian"}
+    assert "atlassian_executeWrite" not in listing and "atlassian_executeDestructive" not in listing
+    search = listing["atlassian_searchJiraIssuesUsingJql"]["inputSchema"]
+    assert search["required"] == ["cloudId", "jql"]
+    assert search["properties"]["maxResults"] == {"type": "number"}  # number, as the server says
+    assert search["properties"]["fields"] == {"type": "array"}
+    assert listing["atlassian_getConfluenceContent"]["inputSchema"]["properties"]["draft"] == {
+        "type": "boolean"
+    }
+    assert listing["atlassian_executeRead"]["inputSchema"]["properties"]["inputs"] == {
+        "type": "object"
+    }
+
+
+def test_the_live_scenario_user_info_then_the_sites_then_one_jql_search(
+    tmp_path: Path, atlassian: FakeUpstream
+) -> None:
+    atlassian.tools["getAccessibleAtlassianResources"] = (
+        "d",
+        EMPTY_SCHEMA,
+        lambda a: text_result(json.dumps([{"id": "cloud-1", "name": "Zvoove"}])),
+    )
+    rig = Rig(tmp_path, atlassian)
+    server = rig.bridge()
+
+    info, info_failed = server.call("atlassian_atlassianUserInfo", {})
+    sites, _ = server.call("atlassian_getAccessibleAtlassianResources", {})
+    cloud = json.loads(sites)[0]["id"]
+    found, failed = server.call(
+        "atlassian_searchJiraIssuesUsingJql",
+        {
+            "cloudId": cloud,
+            "jql": "assignee = currentUser() ORDER BY updated DESC",
+            "maxResults": 1,
+        },
+    )
+
+    assert not info_failed and not failed and info and found
+    assert atlassian.calls()[-1] == {
+        "name": "searchJiraIssuesUsingJql",
+        "arguments": {
+            "cloudId": "cloud-1",
+            "jql": "assignee = currentUser() ORDER BY updated DESC",
+            "maxResults": 1,
+        },
+    }
