@@ -90,7 +90,7 @@ def test_the_listed_tools_are_reads_and_drafts_only() -> None:
 
     assert names == {
         "slack_read_channel", "slack_read_thread", "slack_search", "slack_read_profile",
-        "atlassian_get_issue", "atlassian_search_jql",
+        "slack_create_draft", "atlassian_get_issue", "atlassian_search_jql",
         "atlassian_get_page", "m365_search_mail", "m365_read_mail", "m365_search_chat",
         "m365_read_chat", "outlook_create_draft",
     }  # fmt: skip
@@ -636,7 +636,10 @@ def test_a_tools_override_cannot_map_a_tool_onto_a_write_tool() -> None:
     with pytest.raises(UsageError, match="write tool createJiraIssue"):
         parse_config({"tools": {"atlassian_get_issue": "createJiraIssue"}})
     # a draft tool keeps its own default, and a harmless remap is fine
+    with pytest.raises(UsageError, match="write tool slack_send_message"):
+        parse_config({"tools": {"slack_search": "slack_send_message"}})
     assert parse_config({"tools": {"outlook_create_draft": "outlook_create_draft"}})
+    assert parse_config({"tools": {"slack_create_draft": "slack_send_message_draft"}})
     assert parse_config({"tools": {"slack_search": "slack_search_public"}})
 
 
@@ -797,7 +800,8 @@ TOOL = bridge.BY_NAME["slack_read_profile"]
 
 
 def test_the_recorded_listing_is_the_real_one() -> None:
-    assert len(FIXTURE) == 172 and ALLOWED in FIXTURE
+    assert len(FIXTURE) == 178 and ALLOWED in FIXTURE
+    assert "mcp__claude_ai_Slack__slack_send_message" in FIXTURE  # found only by the final init
     assert any(t.startswith("mcp__chrome-devtools__") for t in FIXTURE)
     assert any("send_mail" in t for t in FIXTURE)  # write tools were offered
 

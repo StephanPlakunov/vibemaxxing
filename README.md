@@ -410,12 +410,15 @@ Teams send, Slack list and conversation writers). `--tools ""` hides only built-
 with a deny list of every tool in the first except the allowed one, offered **no tool at all** (six
 servers connected, 171 tools denied): deny rules do remove tools from what the model is offered. The
 allowed Slack tool was missing too because that connector was still `pending` when the init fired.
-So the bridge now carries a **fence check** (`bridge.Fence`): before a call it asks the connectors
-what they offer (a probe run, retried while a server is pending), denies all of it except the one
-allowed tool, and runs a second probe whose init event must offer exactly that tool in permission
-mode `default`/`manual`; anything else refuses the call. Cached per argv, re-checked every ten
-minutes, so a connector that gains a tool is noticed. It is built and tested on fakes; the bridge
-stays disabled until one live init shows the allowed tool alone.
+So the bridge carries a **fence check** (`bridge.Fence`, built and tested on fakes): it asks the
+connectors what they offer, denies all of it except the one allowed tool, and runs a second probe
+whose init must offer exactly that tool. **The final live run refused it:** with Slack `connected`
+and the 171 tools of the first listing denied, the model was still offered the allowed read plus six
+more Slack tools (`slack_send_message`, `slack_send_message_draft`, `slack_schedule_message`,
+`slack_add_reaction`, `slack_create_canvas`, `slack_update_canvas`). The first listing had shown 21 of
+Slack's 27 tools while the server already said `connected`. So an init listing is not a complete
+list, and a check on it can pass on a partial one while the real run is offered more. No check of
+the offered set is proof, and the bridge stays disabled.
 `--strict-mcp-config` is not an option: it ignores all other MCP configuration and, per Claude Code's
 docs, also suppresses the claude.ai connectors, i.e. the allowed tool.
 
@@ -426,8 +429,8 @@ switching under it breaks Remote Control). So extra borrows a connector one call
 
 - **Reads**: `slack_read_channel`, `slack_read_thread`, `slack_search`, `slack_read_profile`,
   `atlassian_get_issue`, `atlassian_search_jql`, `atlassian_get_page`, `m365_search_mail`,
-  `m365_read_mail`, `m365_search_chat`, `m365_read_chat`. **Draft**: `outlook_create_draft` (the
-  Slack connector lists no draft tool).
+  `m365_read_mail`, `m365_search_chat`, `m365_read_chat`. **Drafts**: `slack_create_draft`,
+  `outlook_create_draft`.
 - **Never**: sending, posting, creating or transitioning tickets, deleting, reactions. Any other
   tool name is refused with "ask the lead".
 - Each call runs one headless **Claude Code** run on **main** and nowhere else, with only that one

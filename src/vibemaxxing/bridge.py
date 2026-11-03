@@ -46,11 +46,12 @@ from vibemaxxing.redact import scrub
 # was nothing to deny). `vibe bridge serve` and `add-command` refuse while this is False. It is a
 # constant on purpose: no setting, flag or environment variable can switch it on.
 ENABLED: Final = False
-# Evidence so far: reads work; deny rules remove tools from what the model is offered (171 denied ->
-# the init event listed none, six servers connected); a full deny list + `Fence` below is built and
-# tested on fakes. Missing before the flip: ONE live init listing showing exactly the allowed tool
-# (the run that tried it caught the Slack connector still `pending`, so the allowed tool was not
-# yet listed either).
+# Evidence: reads work; deny rules remove tools from what the model is offered. But the final live
+# init (Slack `connected`, 171 tools of the first init denied) still offered the allowed tool PLUS
+# six more Slack tools, send_message among them: the first init had listed only 21 of Slack's 27
+# tools although the server said `connected`. A listing, even of a connected server, is not a
+# complete list, so an init check cannot prove what the real run will be offered (it can pass on a
+# partial listing). No offered-set check is a proof; the bridge stays off.
 DISABLED_REASON: Final = (
     "the bridge is disabled: a live check has not yet shown that a non-allowed tool of the same "
     "connector is denied (reading through the connector works). See docs/CONTRACT.md section 20."
@@ -105,6 +106,9 @@ TOOLS: Final = (
           "Search Slack messages.", {"query": _S}, ["query"]),
     _tool("slack_read_profile", "slack", "Slack", "slack_read_user_profile",
           "Read a Slack user's profile.", {"user": _S}, ["user"]),
+    _tool("slack_create_draft", "slack", "Slack", "slack_send_message_draft",
+          "Create a Slack DRAFT (never sends).", {"channel": _S, "text": _S}, ["channel", "text"],
+          draft=True),
     _tool("atlassian_get_issue", "atlassian", "Atlassian Rovo", "getJiraIssue",
           "Read one Jira issue.", {"issue": _S}, ["issue"]),
     _tool("atlassian_search_jql", "atlassian", "Atlassian Rovo", "searchJiraIssuesUsingJql",
@@ -129,12 +133,15 @@ BY_NAME: Final = {tool.name: tool for tool in TOOLS}
 # --disallowedTools, which beats --allowedTools. Defaults, not verified against the live
 # connectors; the allowed tool of a call is always left out of its own list.
 WRITE_TOOLS: Final = {
-    # Names as the live connectors listed them (init event of a headless run, 3 Nov 2026): this
-    # Slack connector has no send-message or draft tool, only these writers.
+    # Names as the live connectors listed them (init events of headless runs, 3 Nov 2026). The
+    # first init listed 21 Slack tools while Slack was "connected"; a later one revealed six more
+    # (send, draft, schedule, reaction, canvases): a listing is NOT a complete list.
     "Slack": (
         "slack_add_list_record", "slack_complete_file_upload", "slack_create_conversation",
         "slack_create_list", "slack_get_file_upload_url", "slack_update_list",
-        "slack_update_list_record",
+        "slack_update_list_record", "slack_add_reaction", "slack_create_canvas",
+        "slack_schedule_message", "slack_send_message", "slack_send_message_draft",
+        "slack_update_canvas",
     ),
     "Atlassian Rovo": (
         "addCommentToJiraIssue", "addTeamworkGraphContext", "addWorklogToJiraIssue",

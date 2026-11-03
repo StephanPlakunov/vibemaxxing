@@ -1739,7 +1739,7 @@ Google Drive and Claude Docs, write tools included, plus `chrome-devtools` (user
 `--tools ""` and `--setting-sources user` hide nothing of that, and a non-allowed call is stopped
 only by `--permission-prompts none` (documented; no denial observed yet). Connector names as
 listed: servers `claude_ai_Slack`, `claude_ai_Atlassian_Rovo`, `claude_ai_Microsoft_365`; Slack has no
-send-message or draft tool.
+send-message or draft tool (a later init showed it does: see below).
 
 Second init listing (one run): `--disallowedTools` = all 171 other tools (fixture
 `tests/fixtures/init_tools_2026-11-03.json`, 172 tools, 7 servers incl. `chrome-devtools`): exit 0,
@@ -1753,6 +1753,14 @@ deny = every offered tool but the allowed one (+ the write-tool names), verifica
 server is retried (4 tries, 3 s), never read as "no tools"; cached per argv hash and re-discovered
 every 600 s; a failed check clears the cache and refuses the call before the real run. Enable
 (`ENABLED = True`) only after one live init shows exactly the allowed tool.
+
+Final live init (Slack `connected` after one try, the 171 tools of the first listing denied): offered
+the allowed tool PLUS `slack_add_reaction`, `slack_create_canvas`, `slack_schedule_message`,
+`slack_send_message`, `slack_send_message_draft`, `slack_update_canvas`. The first init had listed 21
+Slack tools while the server said `connected`; this one revealed six more (27 in all). So a listing,
+even of a connected server, is partial and varies between runs: an init check can pass on a partial
+listing while the real run is offered more. **`ENABLED` stays False**; the Fence is necessary, not
+sufficient. The first list's "no send tool" was an artifact; `WRITE_TOOLS` and the fixture hold all 27.
 
 `vibe bridge serve` (`bridge.py`): newline-delimited JSON-RPC 2.0 on stdio (`initialize`,
 `ping`, `tools/list`, `tools/call`; notifications get no answer). `tools/list` is the allowlist

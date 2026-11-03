@@ -1,5 +1,5 @@
 {
- "recorded": "2026-11-03 init event, production bridge argv, main",
+ "recorded": "2026-11-03 init events, production bridge argv, main: first init (172 tools, Slack partial) + the six Slack tools only the final init (Slack connected, 171 denied) revealed",
  "tools": [
   "mcp__chrome-devtools__click",
   "mcp__chrome-devtools__close_page",
@@ -172,6 +172,12 @@
   "mcp__claude_ai_Slack__slack_search_public_and_private",
   "mcp__claude_ai_Slack__slack_search_users",
   "mcp__claude_ai_Slack__slack_update_list",
-  "mcp__claude_ai_Slack__slack_update_list_record"
+  "mcp__claude_ai_Slack__slack_update_list_record",
+  "mcp__claude_ai_Slack__slack_add_reaction",
+  "mcp__claude_ai_Slack__slack_create_canvas",
+  "mcp__claude_ai_Slack__slack_schedule_message",
+  "mcp__claude_ai_Slack__slack_send_message",
+  "mcp__claude_ai_Slack__slack_send_message_draft",
+  "mcp__claude_ai_Slack__slack_update_canvas"
  ]
 }

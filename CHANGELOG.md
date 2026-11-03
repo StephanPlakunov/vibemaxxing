@@ -17,9 +17,11 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
   user settings file with an MCP allow rule, and fails on a denial. It is disabled
   (`bridge.ENABLED = False`) until a live run shows a non-allowed tool denied or absent: an init
   listing showed the model is offered every connector tool. Its tool names and write-tool lists now
-  follow the live connectors (the Slack connector has no send or draft tool; the Atlassian server is
+  follow the live connectors (the Atlassian server is
   `Atlassian_Rovo`). A `Fence` check (built on fakes) denies every tool the
-  connectors offer except the allowed one and verifies the init event before each call.
+  connectors offer except the allowed one and verifies the init event before each call. It stays off:
+  a final live init still offered six more Slack tools (send, draft, schedule, reaction, canvases)
+  that an earlier listing of the connected server had not shown, so a listing proves nothing complete.
 
 ### Added
 
