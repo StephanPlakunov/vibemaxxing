@@ -207,6 +207,16 @@ def _mark_dead(root: Path, alias: str, credential: Credential) -> None:
         return  # an unwritable mark costs the next poll one more request, nothing else
 
 
+def _barred_as_owned(root: Path, alias: str) -> RefreshOutcome | None:
+    """The outcome that refuses a refresh of a lineage some config dir's Claude Code holds."""
+    try:
+        owned = store.read_account(root, alias).config_dir is not None
+    except VibeError:
+        # Unreadable: not knowing who holds the lineage is no licence to POST it.
+        return RefreshOutcome(None, "transient")
+    return RefreshOutcome(None, "owned") if owned else None
+
+
 def refresh(
     root: Path,
     alias: str,
@@ -223,13 +233,9 @@ def refresh(
     # with that dir hold its refresh token, and a refresh here would log every one of them
     # out ("OAuth token revoked"). The check is here, at the one place that POSTs, so no
     # caller (run, list, the tick, the TUI, a switch) can forget it.
-    try:
-        owned = store.read_account(root, alias).config_dir is not None
-    except VibeError:
-        # Unreadable: not knowing who holds the lineage is no licence to POST it.
-        return RefreshOutcome(None, "transient")
-    if owned:
-        return RefreshOutcome(None, "owned")
+    barred = _barred_as_owned(root, alias)
+    if barred is not None:
+        return barred
     # A stash means the last run was interrupted after the server rotated the
     # token. Posting the predecessor again would just earn an invalid_grant.
     successor = store.read_stash(root, alias)
@@ -254,6 +260,13 @@ def refresh(
         if store.read_active(root) == alias:
             store.release_refresh(root, alias)
             return RefreshOutcome(None, "active")
+        # And again under the claim: `vibe add --adopt-stored-login` hands this very refresh token
+        # to Claude Code under the same claim. A refresh that read the account before that and
+        # got here after it would post the token Claude Code now holds.
+        barred = _barred_as_owned(root, alias)
+        if barred is not None:
+            store.release_refresh(root, alias)
+            return barred
         claimed = True
         try:
             payload = _post_token(

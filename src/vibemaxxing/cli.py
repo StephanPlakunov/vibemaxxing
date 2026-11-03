@@ -20,6 +20,7 @@ from typing import Final
 
 from vibemaxxing import (
     __version__,
+    adopt,
     auto,
     bridge,
     childenv,
@@ -461,11 +462,46 @@ def _add_cursor(ctx: Context, alias: str | None, as_json: bool) -> int:
     return 0
 
 
+def _adopt_stored(ctx: Context, alias: str | None, given: Path | None, as_json: bool) -> int:
+    """Hand the login vibe stored for ``alias`` to Claude Code, in ``given``'s own login."""
+    if given is None or alias is None:
+        raise UsageError(
+            "--adopt-stored-login needs the account and the dir: "
+            "vibe add ALIAS --from-config-dir DIR --adopt-stored-login",
+            "vibe add --help",
+        )
+    directory = keychain.resolve_config_dir(given)
+    adopt.adopt_stored_login(
+        ctx.root,
+        alias,
+        directory,
+        dir_port=ctx.port_for(directory),
+        default_port=ctx.port,
+        client=ctx.client,
+        now_ms=int(ctx.now_s * 1000),
+    )
+    _emit(
+        _action("add", alias=alias, adopted=True, stored_login=True, config_dir=str(directory)),
+        as_json=as_json,
+        human=(
+            f'"{alias}" now lives in {directory}: its login is Claude Code\'s there, and vibe '
+            "never refreshes it again\n"
+            f"start it with: vibe run {alias} -- claude\n"
+        ),
+    )
+    return 0
+
+
 def cmd_add(args: argparse.Namespace, ctx: Context) -> int:
     if args.kind == cursor.KIND_CURSOR:
-        if args.from_config_dir is not None:
-            raise UsageError("--from-config-dir is for Claude accounts", "vibe add --help")
+        if args.from_config_dir is not None or args.adopt_stored_login:
+            raise UsageError(
+                "--from-config-dir and --adopt-stored-login are for Claude accounts",
+                "vibe add --help",
+            )
         return _add_cursor(ctx, args.alias, args.json)
+    if args.adopt_stored_login:
+        return _adopt_stored(ctx, args.alias, args.from_config_dir, args.json)
     if args.from_config_dir is not None:
         return _import(ctx, args.alias, args.from_config_dir, args.json)
     if args.alias is None:
@@ -1262,6 +1298,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="DIR",
         help="import the login Claude Code keeps for CLAUDE_CONFIG_DIR=DIR (no browser)",
+    )
+    add.add_argument(
+        "--adopt-stored-login",
+        action="store_true",
+        help=(
+            "with ALIAS and --from-config-dir DIR: write the login vibe has stored for ALIAS into "
+            "DIR's own Claude Code login (no browser); from then on only Claude Code refreshes it"
+        ),
     )
     add.add_argument(
         "--kind",

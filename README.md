@@ -68,6 +68,33 @@ apply there unless linked (`ln -s ~/.claude/CLAUDE.md ~/.claude-work/`); `vibe r
 An alias imported before this change becomes owned by running the same import again: the login is already stored, so
 vibe records the dir, drops its stash and stops refreshing.
 
+### Hand the stored login to a config dir (no browser, no mailbox)
+
+When the only working login of an account is the copy vibe stored (nobody can log in again), give that copy to the
+config dir instead of importing one from it:
+
+```
+vibe add extra --from-config-dir ~/.claude-extra --adopt-stored-login
+```
+
+It writes the stored login (access and refresh token, expiry, scopes, plan) into the dir's own Claude Code Keychain
+item, and the account (`oauthAccount`: uuid, email, organisation) into `<dir>/.claude.json`, keeping every other key
+there; then `vibe run extra -- claude` works as above. **vibe stops refreshing before Claude Code can**: the account
+is marked as the dir's first, under the refresh claim, and `oauth.refresh` checks that mark again under the same claim,
+so even a tick that read the account a moment earlier cannot post the token Claude Code now holds. An access token that
+has ended is refreshed once first (a dead login is found then, with nothing handed over); one that still works is
+handed over as it is. It refuses: the active account or the one Claude Code runs as, a dir that already has a login
+(never overwritten; take that one over with the plain import), a profile naming another account, a lapsed or rejected
+login, an account that lives in another dir. If the Keychain write fails and the item is not there, the mark is taken
+back (vibe may refresh again); if it may be there, the mark stays and running the command again finishes the job. No
+token is printed.
+
+**Polls and refreshes, until an account is adopted.** The tick, `vibe list`, the TUI and the web page refresh an account
+vibe owns only once its access token has really ended, never in the five minutes before (a session started with that
+token may still be using it); `vibe run`, whose child cannot renew a token, keeps the window. That is as seldom as a
+refresh can be: once per access token. It cannot keep a `CLAUDE_CODE_OAUTH_TOKEN` session alive past that token's
+end, which no refresh can; an adopted account can.
+
 ## Every day
 
 ```
