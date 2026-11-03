@@ -22,6 +22,7 @@ returns the tool's result.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -45,6 +46,11 @@ from vibemaxxing.redact import scrub
 # was nothing to deny). `vibe bridge serve` and `add-command` refuse while this is False. It is a
 # constant on purpose: no setting, flag or environment variable can switch it on.
 ENABLED: Final = False
+# Evidence so far: reads work; deny rules remove tools from what the model is offered (171 denied ->
+# the init event listed none, six servers connected); a full deny list + `Fence` below is built and
+# tested on fakes. Missing before the flip: ONE live init listing showing exactly the allowed tool
+# (the run that tried it caught the Slack connector still `pending`, so the allowed tool was not
+# yet listed either).
 DISABLED_REASON: Final = (
     "the bridge is disabled: a live check has not yet shown that a non-allowed tool of the same "
     "connector is denied (reading through the connector works). See docs/CONTRACT.md section 20."
@@ -236,7 +242,14 @@ def _tool_name(config: BridgeConfig, tool: BridgeTool, upstream: str) -> str:
     return config.claude_tool_pattern.format(server=tool.server.replace(" ", "_"), tool=upstream)
 
 
-def claude_argv(config: BridgeConfig, tool: BridgeTool, prompt: str) -> list[str]:
+def claude_argv(
+    config: BridgeConfig,
+    tool: BridgeTool,
+    prompt: str,
+    *,
+    deny_also: Sequence[str] = (),
+    include_writes: bool = True,
+) -> list[str]:
     """The nested Claude Code run: one tool allowed, three fences around it.
 
     1. ``--tools ""``: none of Claude Code's own tools.
@@ -253,11 +266,15 @@ def claude_argv(config: BridgeConfig, tool: BridgeTool, prompt: str) -> list[str
     ``disableAllHooks`` asks for no hooks (not verified to take effect).
     """
     allowed_upstream = upstream_name(config, tool)
+    allowed_name = _tool_name(config, tool, allowed_upstream)
     denied = [
         _tool_name(config, tool, write)
         for write in WRITE_TOOLS.get(tool.server, ())
+        if include_writes
         if write != allowed_upstream
     ]
+    # Every other tool the connectors offered, found by the Fence's discovery run.
+    denied += [name for name in deny_also if name != allowed_name and name not in denied]
     return [
         "claude",
         "-p",
@@ -278,8 +295,7 @@ def claude_argv(config: BridgeConfig, tool: BridgeTool, prompt: str) -> list[str
         "none",
         "--allowedTools",
         _tool_name(config, tool, allowed_upstream),
-        "--disallowedTools",
-        ",".join(denied),
+        *(["--disallowedTools", ",".join(denied)] if denied else []),
         "--no-session-persistence",
     ]
 
@@ -341,6 +357,156 @@ def settings_problem(config_dir: Path) -> str | None:
             "the one allowed tool; remove it or run the call by hand"
         )
     return None
+
+
+# --- the fence check: what the model is OFFERED -----------------------------------------------
+#
+# Measured live (3 Nov 2026): a deny rule removes a tool from what the model is offered (171 tools
+# denied -> the init event listed none, with six servers connected); without it the model is offered
+# every tool of every connector, write tools included. So the strongest fence is not a short list
+# of guessed write tools but "deny everything the connectors list except the one allowed tool", and
+# a check that the init event then offers exactly that tool.
+
+PROBE_PROMPT: Final = "Reply with the single word ok. Do not call any tool."
+RECHECK_S: Final = 600.0
+PENDING_RETRIES: Final = 4
+PENDING_WAIT_S: Final = 3.0
+MODES_OK: Final = ("default", "manual")
+
+
+@dataclass(frozen=True)
+class InitListing:
+    tools: tuple[str, ...]
+    servers: Mapping[str, str]  # server name -> status
+    permission_mode: str | None
+
+    @property
+    def settled(self) -> bool:
+        """Every server has finished connecting (a pending one may still add tools)."""
+        return all(status != "pending" for status in self.servers.values())
+
+
+def init_argv(argv: Sequence[str]) -> list[str]:
+    """``argv`` as a probe: same fences, the probe prompt, stream-json so the init event shows."""
+    out = list(argv)
+    out[out.index("-p") + 1] = PROBE_PROMPT
+    out[out.index("--output-format") + 1] = "stream-json"
+    out.append("--verbose")
+    return out
+
+
+def parse_init(stdout: str) -> InitListing | None:
+    """The `system/init` event of a stream-json run, or None when there is none."""
+    for line in stdout.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            event: object = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            tools = event.get("tools")
+            servers = event.get("mcp_servers")
+            mode = event.get("permissionMode")
+            return InitListing(
+                tuple(str(t) for t in tools) if isinstance(tools, list) else (),
+                {
+                    str(m.get("name")): str(m.get("status"))
+                    for m in (servers if isinstance(servers, list) else [])
+                    if isinstance(m, dict)
+                },
+                mode if isinstance(mode, str) else None,
+            )
+    return None
+
+
+def fence_problem(listing: InitListing, allowed: str) -> str | None:
+    """Why this init listing is not the fence we want, or None when it offers exactly ``allowed``.
+
+    Names only, never content. Anything else offered (another connector's tool, a built-in, a user
+    MCP server's tool) fails; so does a mode that would answer prompts or skip them.
+    """
+    others = sorted(name for name in listing.tools if name != allowed)
+    if others:
+        shown = ", ".join(others[:3]) + (f" and {len(others) - 3} more" if len(others) > 3 else "")
+        return f"{len(others)} tool(s) other than the allowed one are offered: {shown}"
+    if allowed not in listing.tools:
+        return "the allowed tool is not offered (its connector is missing, or not yet connected)"
+    if listing.permission_mode not in MODES_OK:
+        return f"the run reports permission mode {listing.permission_mode!r}"
+    return None
+
+
+Probe = Callable[[list[str]], str]
+
+
+class Fence:
+    """Finds what the connectors offer, denies all of it but the one tool, and checks the result.
+
+    ``run`` (given per call) starts a probe (argv in, stdout out) and raises BridgeError on failure.
+    Discovery (the
+    plain argv) is cached for ``recheck_s``, so a connector that gains tools is noticed within that
+    time; verification (the argv with the full deny list) is cached per argv hash and the connector
+    list it was derived from. A server still ``pending`` is retried, never read as "no tools".
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.time,
+        sleep: Callable[[float], None] = time.sleep,
+        recheck_s: float = RECHECK_S,
+    ) -> None:
+        self._clock, self._sleep, self._recheck_s = clock, sleep, recheck_s
+        self._found: tuple[float, tuple[str, ...]] | None = None
+        self._verified: dict[str, float] = {}
+
+    def _listing(self, argv: list[str], run: Probe) -> InitListing:
+        for attempt in range(PENDING_RETRIES):
+            listing = parse_init(run(init_argv(argv)))
+            if listing is None:
+                raise BridgeError("the probe run printed no init event")
+            if listing.settled:
+                return listing
+            if attempt + 1 < PENDING_RETRIES:
+                self._sleep(PENDING_WAIT_S)
+        raise BridgeError("a connector stayed pending: the tool list is not known yet")
+
+    def _offered(
+        self, config: BridgeConfig, tool: BridgeTool, prompt: str, run: Probe
+    ) -> tuple[str, ...]:
+        now = self._clock()
+        if self._found is None or now - self._found[0] >= self._recheck_s:
+            # Discovery must see everything, so no deny list at all.
+            plain = claude_argv(config, tool, prompt, include_writes=False)
+            self._found = (now, self._listing(plain, run).tools)
+        return self._found[1]
+
+    def deny_list(
+        self, config: BridgeConfig, tool: BridgeTool, prompt: str, run: Probe
+    ) -> list[str]:
+        """The ``--disallowedTools`` extras for this call; BridgeError unless the fence holds."""
+        allowed = _tool_name(config, tool, upstream_name(config, tool))
+        offered = self._offered(config, tool, prompt, run)
+        if allowed not in offered:
+            self._found = None
+            raise BridgeError(
+                "the allowed tool is not offered by the connectors (is it connected on main?)"
+            )
+        extra = [name for name in offered if name != allowed]
+        argv = claude_argv(config, tool, prompt, deny_also=extra)
+        key = hashlib.sha256(json.dumps([a for a in argv if a != prompt]).encode()).hexdigest()
+        stamp = self._verified.get(key)
+        if stamp is not None and self._clock() - stamp < self._recheck_s:
+            return extra
+        problem = fence_problem(self._listing(argv, run), allowed)
+        if problem:
+            self._found = None  # the connector list moved: discover again next time
+            raise BridgeError(f"fence check failed: {problem}")
+        self._verified[key] = self._clock()
+        return extra
 
 
 def extract_result(stdout: str) -> str:
@@ -547,9 +713,10 @@ def append_log(root: Path, entry: Mapping[str, object]) -> None:
         return
 
 
-def run_headless(
+def run_process(
     argv: Sequence[str], env: Mapping[str, str] | None, timeout_s: float, cwd: Path | None = None
 ) -> str:
+    """Run one headless process and return its stdout; BridgeError on a timeout or a bad exit."""
     try:
         done = subprocess.run(
             list(argv),
@@ -568,10 +735,17 @@ def run_headless(
         raise BridgeError(f"could not start {argv[0]}: {exc.__class__.__name__}") from None
     if done.returncode != 0:
         raise BridgeError(f"{argv[0]} exited with {done.returncode}")
-    problem = verdict(done.stdout)
+    return done.stdout
+
+
+def run_headless(
+    argv: Sequence[str], env: Mapping[str, str] | None, timeout_s: float, cwd: Path | None = None
+) -> str:
+    stdout = run_process(argv, env, timeout_s, cwd)
+    problem = verdict(stdout)
     if problem:
         raise BridgeError(f"{argv[0]}: {problem}")
-    text = extract_result(done.stdout)
+    text = extract_result(stdout)
     if not text:
         raise BridgeError(f"{argv[0]} returned nothing")
     return text

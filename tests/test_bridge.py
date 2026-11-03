@@ -733,3 +733,264 @@ def test_the_bridge_is_disabled_until_a_live_denial_has_been_shown(
     err = capsys.readouterr().err
     assert err.count("the bridge is disabled") == 2 and "non-allowed tool" in err
     assert "claude mcp add" not in err  # nothing to register
+
+
+# --- the fence check: the model is offered exactly the one allowed tool ---------------------------
+
+FIXTURE = json.loads(
+    (Path(__file__).with_name("fixtures") / "init_tools_2026-11-03.json").read_text()
+)["tools"]
+ALLOWED = "mcp__claude_ai_Slack__slack_read_user_profile"
+
+
+def init_text(tools: list[str], *, pending: bool = False, mode: str = "default") -> str:
+    servers = sorted({t.split("__")[1] for t in FIXTURE})
+    return json.dumps(
+        {
+            "type": "system",
+            "subtype": "init",
+            "permissionMode": mode,
+            "tools": tools,
+            "mcp_servers": [
+                {
+                    "name": s,
+                    "status": "pending" if pending and s == "claude_ai_Slack" else "connected",
+                }
+                for s in servers
+            ],
+        }
+    )
+
+
+class Probes:
+    """A fake probe runner: offers the recorded connectors' tools minus --disallowedTools."""
+
+    def __init__(self, *, offered: list[str] | None = None, pending: int = 0) -> None:
+        self.offered = list(FIXTURE if offered is None else offered)
+        self.pending = pending
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str]) -> str:
+        self.calls.append(argv)
+        assert "stream-json" in argv and "--verbose" in argv
+        assert argv[argv.index("-p") + 1] == bridge.PROBE_PROMPT  # no real prompt in a probe
+        denied = (
+            set(argv[argv.index("--disallowedTools") + 1].split(","))
+            if "--disallowedTools" in argv
+            else set()
+        )
+        tools = [t for t in self.offered if t not in denied]
+        if self.pending > 0:
+            self.pending -= 1
+            return init_text([t for t in tools if "claude_ai_Slack" not in t], pending=True)
+        return init_text(tools)
+
+
+def fence(**kw: object) -> tuple[bridge.Fence, list[float], list[float]]:
+    now = [1_000.0]
+    sleeps: list[float] = []
+    f = bridge.Fence(clock=lambda: now[0], sleep=sleeps.append, **kw)  # type: ignore[arg-type]
+    return f, now, sleeps
+
+
+TOOL = bridge.BY_NAME["slack_read_profile"]
+
+
+def test_the_recorded_listing_is_the_real_one() -> None:
+    assert len(FIXTURE) == 172 and ALLOWED in FIXTURE
+    assert any(t.startswith("mcp__chrome-devtools__") for t in FIXTURE)
+    assert any("send_mail" in t for t in FIXTURE)  # write tools were offered
+
+
+def test_the_init_event_is_parsed_and_judged() -> None:
+    listing = bridge.parse_init("noise\n" + init_text([ALLOWED]) + "\n" + '{"type":"result"}')
+    assert listing is not None and listing.tools == (ALLOWED,) and listing.settled
+    assert bridge.fence_problem(listing, ALLOWED) is None
+    assert bridge.parse_init("no events here") is None and bridge.parse_init("{broken") is None
+
+    other = bridge.parse_init(
+        init_text([ALLOWED, "mcp__x__a", "mcp__x__b", "mcp__x__c", "mcp__x__d"])
+    )
+    assert other is not None
+    problem = bridge.fence_problem(other, ALLOWED)
+    assert (
+        problem is not None
+        and "4 tool(s) other than the allowed one" in problem
+        and "and 1 more" in problem
+    )
+    empty = bridge.parse_init(init_text([]))
+    assert empty is not None and "allowed tool is not offered" in str(
+        bridge.fence_problem(empty, ALLOWED)
+    )
+    odd = bridge.parse_init(init_text([ALLOWED], mode="bypassPermissions"))
+    assert odd is not None and "bypassPermissions" in str(bridge.fence_problem(odd, ALLOWED))
+    builtin = bridge.parse_init(init_text([ALLOWED, "Bash"]))
+    assert builtin is not None and bridge.fence_problem(builtin, ALLOWED) is not None
+    pending = bridge.parse_init(init_text([], pending=True))
+    assert pending is not None and not pending.settled
+
+
+def test_discovery_then_a_full_deny_list_then_a_verification() -> None:
+    probes = Probes()
+    f, _, _ = fence()
+
+    extra = f.deny_list(BridgeConfig(), TOOL, "real prompt", probes)
+
+    assert sorted(extra) == sorted(t for t in FIXTURE if t != ALLOWED)  # all servers incl. chrome
+    assert len(probes.calls) == 2
+    discovery, verification = probes.calls
+    assert "--disallowedTools" not in discovery  # discovery sees everything
+    denied = verification[verification.index("--disallowedTools") + 1].split(",")
+    assert ALLOWED not in denied and "mcp__chrome-devtools__click" in denied
+    assert "mcp__claude_ai_Microsoft_365__outlook_send_mail" in denied
+    for argv in probes.calls:  # the other fences are on in a probe too
+        assert argv[argv.index("--permission-prompts") + 1] == "none"
+        assert argv[argv.index("--tools") + 1] == "" and "--setting-sources" in argv
+
+
+def test_the_result_is_cached_per_argv_and_rechecked_after_ten_minutes() -> None:
+    probes = Probes()
+    f, now, _ = fence()
+    f.deny_list(BridgeConfig(), TOOL, "p", probes)
+
+    f.deny_list(BridgeConfig(), TOOL, "another prompt", probes)  # same argv hash: no probe
+    assert len(probes.calls) == 2
+
+    other = bridge.BY_NAME["slack_search"]  # another tool: discovery reused, one verification
+    f.deny_list(BridgeConfig(), other, "p", probes)
+    assert len(probes.calls) == 3
+
+    now[0] += bridge.RECHECK_S + 1  # the connector list may have moved: both again
+    f.deny_list(BridgeConfig(), TOOL, "p", probes)
+    assert len(probes.calls) == 5
+
+
+def test_a_connector_that_gains_a_tool_is_caught_and_denied_after_the_recheck() -> None:
+    probes = Probes()
+    f, now, _ = fence()
+    f.deny_list(BridgeConfig(), TOOL, "p", probes)
+
+    probes.offered.append("mcp__claude_ai_Slack__slack_new_writer")  # appears later
+    now[0] += bridge.RECHECK_S + 1
+    extra = f.deny_list(BridgeConfig(), TOOL, "p", probes)
+
+    assert "mcp__claude_ai_Slack__slack_new_writer" in extra  # rediscovered, and denied
+
+
+def test_something_that_cannot_be_denied_fails_the_check_and_forces_a_rediscovery() -> None:
+    class Stubborn(Probes):
+        def __call__(self, argv: list[str]) -> str:
+            self.calls.append(argv)
+            denied = (
+                set(argv[argv.index("--disallowedTools") + 1].split(","))
+                if "--disallowedTools" in argv
+                else set()
+            )
+            return init_text([t for t in FIXTURE if t not in denied] and [ALLOWED, "Bash"])
+
+    probes = Stubborn()
+    f, _, _ = fence()
+
+    with pytest.raises(BridgeError, match="fence check failed: 1 tool"):
+        f.deny_list(BridgeConfig(), TOOL, "p", probes)
+    before = len(probes.calls)
+    with pytest.raises(BridgeError):
+        f.deny_list(BridgeConfig(), TOOL, "p", probes)
+    assert len(probes.calls) >= before + 2  # nothing was cached: discovery and verification again
+
+
+def test_the_allowed_tool_missing_from_the_connectors_is_refused() -> None:
+    probes = Probes(offered=[t for t in FIXTURE if t != ALLOWED])
+    f, _, _ = fence()
+
+    with pytest.raises(BridgeError, match="allowed tool is not offered"):
+        f.deny_list(BridgeConfig(), TOOL, "p", probes)
+
+
+def test_a_pending_connector_is_waited_for_never_read_as_no_tools() -> None:
+    probes = Probes(pending=2)
+    f, _, sleeps = fence()
+
+    extra = f.deny_list(BridgeConfig(), TOOL, "p", probes)
+
+    assert ALLOWED not in extra and len(sleeps) == 2  # slept, retried, then found Slack connected
+    stuck = Probes(pending=99)
+    g, _, naps = fence()
+    with pytest.raises(BridgeError, match="stayed pending"):
+        g.deny_list(BridgeConfig(), TOOL, "p", stuck)
+    assert len(stuck.calls) == bridge.PENDING_RETRIES and len(naps) == bridge.PENDING_RETRIES - 1
+
+
+def test_a_probe_without_an_init_event_is_a_failure() -> None:
+    f, _, _ = fence()
+
+    with pytest.raises(BridgeError, match="printed no init event"):
+        f.deny_list(BridgeConfig(), TOOL, "p", lambda argv: "nothing useful")
+
+
+# --- through the bridge, on the fake claude ------------------------------------------------------
+
+
+def test_a_real_call_runs_the_probes_first_then_the_call_with_everything_else_denied(
+    world: World,
+) -> None:
+    fresh_claude_account(world, "main", weekly=1, active=True)
+    server = bridge_for(world)
+
+    text, failed = server.call("slack_read_profile", {"user": "U1"})
+
+    assert (text, failed) == ('{"from": "claude"}', False)
+    assert len(world.claude_probes()) == 2
+    (call,) = world.claude_calls(full=True)
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    denied = argv[argv.index("--disallowedTools") + 1].split(",")
+    assert sorted(denied) == sorted(t for t in FIXTURE if t != ALLOWED)
+    assert argv[argv.index("--allowedTools") + 1] == ALLOWED
+    server.call("slack_read_profile", {"user": "U2"})
+    assert len(world.claude_probes()) == 2  # cached: no new probe
+
+
+def test_a_fence_that_does_not_hold_stops_the_call_before_it_runs(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh_claude_account(world, "main", weekly=1, active=True)
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_EXTRA_TOOLS", "mcp__user_server__do_anything"
+    )  # cannot be denied
+
+    text, failed = bridge_for(world).call("slack_read_profile", {"user": "U1"})
+
+    assert failed and "fence check failed" in text and "do_anything" in text
+    assert world.claude_calls() == []  # the real call never started
+    entries = [json.loads(x) for x in bridge.log_path(world.root).read_text().splitlines()]
+    assert entries[-1]["outcome"] == "failed"
+
+
+def test_an_unexpected_permission_mode_stops_the_call(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh_claude_account(world, "main", weekly=1, active=True)
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "bypassPermissions")
+
+    text, failed = bridge_for(world).call("slack_read_profile", {"user": "U1"})
+
+    assert failed and "bypassPermissions" in text and world.claude_calls() == []
+
+
+def test_a_connector_still_pending_is_retried_through_the_bridge(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh_claude_account(world, "main", weekly=1, active=True)
+    monkeypatch.setenv("FAKE_CLAUDE_PENDING", "1")
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    _, failed = bridge_for(world).call("slack_read_profile", {"user": "U1"})
+
+    assert failed is False and len(world.claude_probes()) >= 3  # one was pending, then settled
+
+
+def test_the_shipped_bridge_is_still_disabled_until_a_live_init_shows_the_allowed_tool_alone() -> (
+    None
+):
+    assert bridge.ENABLED is False

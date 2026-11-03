@@ -672,6 +672,7 @@ def bridge_execute(
     svc: Services, config: bridge.BridgeConfig, token_env: Callable[[str], dict[str, str]]
 ) -> bridge.Execute:
     """One headless Claude Code run on the chosen account, with only the one tool allowed."""
+    fence = bridge.Fence()
 
     def execute(
         chosen: route.Route, tool: bridge.BridgeTool, arguments: Mapping[str, object]
@@ -695,11 +696,19 @@ def bridge_execute(
                 lent = token_env(chosen.alias)
             # Strict: the nested run holds none of the caller's secrets either.
             env = childenv.build(svc.environ, strict=True, set_vars=lent).env
+            workspace = bridge_workspace(svc.root)
+
+            def probe(argv: list[str]) -> str:
+                return bridge.run_process(argv, env, config.timeout_s, workspace)
+
+            # What the connectors offer is found, all of it but this one tool is denied, and the
+            # result is checked before the real call (cached; rechecked every ten minutes).
+            deny_also = fence.deny_list(config, tool, prompt, probe)
             return bridge.run_headless(
-                bridge.claude_argv(config, tool, prompt),
+                bridge.claude_argv(config, tool, prompt, deny_also=deny_also),
                 env,
                 config.timeout_s,
-                bridge_workspace(svc.root),
+                workspace,
             )
         except VibeError as exc:
             raise bridge.BridgeError(exc.message) from None

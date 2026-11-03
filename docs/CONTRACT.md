@@ -1739,10 +1739,20 @@ Google Drive and Claude Docs, write tools included, plus `chrome-devtools` (user
 `--tools ""` and `--setting-sources user` hide nothing of that, and a non-allowed call is stopped
 only by `--permission-prompts none` (documented; no denial observed yet). Connector names as
 listed: servers `claude_ai_Slack`, `claude_ai_Atlassian_Rovo`, `claude_ai_Microsoft_365`; Slack has no
-send-message or draft tool. Enable only after a run shows either `permission_denials >= 1` for a
-non-allowed read, or an init listing that holds only the allowed tool (planned: `--disallowedTools`
-= every tool of a discovery init minus the allowed one, then a verification init, cached per argv
-hash, refusing on any other tool).
+send-message or draft tool.
+
+Second init listing (one run): `--disallowedTools` = all 171 other tools (fixture
+`tests/fixtures/init_tools_2026-11-03.json`, 172 tools, 7 servers incl. `chrome-devtools`): exit 0,
+init lists **0 tools** with six servers `connected` and `claude.ai Slack` `pending`: deny rules remove
+tools from what the model is offered; the allowed tool was absent only because its connector had
+not connected when the init fired. `--strict-mcp-config` ("only use MCP servers from --mcp-config")
+would also drop the claude.ai connectors (Claude Code docs), so it is not used.
+`bridge.Fence` (built, tested on fakes, not yet live-verified): discovery probe (no deny list),
+deny = every offered tool but the allowed one (+ the write-tool names), verification probe whose
+`system/init` must offer exactly the allowed tool in permission mode default/manual; a `pending`
+server is retried (4 tries, 3 s), never read as "no tools"; cached per argv hash and re-discovered
+every 600 s; a failed check clears the cache and refuses the call before the real run. Enable
+(`ENABLED = True`) only after one live init shows exactly the allowed tool.
 
 `vibe bridge serve` (`bridge.py`): newline-delimited JSON-RPC 2.0 on stdio (`initialize`,
 `ping`, `tools/list`, `tools/call`; notifications get no answer). `tools/list` is the allowlist

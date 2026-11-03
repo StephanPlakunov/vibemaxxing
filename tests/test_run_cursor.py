@@ -105,16 +105,22 @@ class World:
         self.cursor_client.queue_json(200, usage_answer(**kw))
         self.cursor_client.queue_json(200, {"hardLimit": 250})
 
-    def claude_calls(self, *, full: bool = False) -> list[dict[str, object]]:
+    def _all_claude_calls(self) -> list[dict[str, object]]:
         if not self.claude_record.exists():
             return []
-        calls = [json.loads(line) for line in self.claude_record.read_text().splitlines()]
+        return [json.loads(line) for line in self.claude_record.read_text().splitlines()]
+
+    def claude_calls(self, *, full: bool = False) -> list[dict[str, object]]:
+        """The real runs of the fake claude (the bridge's stream-json probes are not among them)."""
+        calls = [c for c in self._all_claude_calls() if "stream-json" not in c["argv"]]  # type: ignore[operator]
         if not full:
             for call in calls:
-                call.pop("has_config_dir", None)
-                call.pop("cwd", None)
-                call.pop("env", None)
+                for key in ("has_config_dir", "cwd", "env"):
+                    call.pop(key, None)
         return calls
+
+    def claude_probes(self) -> list[dict[str, object]]:
+        return [c for c in self._all_claude_calls() if "stream-json" in c["argv"]]  # type: ignore[operator]
 
 
 @pytest.fixture

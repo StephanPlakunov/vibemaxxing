@@ -18,7 +18,8 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
   (`bridge.ENABLED = False`) until a live run shows a non-allowed tool denied or absent: an init
   listing showed the model is offered every connector tool. Its tool names and write-tool lists now
   follow the live connectors (the Slack connector has no send or draft tool; the Atlassian server is
-  `Atlassian_Rovo`).
+  `Atlassian_Rovo`). A `Fence` check (built on fakes) denies every tool the
+  connectors offer except the allowed one and verifies the init event before each call.
 
 ### Added
 

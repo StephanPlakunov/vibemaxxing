@@ -406,9 +406,18 @@ argv shows why this is not a stronger fence: **the model is offered every tool o
 `chrome-devtools` server), write tools included (Jira create/edit/transition, Outlook send/delete,
 Teams send, Slack list and conversation writers). `--tools ""` hides only built-in tools and
 `--setting-sources user` does not hide user-scope MCP servers. What stops a non-allowed call is
-`--permission-prompts none` alone, which is documented but unproven live. Next step: a deny list of
-every tool in that init except the allowed one, then a second init listing that must show only the
-allowed tool.
+`--permission-prompts none` alone, which is documented but unproven live. A second init listing,
+with a deny list of every tool in the first except the allowed one, offered **no tool at all** (six
+servers connected, 171 tools denied): deny rules do remove tools from what the model is offered. The
+allowed Slack tool was missing too because that connector was still `pending` when the init fired.
+So the bridge now carries a **fence check** (`bridge.Fence`): before a call it asks the connectors
+what they offer (a probe run, retried while a server is pending), denies all of it except the one
+allowed tool, and runs a second probe whose init event must offer exactly that tool in permission
+mode `default`/`manual`; anything else refuses the call. Cached per argv, re-checked every ten
+minutes, so a connector that gains a tool is noticed. It is built and tested on fakes; the bridge
+stays disabled until one live init shows the allowed tool alone.
+`--strict-mcp-config` is not an option: it ignores all other MCP configuration and, per Claude Code's
+docs, also suppresses the claude.ai connectors, i.e. the allowed tool.
 
 A session on extra has no Slack, Atlassian or Microsoft 365, and a running Claude Code session
 cannot switch accounts mid-way (it keeps the login and connector list it started with, and
