@@ -1,1000 +1,1210 @@
-"""vibe-bridge: the allowlist, the refusals, the routing of a call, the cost guards, the log.
+# ruff: noqa: E501
+"""vibe-bridge v2: no model in the path. The allowlist, the forwarding, the OAuth login, the token.
 
-Fakes only: a fake `claude` and `cursor-agent` on a private PATH, a scratch HOME, no real account.
-The last test runs the server as a real process over stdio, the way Claude Code on extra starts it.
+Everything runs against `FakeUpstream` (an HttpClient) and `FakeSecrets`: no socket to a vendor, no
+Keychain, no login. The one real socket is the loopback listener for the browser's redirect.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
-from tests.cursor_fakes import StubToken
-from tests.test_run_cursor import NOW_S, World
-from vibemaxxing import bridge, cli, launch, route
-from vibemaxxing.bridge import Bridge, BridgeConfig, BridgeError, parse_config
-from vibemaxxing.errors import NetworkError, UsageError
+from tests.fake_upstream import FakeReceiver, FakeSecrets, FakeUpstream, text_result
+from vibemaxxing import bridge, cli, mcp_oauth, route
+from vibemaxxing.bridge import ATLASSIAN, BY_NAME, SLACK, TOOLS, Bridge, BridgeConfig, parse_config
+from vibemaxxing.errors import NeedsLoginError, UsageError
+from vibemaxxing.httpclient import HTTPError, HttpResponse, UrllibClient
+from vibemaxxing.mcp_client import McpClient, McpError
+from vibemaxxing.mcp_oauth import Tokens
+from vibemaxxing.redact import Secret
 
 REPO = Path(__file__).resolve().parent.parent
+NOW = 1_800_000_000.0
+EMPTY_SCHEMA: dict[str, object] = {"type": "object", "properties": {}}
 
 
-def tool_call(name: str, ident: int = 7, **arguments: object) -> dict[str, object]:
-    return {
-        "jsonrpc": "2.0",
-        "id": ident,
-        "method": "tools/call",
-        "params": {"name": name, "arguments": arguments},
-    }
+def echo(arguments: Mapping[str, object]) -> dict[str, object]:
+    return text_result(json.dumps({"ok": True, "got": dict(arguments)}))
 
 
-class Recorder:
-    def __init__(self) -> None:
-        self.picked: list[str] = []
-        self.executed: list[tuple[str, str]] = []
+def upstream_with(upstream: mcp_oauth.Upstream, names: list[str], **kw: object) -> FakeUpstream:
+    fake = FakeUpstream(upstream, **kw)  # type: ignore[arg-type]
+    for name in names:
+        fake.tools[name] = (
+            f"{name} does a thing",
+            {"type": "object", "properties": {"q": {"type": "string"}}},
+            echo,
+        )
+    return fake
+
+
+def seed(
+    root: Path, secrets: FakeSecrets, fake: FakeUpstream, *, expires_at: float | None = NOW + 3600
+) -> None:
+    mcp_oauth.save(
+        root,
+        secrets,
+        fake.upstream,
+        Tokens(
+            access=Secret(fake.access),
+            refresh=Secret(fake.refresh),
+            expires_at=expires_at,
+            client_id="client-1",
+            client_secret=None,
+            scope="granted",
+            token_endpoint=f"{fake.issuer_url}/token",
+            resource=fake.upstream.mcp_url,
+        ),
+    )
+    secrets.log.clear()
+
+
+class Rig:
+    """A bridge wired to fakes: one clock, one secret store, one or two fake upstreams."""
+
+    def __init__(
+        self, tmp_path: Path, *fakes: FakeUpstream, config: BridgeConfig | None = None
+    ) -> None:
+        self.root = tmp_path / ".vibemaxxing"
+        self.secrets = FakeSecrets()
+        self.now = NOW
+        self.fakes = {fake.upstream.id: fake for fake in fakes}
+        self.config = config or BridgeConfig(timeout_s=5.0)
         self.entries: list[Mapping[str, object]] = []
-        self.now = 1_000_000.0
+        for fake in fakes:
+            seed(self.root, self.secrets, fake)
 
-    def bridge(self, *, config: BridgeConfig | None = None, account: str = "main") -> Bridge:
-        def pick(connector: str) -> route.Route:
-            self.picked.append(connector)
-            return route.Route(account, "claude", "test")
+    def client(self) -> _Router:
+        return _Router(self.fakes)
 
-        def execute(
-            chosen: route.Route, tool: bridge.BridgeTool, args: Mapping[str, object]
-        ) -> str:
-            self.executed.append((chosen.alias, tool.name))
-            return '{"ok": true}'
+    def upstreams(self) -> bridge.Upstreams:
+        return bridge.Upstreams(
+            client=self.client(),
+            secrets=self.secrets,
+            root=self.root,
+            config=self.config,
+            clock=lambda: self.now,
+        )
 
+    def bridge(self) -> Bridge:
+        ups = self.upstreams()
         return Bridge(
-            config or BridgeConfig(), pick, execute, self.entries.append, clock=lambda: self.now
+            self.config, ups.forward, ups.catalog, self.entries.append, clock=lambda: self.now
         )
 
 
-# --- the protocol --------------------------------------------------------------------------
+class _Router:
+    """One HttpClient in front of several fake upstreams, by host."""
+
+    def __init__(self, fakes: Mapping[str, FakeUpstream]) -> None:
+        self.fakes = fakes
+
+    def request(self, method: str, url: str, **kw: object) -> HttpResponse:
+        host = urllib.parse.urlsplit(url).hostname
+        for fake in self.fakes.values():
+            if host in fake.upstream.hosts:
+                return fake.request(method, url, **kw)  # type: ignore[arg-type]
+        raise AssertionError(f"a request went to a host nobody fakes: {url}")
 
 
-def test_initialize_list_and_ping() -> None:
-    rec = Recorder().bridge()
-
-    init = rec.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                       "params": {"protocolVersion": "2025-03-26"}})  # fmt: skip
-    assert init is not None
-    result = init["result"]
-    assert isinstance(result, dict)
-    assert result["protocolVersion"] == "2025-03-26"
-    assert result["serverInfo"] == {"name": "vibe-bridge", "version": "0.1"}
-    assert rec.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
-    assert rec.handle({"jsonrpc": "2.0", "id": 2, "method": "ping"}) == {
-        "jsonrpc": "2.0",
-        "id": 2,
-        "result": {},
-    }
-    error = rec.handle({"jsonrpc": "2.0", "id": 3, "method": "resources/list"})
-    assert error is not None and error["error"]["code"] == -32601  # type: ignore[index]
-    bad = rec.handle([1])
-    assert bad is not None and bad["error"]["code"] == -32600  # type: ignore[index]
+@pytest.fixture
+def slack() -> FakeUpstream:
+    return upstream_with(
+        SLACK,
+        ["slack_read_user_profile", "slack_read_channel", "slack_search_public", "slack_send_message_draft",
+         "slack_send_message", "slack_schedule_message", "slack_add_reaction", "slack_create_canvas"],
+    )  # fmt: skip
 
 
-def test_the_listed_tools_are_reads_and_drafts_only() -> None:
-    listing = Recorder().bridge().handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    assert listing is not None
-    tools = listing["result"]["tools"]  # type: ignore[index]
-    names = {tool["name"] for tool in tools}
+@pytest.fixture
+def atlassian() -> FakeUpstream:
+    return upstream_with(
+        ATLASSIAN,
+        [
+            "getJiraIssue",
+            "searchJiraIssuesUsingJql",
+            "createJiraIssue",
+            "executeWrite",
+            "deleteJiraIssue",
+        ],
+    )
 
-    assert names == {
-        "slack_read_channel", "slack_read_thread", "slack_search", "slack_read_profile",
-        "slack_create_draft", "atlassian_get_issue", "atlassian_search_jql",
-        "atlassian_get_page", "m365_search_mail", "m365_read_mail", "m365_search_chat",
-        "m365_read_chat", "outlook_create_draft",
-    }  # fmt: skip
-    for name in names:
-        assert not any(word in name for word in ("send", "post", "delete", "react", "transition"))
-    for tool in tools:
-        assert tool["inputSchema"]["additionalProperties"] is False
-        assert ("Draft only" in tool["description"]) == tool["name"].endswith("_draft")
+
+def call(rig: Rig, name: str, **arguments: object) -> tuple[str, bool]:
+    return rig.bridge().call(name, arguments)
+
+
+# --- the allowlist ---------------------------------------------------------------------------------
+
+READ_NAME = re.compile(
+    r"^(slack_(read|search|list|get)_|get[A-Z]|list[A-Z]|search([A-Z]|$)|lookup[A-Z]|atlassianUserInfo$)"
+)
+WRITE_WORDS = re.compile(
+    r"(send|schedule|post|create|update|delete|remove|add[A-Z_]|edit|upload|write|manage|execute|"
+    r"move|archive|share|copy|merge|complete|destructive)",
+    re.IGNORECASE,
+)
+
+
+def test_the_allowlist_is_reads_and_one_draft_and_nothing_that_writes() -> None:
+    names = [tool.name for tool in TOOLS]
+    assert len(names) == len(set(names))
+    drafts = [tool for tool in TOOLS if tool.draft]
+    assert [d.upstream_tool for d in drafts] == ["slack_send_message_draft"]
+    for tool in TOOLS:
+        if tool.draft:
+            continue
+        assert READ_NAME.match(tool.upstream_tool), tool.upstream_tool  # a read verb first
+        assert not WRITE_WORDS.search(tool.upstream_tool), tool.upstream_tool
+        assert not WRITE_WORDS.search(tool.name), tool.name
+    assert {tool.upstream for tool in TOOLS} == {"slack", "atlassian"}  # no Microsoft 365
 
 
 @pytest.mark.parametrize(
     "name",
     [
-        "slack_send_message",
-        "slack_post_message",
-        "slack_add_reaction",
-        "slack_delete_message",
-        "atlassian_create_issue",
-        "atlassian_transition_issue",
-        "atlassian_add_comment",
-        "outlook_send_mail",
-        "m365_delete_mail",
-        "",
-        "../../etc/passwd",
+        "slack_send_message", "slack_schedule_message", "slack_add_reaction", "slack_create_canvas",
+        "slack_update_canvas", "slack_create_conversation", "atlassian_createJiraIssue",
+        "createJiraIssue", "atlassian_executeWrite", "atlassian_deleteJiraIssue",
+        "outlook_send_mail", "m365_search_mail", "", "../x", "slack_read_channel ",
     ],
-)
-def test_everything_else_is_refused_with_ask_the_lead(name: str) -> None:
-    rec = Recorder()
-    server = rec.bridge()
+)  # fmt: skip
+def test_everything_not_on_the_allowlist_is_refused_before_any_network(
+    tmp_path: Path, slack: FakeUpstream, atlassian: FakeUpstream, name: str
+) -> None:
+    rig = Rig(tmp_path, slack, atlassian)
 
-    reply = server.handle(tool_call(name))
+    text, failed = call(rig, name, channel="C1")
 
-    assert reply is not None
-    result = reply["result"]
-    assert isinstance(result, dict) and result["isError"] is True
-    text = result["content"][0]["text"]  # type: ignore[index]
-    assert "refused" in text and "ask the lead" in text
-    assert rec.picked == [] and rec.executed == []  # no account was even chosen
-    assert rec.entries[-1]["outcome"] == "refused"
+    assert failed and "refused" in text and "ask the lead" in text
+    assert slack.requests == [] and atlassian.requests == []  # not even a token refresh
+    assert rig.entries[-1]["outcome"] == "refused"
 
 
-def test_arguments_are_checked_before_anything_is_spent() -> None:
-    rec = Recorder()
-    server = rec.bridge()
+def test_a_tool_the_upstream_offers_is_still_unreachable_if_it_is_not_on_the_list(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    """The upstream offers slack_send_message. No allowlisted name maps to it, so nothing can call it."""
+    rig = Rig(tmp_path, slack)
+    assert "slack_send_message" in slack.tools
+    reachable = {tool.upstream_tool for tool in TOOLS if tool.upstream == "slack"}
 
-    for call, message in (
-        (tool_call("slack_read_channel"), "missing argument channel"),
-        (tool_call("slack_read_channel", channel="C1", extra="x"), "unknown argument extra"),
-        (tool_call("slack_read_channel", channel=5), "argument channel must be a string"),
-        (tool_call("slack_read_channel", channel="C1", limit="9"), "limit must be a integer"),
-        (tool_call("slack_read_channel", channel="C1", limit=True), "limit must be a integer"),
-    ):
-        reply = server.handle(call)
-        assert reply is not None
-        assert message in reply["result"]["content"][0]["text"]  # type: ignore[index]
-    assert rec.picked == []
+    assert "slack_send_message" not in reachable
+    for name in list(BY_NAME):
+        call(rig, name, q="x")
+    called = {str(c["name"]) for c in slack.calls()}
+    assert called <= reachable and called  # only allowlisted upstream tools were ever called
+    assert not called & {"slack_send_message", "slack_schedule_message", "slack_add_reaction"}
 
 
-def test_a_good_call_picks_by_connector_and_logs_without_content() -> None:
-    rec = Recorder()
-    server = rec.bridge()
+def test_an_allowlisted_name_forwards_exactly_one_upstream_call_with_the_arguments(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack)
 
-    reply = server.handle(tool_call("atlassian_get_issue", issue="ZAL-901"))
+    text, failed = call(rig, "slack_read_user_profile", user="U0BQSQ9BGTD", extra={"a": 1})
 
-    assert reply is not None
-    assert reply["result"] == {
-        "content": [{"type": "text", "text": '{"ok": true}'}],
-        "isError": False,
+    assert not failed and json.loads(text) == {
+        "ok": True,
+        "got": {"user": "U0BQSQ9BGTD", "extra": {"a": 1}},
     }
-    assert rec.picked == ["atlassian"] and rec.executed == [("main", "atlassian_get_issue")]
-    (entry,) = rec.entries
-    assert set(entry) == {"at", "account", "kind", "tool", "ms", "outcome"}
-    assert entry["account"] == "main" and entry["tool"] == "atlassian_get_issue"
-    assert "ZAL-901" not in json.dumps(entry)
+    assert slack.calls() == [
+        {"name": "slack_read_user_profile", "arguments": {"user": "U0BQSQ9BGTD", "extra": {"a": 1}}}
+    ]
+    assert slack.mcp_methods() == ["initialize", "notifications/initialized", "tools/call"]
 
 
-# --- the cost guards -------------------------------------------------------------------------
+def test_the_atlassian_names_carry_a_prefix_and_reach_the_vendors_own_name(
+    tmp_path: Path, atlassian: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, atlassian)
+
+    call(rig, "atlassian_getJiraIssue", issueIdOrKey="ZAL-901")
+
+    assert atlassian.calls() == [{"name": "getJiraIssue", "arguments": {"issueIdOrKey": "ZAL-901"}}]
 
 
-def test_calls_per_hour_are_capped_and_the_window_slides() -> None:
-    rec = Recorder()
-    server = rec.bridge(config=BridgeConfig(max_calls_per_hour=2))
+def test_the_draft_tool_is_the_upstreams_own_draft_tool(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack)
 
-    for _ in range(2):
-        assert server.call("slack_search", {"query": "x"})[1] is False
-    text, failed = server.call("slack_search", {"query": "x"})
-    assert failed and "at most 2 bridge calls per hour" in text
-    assert len(rec.executed) == 2 and rec.entries[-1]["outcome"] == "limit"
+    _, failed = call(rig, "slack_send_message_draft", channel_id="C1", message="hi")
 
-    rec.now += 3601
-    assert server.call("slack_search", {"query": "x"})[1] is False
+    assert not failed
+    assert [c["name"] for c in slack.calls()] == ["slack_send_message_draft"]
 
 
-def test_a_failed_execution_is_an_error_result_not_a_crash() -> None:
-    rec = Recorder()
+# --- what the session is shown ---------------------------------------------------------------------
 
-    def boom(chosen: route.Route, tool: bridge.BridgeTool, args: Mapping[str, object]) -> str:
-        raise BridgeError("claude exited with 1")
 
-    server = Bridge(
-        BridgeConfig(), lambda c: route.Route("main", "claude", "t"), boom, rec.entries.append
+def test_the_listing_is_the_allowlist_intersected_with_what_the_upstream_offers(
+    tmp_path: Path, slack: FakeUpstream, atlassian: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack, atlassian)
+
+    listing = rig.bridge().handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+
+    assert listing is not None
+    tools = {t["name"]: t for t in listing["result"]["tools"]}  # type: ignore[index]
+    # offered by the fake AND allowlisted
+    assert set(tools) == {
+        "slack_read_user_profile", "slack_read_channel", "slack_search_public",
+        "slack_send_message_draft", "atlassian_getJiraIssue", "atlassian_searchJiraIssuesUsingJql",
+    }  # fmt: skip
+    for write in ("slack_send_message", "slack_add_reaction", "atlassian_createJiraIssue"):
+        assert write not in tools  # offered upstream, never listed
+    assert tools["slack_read_channel"]["inputSchema"]["properties"] == {"q": {"type": "string"}}
+    assert "read only" in tools["slack_read_channel"]["description"]
+    assert "DRAFT only" in tools["slack_send_message_draft"]["description"]
+
+
+def test_an_upstream_you_are_not_logged_in_to_is_not_listed(
+    tmp_path: Path, slack: FakeUpstream, atlassian: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack)  # atlassian is faked but never logged in
+    rig.fakes["atlassian"] = atlassian
+
+    names = {t["name"] for t in rig.bridge().listing()}
+
+    assert names and all(not n.startswith("atlassian_") for n in names)
+    assert atlassian.requests == []
+
+
+def test_an_unreadable_catalog_lists_the_allowlist_with_a_permissive_schema(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    slack.always_401 = True
+    rig = Rig(tmp_path, slack)
+
+    listing = rig.bridge().listing()
+
+    assert {t["name"] for t in listing} == {t.name for t in TOOLS if t.upstream == "slack"}
+    assert all(
+        t["inputSchema"] == {"type": "object", "additionalProperties": True} for t in listing
     )
 
-    assert server.call("slack_search", {"query": "x"}) == ("claude exited with 1", True)
-    assert rec.entries[-1]["outcome"] == "failed"
 
-
-def test_no_account_available_is_an_error_result() -> None:
-    def nobody(connector: str) -> route.Route:
-        raise UsageError("no account can take this run (main: spent)", "vibe list")
-
-    entries: list[Mapping[str, object]] = []
-    server = Bridge(BridgeConfig(), nobody, lambda *a: "", entries.append)
-
-    text, failed = server.call("slack_search", {"query": "x"})
-
-    assert failed and "no account can take this call" in text
-    assert entries[-1]["outcome"] == "no-account"
-
-
-def test_a_call_that_takes_too_long_is_killed(
-    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_catalog_is_cached_and_a_failure_is_retried_sooner(
+    tmp_path: Path, slack: FakeUpstream
 ) -> None:
-    script = tmp_home / "slow"
-    script.write_text("#!/bin/sh\nsleep 5\n")
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    rig = Rig(tmp_path, slack)
+    server = rig.bridge()
+    server.listing()
+    first = len(slack.requests)
 
-    with pytest.raises(BridgeError, match="timed out after 1s"):
-        bridge.run_headless([str(script)], None, 1.0)
-    with pytest.raises(BridgeError, match="exited with 3"):
-        bridge.run_headless(["/bin/sh", "-c", "exit 3"], None, 5.0)
-    with pytest.raises(BridgeError, match="returned nothing"):
-        bridge.run_headless(["/bin/sh", "-c", "true"], None, 5.0)
-    with pytest.raises(BridgeError, match="could not start"):
-        bridge.run_headless([str(tmp_home / "missing")], None, 5.0)
+    server.listing()
+    assert len(slack.requests) == first  # cached
 
-
-def test_the_log_is_owner_only_and_best_effort(tmp_home: Path) -> None:
-    root = tmp_home / ".vibemaxxing"
-
-    bridge.append_log(root, {"tool": "x", "outcome": "ok"})
-    bridge.append_log(root, {"tool": "y", "outcome": "ok"})
-
-    path = bridge.log_path(root)
-    assert [json.loads(line)["tool"] for line in path.read_text().splitlines()] == ["x", "y"]
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    bridge.append_log(path / "not-a-dir", {"tool": "z"})  # cannot be written: no exception
+    rig.now += bridge.CATALOG_TTL_S + 1
+    server.listing()
+    assert len(slack.requests) > first
 
 
-def test_config_defaults_and_overrides_and_refusals() -> None:
-    assert parse_config(None) == BridgeConfig()
-    config = parse_config(
-        {"timeout_s": 30, "max_calls_per_hour": 5, "claude_model": "sonnet",
-         "tools": {"slack_search": "slack_search_public"}}
+# --- results ---------------------------------------------------------------------------------------
+
+
+def test_text_is_returned_as_data_and_other_content_is_noted_not_passed(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    slack.tools["slack_read_channel"] = (
+        "d", EMPTY_SCHEMA,
+        lambda a: {"content": [{"type": "text", "text": "line one"}, {"type": "image", "data": "AAAA"},
+                               {"type": "text", "text": "line two"}], "isError": False},
     )  # fmt: skip
-    assert (config.timeout_s, config.max_calls_per_hour, config.claude_model) == (30.0, 5, "sonnet")
-    assert bridge.upstream_name(config, bridge.BY_NAME["slack_search"]) == "slack_search_public"
+    rig = Rig(tmp_path, slack)
+
+    text, failed = call(rig, "slack_read_channel", channel_id="C1")
+
+    assert not failed and text == "line one\nline two\n[non-text content omitted by the bridge]"
+
+
+def test_an_upstream_error_result_is_an_error_result(tmp_path: Path, slack: FakeUpstream) -> None:
+    slack.tools["slack_read_channel"] = (
+        "d",
+        EMPTY_SCHEMA,
+        lambda a: text_result("channel_not_found", error=True),
+    )
+    rig = Rig(tmp_path, slack)
+
+    text, failed = call(rig, "slack_read_channel", channel_id="C1")
+
+    assert failed and text == "channel_not_found" and rig.entries[-1]["outcome"] == "upstream-error"
+
+
+def test_a_result_over_the_size_cap_is_refused_not_cut(tmp_path: Path, slack: FakeUpstream) -> None:
+    slack.tools["slack_read_channel"] = ("d", EMPTY_SCHEMA, lambda a: text_result("x" * 5000))
+    rig = Rig(tmp_path, slack, config=BridgeConfig(timeout_s=5.0, max_result_bytes=1000))
+
+    text, failed = call(rig, "slack_read_channel", channel_id="C1")
+
+    assert failed and "result too large: 5000 bytes is over the 1000 byte cap" in text
+    assert "xxxxx" not in text  # no content in the refusal
+    assert rig.entries[-1]["outcome"] == "too-large" and rig.entries[-1]["bytes"] == 5000
+
+
+def test_oversized_arguments_are_refused_before_the_network(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack)
+
+    text, failed = call(
+        rig, "slack_send_message_draft", message="y" * (bridge.MAX_ARGUMENT_BYTES + 1)
+    )
+
+    assert failed and "arguments are larger" in text and slack.requests == []
+
+
+def test_an_event_stream_answer_and_a_paged_listing_work(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    slack.sse = True
+    slack.page_size = 3
+    rig = Rig(tmp_path, slack)
+
+    text, failed = call(rig, "slack_read_channel", q="x")
+    listing = rig.bridge().listing()
+
+    assert not failed and json.loads(text)["ok"] is True
+    assert len(listing) == 4  # all four allowlisted tools the fake offers, across pages
+
+
+def test_the_session_id_is_carried_and_the_session_is_closed(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack)
+
+    call(rig, "slack_read_channel", q="x")
+
+    posts = [s for s in slack.requests if s.method == "POST" and s.url == SLACK.mcp_url]
+    assert "Mcp-Session-Id" not in posts[0].headers
+    assert all(p.headers["Mcp-Session-Id"] == "sess-1" for p in posts[1:])
+    assert slack.requests[-1].method == "DELETE"
+
+
+def test_a_jsonrpc_error_and_a_garbled_answer_are_failures_with_a_clear_message(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack)
+    del slack.tools["slack_read_channel"]  # the upstream no longer offers it
+
+    text, failed = call(rig, "slack_read_channel", q="x")
+
+    assert failed and "the upstream answered an error (-32602)" in text
+
+
+# --- the token --------------------------------------------------------------------------------------
+
+
+def test_the_bearer_header_is_the_stored_access_token_and_never_anything_else(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack)
+
+    call(rig, "slack_read_channel", q="x")
+
+    posts = [s for s in slack.requests if s.url == SLACK.mcp_url and s.method == "POST"]
+    assert {p.headers["Authorization"] for p in posts} == {f"Bearer {slack.access}"}
+    bodies = b"".join((s.body or b"") for s in slack.requests)
+    assert slack.access.encode() not in bodies  # the token is a header, never a body
+
+
+def test_no_token_reaches_the_log_an_error_or_the_result(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    slack.tools["slack_read_channel"] = (
+        "d", EMPTY_SCHEMA, lambda a: text_result("fine"),
+    )  # fmt: skip
+    rig = Rig(tmp_path, slack)
+    out, _ = call(
+        rig, "slack_read_channel", q=f"{slack.access}"
+    )  # an argument that holds the token
+    slack.always_401 = True
+    err_text, failed = call(rig, "slack_read_channel", q="x")
+    bridge.append_log(rig.root, rig.entries[0])
+
+    assert failed and slack.access not in err_text and slack.refresh not in err_text
+    assert slack.access not in out and slack.refresh not in out
+    log = bridge.log_path(rig.root).read_text() if bridge.log_path(rig.root).exists() else ""
+    assert slack.access not in log and slack.refresh not in log
+    for entry in rig.entries:
+        assert slack.access not in json.dumps(entry)
+    # and the non-secret description on disk holds no token either
+    meta = mcp_oauth.meta_path(rig.root, SLACK).read_text()
+    assert slack.access not in meta and slack.refresh not in meta
+
+
+def test_an_expired_token_is_refreshed_and_the_new_one_is_stored_before_it_is_used(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack)
+    seed(rig.root, rig.secrets, slack, expires_at=NOW - 10)
+    old_access, old_refresh = slack.access, slack.refresh
+
+    _, failed = call(rig, "slack_read_channel", q="x")
+
+    assert not failed
+    assert slack.access != old_access and slack.refresh != old_refresh  # the fake rotated both
+    assert rig.secrets.items[mcp_oauth.service(SLACK, "access")] == slack.access
+    assert rig.secrets.items[mcp_oauth.service(SLACK, "refresh")] == slack.refresh
+    token_post = next(s for s in slack.requests if s.url.endswith("/token"))
+    assert token_post.form()["refresh_token"] == old_refresh
+    first_mcp = next(i for i, s in enumerate(slack.requests) if s.url == SLACK.mcp_url)
+    assert slack.requests.index(token_post) < first_mcp
+    # the rotated pair was written (to the Keychain) before the MCP request that used it
+    assert ("write", mcp_oauth.service(SLACK, "refresh")) in rig.secrets.log
+
+
+def test_a_token_about_to_expire_is_refreshed_too(tmp_path: Path, slack: FakeUpstream) -> None:
+    rig = Rig(tmp_path, slack)
+    seed(rig.root, rig.secrets, slack, expires_at=NOW + 30)  # inside the 60 s skew
+
+    call(rig, "slack_read_channel", q="x")
+
+    assert any(s.url.endswith("/token") for s in slack.requests)
+
+
+def test_a_401_refreshes_once_and_retries(tmp_path: Path, slack: FakeUpstream) -> None:
+    rig = Rig(tmp_path, slack)
+    slack.reject_next_mcp = 1
+
+    _, failed = call(rig, "slack_read_channel", q="x")
+
+    assert not failed
+    assert sum(1 for s in slack.requests if s.url.endswith("/token")) == 1
+
+
+def test_a_login_the_upstream_keeps_refusing_says_to_log_in_again(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack)
+    slack.reject_next_mcp = 99
+
+    text, failed = call(rig, "slack_read_channel", q="x")
+
+    assert failed and "does not accept the stored login" in text and "vibe bridge login" in text
+
+
+def test_a_dead_refresh_token_says_to_log_in_again_and_echoes_nothing(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack)
+    seed(rig.root, rig.secrets, slack, expires_at=NOW - 10)
+    slack.refresh_fails = True
+
+    text, failed = call(rig, "slack_read_channel", q="x")
+
+    assert failed and "refused the token request (HTTP 400, invalid_grant)" in text
+    assert "vibe bridge login slack" in text
+    assert "SECRETECHO" not in text and slack.refresh not in text  # the body is never repeated
+
+
+def test_not_logged_in_is_a_clear_refusal_not_a_crash(tmp_path: Path, slack: FakeUpstream) -> None:
+    rig = Rig(tmp_path)  # nothing seeded
+    rig.fakes["slack"] = slack
+
+    text, failed = call(rig, "slack_read_channel", q="x")
+
+    assert failed and "not logged in to Slack" in text and "vibe bridge login slack" in text
+    assert slack.requests == []
+
+
+def test_another_process_that_refreshed_while_we_waited_is_not_refreshed_over(
+    tmp_path: Path, slack: FakeUpstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spending a rotated refresh token twice would log the user out: re-read under the lock."""
+    rig = Rig(tmp_path, slack)
+    seed(rig.root, rig.secrets, slack, expires_at=NOW - 10)
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def other_process_refreshed(root: Path, upstream: mcp_oauth.Upstream):  # type: ignore[no-untyped-def]
+        slack.access = "ACCESSFROMOTHERPROCESS1"
+        slack.refresh = "REFRESHFROMOTHERPROC1"
+        seed(rig.root, rig.secrets, slack, expires_at=NOW + 3600)
+        yield
+
+    monkeypatch.setattr(mcp_oauth, "_refresh_lock", other_process_refreshed)
+
+    _, failed = call(rig, "slack_read_channel", q="x")
+
+    assert not failed
+    assert not any(s.url.endswith("/token") for s in slack.requests)  # no second refresh
+
+
+def test_the_keychain_tool_gets_the_value_on_stdin_and_never_in_argv() -> None:
+    calls: list[tuple[list[str], str | None]] = []
+    stored: dict[str, str] = {}
+
+    def runner(args, *, input, capture_output, text, encoding, timeout, check):  # type: ignore[no-untyped-def]
+        calls.append((list(args), input))
+        if args[1] == "-i":
+            command = input or ""
+            service = command.split(" -s ")[1].split(" ")[0]
+            stored[service] = command.split(" -w ")[1].strip()
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[1] == "find-generic-password":
+            service = args[args.index("-s") + 1]
+            return subprocess.CompletedProcess(
+                args, 0 if service in stored else 44, stored.get(service, "") + "\n", ""
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    store = mcp_oauth.MacSecretStore(runner)
+    token = "eyJhbGciOiJIUzI1NiJ9.payloadpayload.signaturesignature"
+
+    store.write("vibemaxxing-bridge-slack-access", token)
+    assert store.read("vibemaxxing-bridge-slack-access") == token
+    store.delete("vibemaxxing-bridge-slack-access")
+
+    for argv, _stdin in calls:
+        assert token not in " ".join(argv)  # never on a command line
+    write_argv, write_stdin = calls[0]
+    assert (
+        write_argv == ["/usr/bin/security", "-i"]
+        and write_stdin is not None
+        and token in write_stdin
+    )
+    assert all("-w" not in argv[2:] or argv[1] == "find-generic-password" for argv, _ in calls[1:])
+
+
+def test_the_keychain_store_refuses_awkward_values_and_a_truncated_readback() -> None:
+    def runner(args, *, input, capture_output, text, encoding, timeout, check):  # type: ignore[no-untyped-def]
+        if args[1] == "-i":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 0, "truncated\n", "")  # what `security -i` can do
+
+    store = mcp_oauth.MacSecretStore(runner)
+
+    for bad in (
+        "has space in it",
+        'quote"d-token-value',
+        "short",
+        "x" * 4000,
+        "new\nline-token-value",
+    ):
+        with pytest.raises(Exception) as caught:
+            store.write("svc", bad)
+        assert bad not in str(caught.value)
+    with pytest.raises(Exception, match="did not keep 'svc' intact") as caught:
+        store.write("svc", "validtokenvalue123")
+    assert "validtokenvalue123" not in str(caught.value)
+
+
+# --- the login ----------------------------------------------------------------------------------------
+
+
+def run_login(
+    tmp_path: Path,
+    fake: FakeUpstream,
+    *,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+    drafts: bool = False,
+    receiver: FakeReceiver | None = None,
+) -> tuple[Tokens, FakeSecrets, list[str], Path]:
+    root = tmp_path / ".vibemaxxing"
+    secrets = FakeSecrets()
+    opened: list[str] = []
+    said: list[str] = []
+    recv = receiver or FakeReceiver()
+
+    def browser(url: str) -> bool:
+        opened.append(url)
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+        fake.challenge = query["code_challenge"]  # what the server will check the verifier against
+        return True
+
+    tokens = mcp_oauth.login(
+        fake.upstream,
+        client=_Router({fake.upstream.id: fake}),
+        secrets=secrets,
+        root=root,
+        receiver=recv,
+        open_browser=browser,
+        say=said.append,
+        now_s=NOW,
+        client_id=client_id,
+        client_secret=Secret(client_secret) if client_secret else None,
+        drafts=drafts,
+    )
+    return tokens, secrets, opened, root
+
+
+def test_atlassian_login_registers_a_public_client_and_asks_for_read_scopes_only(
+    tmp_path: Path, atlassian: FakeUpstream
+) -> None:
+    receiver = FakeReceiver(port=8765)
+
+    tokens, secrets, opened, root = run_login(tmp_path, atlassian, receiver=receiver)
+
+    (url,) = opened
+    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+    assert url.startswith("https://mcp.atlassian.com/authorize?")
+    assert query["client_id"] == "dcr-client-1" and query["response_type"] == "code"
+    assert query["redirect_uri"] == "http://127.0.0.1:8765/callback"
+    assert query["code_challenge_method"] == "S256" and len(query["code_challenge"]) >= 43
+    assert query["state"] == receiver.states[0]
+    assert query["resource"] == ATLASSIAN.mcp_url  # RFC 8707
+    scopes = query["scope"].split()
+    assert scopes == list(ATLASSIAN.read_scopes)
+    assert not any(s.startswith(("write:", "delete:", "manage:")) for s in scopes)
+    registration = next(s for s in atlassian.requests if s.url.endswith("/register"))
+    assert registration.rpc()["token_endpoint_auth_method"] == "none"
+    assert registration.rpc()["redirect_uris"] == ["http://127.0.0.1:8765/callback"]
+    # the token exchange: code + the verifier whose challenge was sent, no secret
+    exchange = next(s for s in atlassian.requests if s.url.endswith("/token")).form()
+    assert exchange["grant_type"] == "authorization_code" and exchange["code"] == "auth-code-1"
+    assert "client_secret" not in exchange
+    # the tokens are in the (fake) Keychain; the file on disk holds no token
+    assert secrets.items[mcp_oauth.service(ATLASSIAN, "access")] == tokens.access.reveal()
+    meta = mcp_oauth.meta_path(root, ATLASSIAN)
+    assert stat.S_IMODE(meta.stat().st_mode) == 0o600
+    assert tokens.access.reveal() not in meta.read_text()
+    assert tokens.refresh is not None and tokens.refresh.reveal() not in meta.read_text()
+
+
+def test_slack_login_needs_an_app_of_your_own_and_sends_its_secret_only_to_the_token_endpoint(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    slack.dcr = False
+    with pytest.raises(UsageError, match="no dynamic client registration"):
+        run_login(tmp_path, slack)  # no client id or secret
+
+    _, secrets, opened, root = run_login(
+        tmp_path, slack, client_id="app-client-1", client_secret="APPSECRET000000001"
+    )
+
+    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(opened[0]).query))
+    assert query["client_id"] == "app-client-1" and "client_secret" not in query
+    assert "resource" not in query  # Slack's server is not sent RFC 8707's parameter
+    assert query["scope"].split() == list(SLACK.read_scopes)  # no chat:write without --drafts
+    assert "chat:write" not in query["scope"]
+    assert "APPSECRET000000001" not in opened[0]
+    exchange = next(s for s in slack.requests if s.url.endswith("/token")).form()
+    assert (
+        exchange["client_secret"] == "APPSECRET000000001"
+    )  # client_secret_post, to the token endpoint
+    assert secrets.items[mcp_oauth.service(SLACK, "client-secret")] == "APPSECRET000000001"
+    assert "APPSECRET000000001" not in mcp_oauth.meta_path(root, SLACK).read_text()
+
+
+def test_drafts_adds_exactly_the_draft_scope(tmp_path: Path, slack: FakeUpstream) -> None:
+    _, _, opened, _ = run_login(
+        tmp_path, slack, client_id="app-client-1", client_secret="APPSECRET000000001", drafts=True
+    )
+
+    scopes = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(opened[0]).query))["scope"].split()
+    assert scopes == [*SLACK.read_scopes, "chat:write"]
+
+
+def test_a_poisoned_discovery_document_cannot_send_anything_to_another_host(
+    tmp_path: Path, atlassian: FakeUpstream
+) -> None:
+    atlassian.prm_authorization_server = "https://evil.example/as"
+    router_calls: list[str] = []
+
+    class Spy(_Router):
+        def request(self, method: str, url: str, **kw: object) -> HttpResponse:
+            router_calls.append(url)
+            return super().request(method, url, **kw)
+
+    with pytest.raises(UsageError, match="not on a host this bridge trusts"):
+        mcp_oauth.discover(Spy({"atlassian": atlassian}), ATLASSIAN)
+
+    assert all("evil.example" not in url for url in router_calls)
+    atlassian.prm_authorization_server = None
+    atlassian.issuer = "https://evil.example"  # the metadata names endpoints on another host
+    with pytest.raises(UsageError, match="not on a host this bridge trusts"):
+        mcp_oauth.discover(Spy({"atlassian": atlassian}), ATLASSIAN)
+
+
+def test_a_wrong_code_verifier_is_refused_by_the_upstream_and_nothing_is_stored(
+    tmp_path: Path, atlassian: FakeUpstream
+) -> None:
+    atlassian.code = "a-different-code"
+
+    with pytest.raises(NeedsLoginError, match="refused the token request"):
+        run_login(tmp_path, atlassian)
+
+    assert not (tmp_path / ".vibemaxxing" / "bridge").exists()
+
+
+def test_the_loopback_receiver_takes_the_redirect_and_checks_the_state() -> None:
+    receiver = mcp_oauth.LoopbackReceiver(0)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        assert receiver.redirect_uri.startswith("http://127.0.0.1:")
+        threading.Timer(
+            0.2,
+            lambda: opener.open(
+                f"{receiver.redirect_uri}?code=the-code&state=good", timeout=5
+            ).read(),
+        ).start()
+        assert receiver.wait("good", 5) == "the-code"
+    finally:
+        receiver.close()
+
+
+def test_the_loopback_receiver_refuses_a_foreign_state_an_error_and_silence() -> None:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for query, message in (
+        ("code=c&state=other", "did not carry this login's state"),
+        ("error=access_denied&state=good", "refused the login: access_denied"),
+        ("state=good", "carried no code"),
+    ):
+        receiver = mcp_oauth.LoopbackReceiver(0)
+        try:
+            url = f"{receiver.redirect_uri}?{query}"
+            threading.Timer(0.2, lambda url=url: opener.open(url, timeout=5).read()).start()
+            with pytest.raises(UsageError, match=message):
+                receiver.wait("good", 5)
+        finally:
+            receiver.close()
+    quiet = mcp_oauth.LoopbackReceiver(0)
+    try:
+        with pytest.raises(UsageError, match="no answer from the browser"):
+            quiet.wait("good", 0.2)
+    finally:
+        quiet.close()
+
+
+# --- the cost guards and the log --------------------------------------------------------------------------
+
+
+def test_a_call_that_takes_too_long_is_stopped(tmp_path: Path, slack: FakeUpstream) -> None:
+    release = threading.Event()
+    slack.tools["slack_read_channel"] = (
+        "d",
+        EMPTY_SCHEMA,
+        lambda a: (release.wait(5), text_result("late"))[1],
+    )
+    rig = Rig(tmp_path, slack, config=BridgeConfig(timeout_s=0.3))
+    started = time.monotonic()
+
+    text, failed = call(rig, "slack_read_channel", q="x")
+    release.set()
+
+    assert failed and "timed out" in text
+    assert time.monotonic() - started < 3
+    assert rig.entries[-1]["outcome"] == "timeout"
+
+
+def test_calls_per_hour_are_capped_and_the_window_slides(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack, config=BridgeConfig(timeout_s=5.0, max_calls_per_hour=2))
+    server = rig.bridge()
+
+    assert server.call("slack_read_channel", {})[1] is False
+    assert server.call("slack_read_channel", {})[1] is False
+    text, failed = server.call("slack_read_channel", {})
+    assert failed and "at most 2 bridge calls per hour" in text
+    assert rig.entries[-1]["outcome"] == "limit"
+    assert len(slack.calls()) == 2  # the third never reached the upstream
+
+    rig.now += 3601
+    assert server.call("slack_read_channel", {})[1] is False
+
+
+def test_the_log_has_upstream_tool_time_and_size_but_no_content(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    slack.tools["slack_read_channel"] = (
+        "d",
+        EMPTY_SCHEMA,
+        lambda a: text_result("SECRETMESSAGE body"),
+    )
+    rig = Rig(tmp_path, slack)
+
+    call(rig, "slack_read_channel", channel_id="C0SECRETCHAN")
+    for entry in rig.entries:
+        bridge.append_log(rig.root, entry)
+
+    path = bridge.log_path(rig.root)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    (line,) = path.read_text().splitlines()
+    entry = json.loads(line)
+    assert set(entry) == {"at", "upstream", "tool", "ms", "bytes", "outcome"}
+    assert entry["upstream"] == "slack" and entry["tool"] == "slack_read_channel"
+    assert entry["bytes"] == len("SECRETMESSAGE body") and entry["outcome"] == "ok"
+    assert "SECRETMESSAGE" not in line and "C0SECRETCHAN" not in line
+    bridge.append_log(path / "nope", {"x": 1})  # an unwritable log never fails a call
+
+
+def test_the_config_has_no_key_that_adds_a_tool_or_an_upstream() -> None:
+    assert parse_config(None) == BridgeConfig()
+    assert parse_config({"timeout_s": 30, "max_calls_per_hour": 5, "max_result_bytes": 5000}) == (
+        BridgeConfig(30.0, 5, 5000)
+    )
     for bad in (
         "x", {"surprise": 1}, {"timeout_s": 0}, {"timeout_s": True}, {"max_calls_per_hour": 0},
-        {"claude_model": ""}, {"tools": {"slack_send_message": "x"}}, {"tools": []},
-        # nothing in the config can send a bridge call to Cursor, or change who it runs on
-        {"order": [{"account": "cursor"}]}, {"cursor_effort": "low"}, {"cursor_read_mode": "ask"},
+        {"max_result_bytes": 10}, {"max_result_bytes": 10**9}, {"tools": {"x": "y"}},
+        {"upstreams": ["m365"]}, {"claude_model": "haiku"}, {"order": []},
     ):  # fmt: skip
         with pytest.raises(UsageError, match=r"routing\.bridge"):
             parse_config(bad)
 
 
-def test_the_add_command_is_printed_not_run(
-    capsys: pytest.CaptureFixture[str], tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+# --- the protocol ------------------------------------------------------------------------------------------
+
+
+def test_initialize_ping_unknown_methods_and_notifications(
+    tmp_path: Path, slack: FakeUpstream
 ) -> None:
-    monkeypatch.setattr(bridge, "ENABLED", True)
-    ctx = cli.Context(
-        root=tmp_home / ".vibemaxxing",
-        client=None,  # type: ignore[arg-type]
-        port=None,  # type: ignore[arg-type]
-        now_s=NOW_S,
-    )
+    server = Rig(tmp_path, slack).bridge()
 
-    assert cli.main(["bridge", "add-command"], context=ctx) == 0
-
-    out = capsys.readouterr().out
-    assert "CLAUDE_CONFIG_DIR=~/.claude-extra claude mcp add --scope user vibe-bridge" in out
-    assert "-- vibe bridge serve" in out and "vibe does not" in out
-
-
-# --- the real runs, on fakes -----------------------------------------------------------------
-
-
-@pytest.fixture
-def world(tmp_home: Path, monkeypatch: pytest.MonkeyPatch) -> World:
-    world = World(tmp_home, monkeypatch)
-    world.add_cursor()
-    return world
-
-
-def bridge_for(world: World, config: BridgeConfig | None = None) -> Bridge:
-    cfg = config or BridgeConfig()
-    ctx = world.ctx()
-    svc = ctx.services()
-    routing = route.Routing()
-    return Bridge(
-        cfg,
-        launch.bridge_pick(svc, routing, cfg),
-        launch.bridge_execute(svc, cfg, lambda alias: {"CLAUDE_CODE_OAUTH_TOKEN": f"{alias}-lent"}),
-        lambda entry: bridge.append_log(world.root, entry),
-    )
-
-
-def fresh_claude_account(world: World, alias: str, *, weekly: int, active: bool = False) -> None:
-    """Like World.claude_account, but with numbers as young as the real clock the bridge reads."""
-    import time
-
-    world.claude_account(alias, session=5, weekly=weekly, active=active)
-    cache = json.loads((world.root / "usage" / f"{alias}.json").read_text())
-    cache["fetched_at"] = time.time() - 10
-    (world.root / "usage" / f"{alias}.json").write_text(json.dumps(cache))
-
-
-def test_a_read_runs_on_main_within_budget_with_only_that_tool_allowed(world: World) -> None:
-    fresh_claude_account(world, "main", weekly=1, active=True)  # 1% is within any day's budget
-    fresh_claude_account(world, "extra", weekly=1)
-    server = bridge_for(world)
-
-    text, failed = server.call("slack_read_channel", {"channel": "C123", "limit": 5})
-
-    assert (text, failed) == ('{"from": "claude"}', False)
-    (call,) = world.claude_calls(full=True)
-    argv = call["argv"]
-    assert isinstance(argv, list)
-    assert argv[0] == "-p" and "Call the Slack tool `slack_read_channel` exactly once" in argv[1]
-    assert argv[argv.index("--model") + 1] == "haiku"  # the cheap model
-    assert argv[argv.index("--tools") + 1] == ""  # no built-in tools
-    assert argv[argv.index("--allowedTools") + 1] == "mcp__claude_ai_Slack__slack_read_channel"
-    assert "--no-session-persistence" in argv
-    assert call["has_token"] is False  # main is the live login: no override
-    assert call["has_config_dir"] is False
-    assert world.fake.calls() == []
-    (entry,) = [json.loads(x) for x in bridge.log_path(world.root).read_text().splitlines()]
-    assert entry["account"] == "main" and entry["tool"] == "slack_read_channel"
-    assert "C123" not in json.dumps(entry)
-
-
-def test_the_callers_config_dir_and_token_do_not_leak_into_the_nested_run(
-    world: World, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fresh_claude_account(world, "main", weekly=1, active=True)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(world.home / ".claude-extra"))
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "EXTRATOKEN00000000")
-
-    bridge_for(world).call("slack_search", {"query": "x"})
-
-    (call,) = world.claude_calls(full=True)
-    # never the caller's (extra's) token or config dir: main's own token, lent explicitly
-    env = call["env"]
-    assert isinstance(env, dict)
-    assert call["has_config_dir"] is False
-    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "main-lent" and "EXTRATOKEN" not in json.dumps(env)
-
-
-def test_a_main_that_is_not_the_live_login_is_lent_its_token_for_the_call(world: World) -> None:
-    fresh_claude_account(world, "main", weekly=1)
-    fresh_claude_account(world, "extra", weekly=1, active=True)  # extra is the live login
-
-    bridge_for(world).call("atlassian_get_issue", {"issue": "ZAL-1"})
-
-    (call,) = world.claude_calls(full=True)
-    assert call["has_token"] is True
-
-
-@pytest.mark.parametrize(
-    ("tool", "arguments"),
-    [
-        ("slack_search", {"query": "release"}),
-        ("slack_read_profile", {"user": "U1"}),
-        ("outlook_create_draft", {"to": "a@b.c", "subject": "s", "body": "b"}),
-        ("atlassian_get_issue", {"issue": "ZAL-1"}),
-    ],
-)
-def test_a_call_main_cannot_take_is_refused_and_never_goes_to_cursor(
-    world: World, tool: str, arguments: dict[str, object]
-) -> None:
-    fresh_claude_account(world, "main", weekly=100, active=True)  # spent
-    fresh_claude_account(world, "extra", weekly=1)
-    world.cursor_usage()  # Cursor has plenty of room and a working login
-
-    text, failed = bridge_for(world).call(tool, arguments)
-
-    assert failed
-    assert "the bridge only runs on main" in text and "Cursor cannot be limited to one tool" in text
-    assert world.fake.calls() == []  # no cursor-agent run: no read, no draft
-    assert world.claude_calls() == []  # and nothing on extra either
-    assert world.cursor_client.requests == []  # Cursor was not even asked for its usage
-    entries = [json.loads(x) for x in bridge.log_path(world.root).read_text().splitlines()]
-    assert entries[-1]["outcome"] == "no-account"
-
-
-def test_main_with_unknown_usage_is_refused_too(world: World) -> None:
-    # No usage cache and nothing queued for the endpoint: unknown, so unavailable.
-    world.claude_account("main", session=1, weekly=1, active=True)
-    cache = world.root / "usage" / "main.json"
-    cache.unlink()
-    world.client.queue(NetworkError("offline", "x"))
-
-    text, failed = bridge_for(world).call("slack_search", {"query": "x"})
-
-    assert failed and "usage unknown" in text
-    assert world.claude_calls() == [] and world.fake.calls() == []
-
-
-def test_no_config_key_and_no_route_can_start_a_cursor_run_from_the_bridge(world: World) -> None:
-    ctx = world.ctx()
-    execute = launch.bridge_execute(ctx.services(), BridgeConfig(), lambda alias: {})
-
-    with pytest.raises(BridgeError, match="never runs on Cursor"):
-        execute(
-            route.Route("cursor", "cursor", "x"), bridge.BY_NAME["slack_search"], {"query": "x"}
-        )
-
-    assert world.fake.calls() == []
-    # the order the bridge decides by is fixed in code: main only, whatever settings.json says
-    (world.root / "settings.json").write_text(
-        json.dumps({"schema": 1, "routing": {"order": {"needs": [{"account": "cursor"}]}}})
-    )
-    fresh_claude_account(world, "main", weekly=100, active=True)
-    world.cursor_usage()
-    routing = route.read_routing(world.root)
-    pick = launch.bridge_pick(ctx.services(), routing, BridgeConfig())
-    with pytest.raises(UsageError, match="only runs on main"):
-        pick("slack")
-    assert world.fake.calls() == []
-
-
-def test_m365_runs_on_main_with_its_own_tool_allowed(world: World) -> None:
-    fresh_claude_account(world, "main", weekly=1, active=True)
-
-    _, failed = bridge_for(world).call("m365_search_mail", {"query": "invoice"})
-
-    assert failed is False
-    (call,) = world.claude_calls(full=True)
-    assert call["argv"][call["argv"].index("--allowedTools") + 1] == (  # type: ignore[index]
-        "mcp__claude_ai_Microsoft_365__outlook_email_search"
-    )
-
-
-def test_the_nested_run_has_three_fences_and_an_empty_workspace(world: World) -> None:
-    fresh_claude_account(world, "main", weekly=1, active=True)
-
-    bridge_for(world).call("slack_read_profile", {"user": "U1"})
-
-    (call,) = world.claude_calls(full=True)
-    argv = call["argv"]
-    assert isinstance(argv, list)
-    assert argv[argv.index("--tools") + 1] == ""
-    assert argv[argv.index("--permission-prompts") + 1] == "none"  # nobody answers: deny, not ask
-    denied = argv[argv.index("--disallowedTools") + 1].split(",")
-    assert "mcp__claude_ai_Slack__slack_create_conversation" in denied
-    assert "mcp__claude_ai_Slack__slack_update_list" in denied
-    assert argv[argv.index("--allowedTools") + 1] not in denied
-    assert Path(str(call["cwd"])).resolve() == (world.root / "bridge-workspace").resolve()
-
-
-def test_every_allowlisted_tool_is_allowed_alone_and_every_write_of_its_server_is_denied() -> None:
-    config = BridgeConfig()
-    for tool in bridge.TOOLS:
-        argv = bridge.claude_argv(config, tool, "p")
-        allowed = argv[argv.index("--allowedTools") + 1]
-        denied = argv[argv.index("--disallowedTools") + 1].split(",")
-        assert allowed not in denied
-        writes = bridge.WRITE_TOOLS[tool.server]
-        expected = {
-            config.claude_tool_pattern.format(server=tool.server.replace(" ", "_"), tool=w)
-            for w in writes
-            if w != tool.upstream
-        }
-        assert set(denied) == expected
-        assert "--permission-prompts" in argv and "--tools" in argv
-    draft = bridge.claude_argv(config, bridge.BY_NAME["outlook_create_draft"], "p")
-    deny = draft[draft.index("--disallowedTools") + 1].split(",")
-    # a draft tool is itself on the write list, and is the one thing its own call allows
-    assert "mcp__claude_ai_Microsoft_365__outlook_create_draft" not in deny
-    assert "mcp__claude_ai_Microsoft_365__outlook_send_mail" in deny
-    assert "mcp__claude_ai_Microsoft_365__outlook_send_draft" in deny
-    assert draft[draft.index("--allowedTools") + 1] == (
-        "mcp__claude_ai_Microsoft_365__outlook_create_draft"
-    )
-
-
-def test_the_bridge_never_uses_extra(world: World) -> None:
-    fresh_claude_account(world, "main", weekly=100, active=True)
-    fresh_claude_account(world, "extra", weekly=1)  # plenty of room, but no connectors
-
-    _, failed = bridge_for(world).call("slack_search", {"query": "x"})
-
-    assert failed and world.claude_calls() == []
-
-
-def test_a_failing_nested_run_is_reported_without_content(world: World) -> None:
-    fresh_claude_account(world, "main", weekly=1, active=True)
-    os.environ["FAKE_CLAUDE_EXIT"] = "4"
-    try:
-        text, failed = bridge_for(world).call("slack_search", {"query": "secret-topic"})
-    finally:
-        del os.environ["FAKE_CLAUDE_EXIT"]
-
-    assert failed and text == "claude exited with 4"
-    assert "secret-topic" not in text
-
-
-# --- a session on extra, end to end -------------------------------------------------------------
-
-_LAUNCHER = """
-import sys
-from tests.fakes import FakeHttpClient, FakeKeychain
-from vibemaxxing import cli
-from tests.cursor_fakes import StubToken
-import os, time
-ctx = cli.Context(root=__import__("pathlib").Path(os.environ["VIBE_ROOT"]), client=FakeHttpClient(),
-                  port=FakeKeychain(blob=os.environ["VIBE_BLOB"]), now_s=time.time(),
-                  prompt=lambda _: "", browser=lambda _: True,
-                  cursor_client=FakeHttpClient(), cursor_token=StubToken())
-from vibemaxxing import bridge
-bridge.ENABLED = True  # the test enables it in its own process; no setting can
-sys.exit(cli.main(["bridge", "serve"], context=ctx))
-"""
-
-
-def test_a_session_on_extra_calls_the_bridge_over_stdio_in_a_scratch_config(
-    world: World, tmp_home: Path
-) -> None:
-    """What Claude Code on extra does: start `vibe bridge serve`, list, call, read the answer."""
-    fresh_claude_account(world, "main", weekly=1, active=True)
-    fresh_claude_account(world, "extra", weekly=1)
-    assert world.port.blob is not None
-    env = {
-        **os.environ,
-        "VIBE_ROOT": str(world.root),
-        "VIBE_BLOB": world.port.blob,
-        "PYTHONPATH": str(REPO),
-        "HOME": str(tmp_home),
-    }
-    requests = [
+    init = server.handle(
         {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
-            "params": {"protocolVersion": "2024-11-05"},
-        },
+            "params": {"protocolVersion": "2025-03-26"},
+        }
+    )
+    assert init is not None and init["result"]["protocolVersion"] == "2025-03-26"  # type: ignore[index]
+    assert init["result"]["serverInfo"] == {"name": "vibe-bridge", "version": "2"}  # type: ignore[index]
+    assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+    assert server.handle({"jsonrpc": "2.0", "id": 2, "method": "ping"}) == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {},
+    }
+    error = server.handle({"jsonrpc": "2.0", "id": 3, "method": "resources/list"})
+    assert error is not None and error["error"]["code"] == -32601  # type: ignore[index]
+    bad = server.handle([1])
+    assert bad is not None and bad["error"]["code"] == -32600  # type: ignore[index]
+
+
+def test_serve_reads_lines_and_answers_in_order(tmp_path: Path, slack: FakeUpstream) -> None:
+    server = Rig(tmp_path, slack).bridge()
+    lines = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+         "params": {"name": "slack_read_user_profile", "arguments": {"user": "U1"}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "slack_send_message", "arguments": {}}},
+    ]  # fmt: skip
+    sink = io.StringIO()
+
+    bridge.serve(
+        server, io.StringIO("\n".join(json.dumps(x) for x in lines) + "\nnot json\n\n"), sink
+    )
+
+    answers = [json.loads(x) for x in sink.getvalue().splitlines()]
+    assert [a.get("id") for a in answers] == [1, 2, 3, None]
+    assert (
+        answers[1]["result"]["isError"] is False
+        and "U1" in answers[1]["result"]["content"][0]["text"]
+    )
+    assert (
+        answers[2]["result"]["isError"] is True
+        and "ask the lead" in answers[2]["result"]["content"][0]["text"]
+    )
+    assert answers[3]["error"]["code"] == -32700
+
+
+# --- the CLI ------------------------------------------------------------------------------------------------
+
+_LAUNCHER = """
+import os, sys, time
+from pathlib import Path
+from tests import test_bridge as tb
+from tests.fake_upstream import FakeSecrets
+from vibemaxxing import cli, bridge
+
+fake = tb.upstream_with(bridge.SLACK, ["slack_read_user_profile", "slack_send_message"])
+secrets = FakeSecrets()
+root = Path(os.environ["VIBE_ROOT"])
+tb.seed(root, secrets, fake, expires_at=time.time() + 3600)
+router = tb._Router({"slack": fake})
+ctx = cli.Context(root=root, client=router, port=None, now_s=time.time(),
+                  bridge_client=router, secrets=secrets)
+sys.exit(cli.main(["bridge", "serve"], context=ctx))
+"""
+
+
+def test_a_scratch_mcp_client_reads_through_vibe_bridge_serve_as_a_real_process(
+    tmp_path: Path,
+) -> None:
+    """What Claude Code on extra does: start `vibe bridge serve`, list, call, read, try a write."""
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
-        tool_call("atlassian_get_issue", 3, issue="ZAL-901"),
-        tool_call("slack_send_message", 4, channel="C1", text="hello"),
-    ]
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+         "params": {"name": "slack_read_user_profile", "arguments": {"user": "U0BQSQ9BGTD"}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+         "params": {"name": "slack_send_message", "arguments": {"channel_id": "C1", "message": "hi"}}},
+    ]  # fmt: skip
+    env = {
+        **os.environ,
+        "VIBE_ROOT": str(tmp_path / ".vibemaxxing"),
+        "PYTHONPATH": str(REPO),
+        "HOME": str(tmp_path),
+    }
 
     done = subprocess.run(
         [sys.executable, "-c", _LAUNCHER],
         input="\n".join(json.dumps(r) for r in requests) + "\n",
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=REPO,
-        timeout=60,
-        check=False,
-    )
+        capture_output=True, text=True, env=env, cwd=REPO, timeout=60, check=False,
+    )  # fmt: skip
 
     assert done.returncode == 0, done.stderr
     answers = [json.loads(line) for line in done.stdout.splitlines()]
-    assert [a["id"] for a in answers] == [1, 2, 3, 4]  # the notification got no answer
-    listed = answers[1]["result"]["tools"]
-    assert "slack_send_message" not in {tool["name"] for tool in listed}
-    assert answers[2]["result"] == {
-        "content": [{"type": "text", "text": '{"from": "claude"}'}],
-        "isError": False,
-    }
+    assert [a["id"] for a in answers] == [1, 2, 3, 4]
+    assert {t["name"] for t in answers[1]["result"]["tools"]} == {
+        "slack_read_user_profile"
+    }  # not the writer
+    read = answers[2]["result"]
+    assert read["isError"] is False and "U0BQSQ9BGTD" in read["content"][0]["text"]
     refused = answers[3]["result"]
     assert refused["isError"] is True and "ask the lead" in refused["content"][0]["text"]
-    (call,) = world.claude_calls(full=True)
-    assert call["argv"][call["argv"].index("--allowedTools") + 1] == (  # type: ignore[index]
-        "mcp__claude_ai_Atlassian_Rovo__getJiraIssue"
-    )
-    log = [json.loads(x) for x in bridge.log_path(world.root).read_text().splitlines()]
+    log = [
+        json.loads(x) for x in (tmp_path / ".vibemaxxing" / "bridge.log").read_text().splitlines()
+    ]
     assert [(e["tool"], e["outcome"]) for e in log] == [
-        ("atlassian_get_issue", "ok"),
+        ("slack_read_user_profile", "ok"),
         ("slack_send_message", "refused"),
     ]
-    assert "ZAL-901" not in bridge.log_path(world.root).read_text()
-    assert StubToken().value not in done.stdout + done.stderr
+    assert "U0BQSQ9BGTD" not in (tmp_path / ".vibemaxxing" / "bridge.log").read_text()
 
 
-def test_a_fenced_answer_is_handed_back_as_the_json_inside() -> None:
-    fenced = json.dumps({"result": '```json\n{"a": 1}\n```'})
+class CliRig:
+    def __init__(self, tmp_path: Path, *fakes: FakeUpstream) -> None:
+        self.root = tmp_path / ".vibemaxxing"
+        self.secrets = FakeSecrets()
+        self.fakes = {f.upstream.id: f for f in fakes}
+        self.opened: list[str] = []
+        self.receiver = FakeReceiver()
+        self.asked: list[str] = []
 
-    assert bridge.extract_result(fenced) == '{"a": 1}'
-    assert bridge.extract_result(json.dumps({"result": '{"a": 1}'})) == '{"a": 1}'
-    assert bridge.extract_result("plain text") == "plain text"
-    assert bridge.extract_result("```\nx\n```") == "x"
+    def ctx(self) -> cli.Context:
+        router = _Router(self.fakes)
+
+        def browser(url: str) -> bool:
+            self.opened.append(url)
+            query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+            for fake in self.fakes.values():
+                fake.challenge = query["code_challenge"]
+            return True
+
+        def prompt(text: str) -> str:
+            self.asked.append("prompt")
+            return "app-client-1"
+
+        return cli.Context(
+            root=self.root, client=router, port=None, now_s=NOW, clock=lambda: NOW,  # type: ignore[arg-type]
+            prompt=prompt, browser=browser, bridge_client=router, secrets=self.secrets,
+            secret_prompt=lambda _: (self.asked.append("secret"), "APPSECRET000000001")[1],
+            receiver=lambda port: self.receiver,
+        )  # fmt: skip
+
+    def main(self, *argv: str) -> int:
+        return cli.main(list(argv), context=self.ctx())
 
 
-# --- round 3: fences that do not depend on the person's settings ---------------------------------
+def test_status_login_tools_logout_through_the_cli(
+    tmp_path: Path, atlassian: FakeUpstream, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rig = CliRig(tmp_path, atlassian)
 
+    assert rig.main("bridge", "status") == 0
+    assert "atlassian not logged in  (vibe bridge login atlassian)" in capsys.readouterr().out
 
-def test_the_fences_do_not_depend_on_the_users_claude_settings() -> None:
-    config = BridgeConfig()
-
-    argv = bridge.claude_argv(config, bridge.BY_NAME["slack_read_profile"], "p")
-
-    # measured live: "project" alone hides the connectors; "user" reaches them and drops the rest
-    assert argv[argv.index("--setting-sources") + 1] == "user"
-    assert argv[argv.index("--settings") + 1] == '{"disableAllHooks": true}'
-    assert argv[argv.index("--permission-mode") + 1] == "manual"  # explicit, not a settings default
-    assert argv[argv.index("--permission-prompts") + 1] == "none"
-    assert argv[argv.index("--tools") + 1] == ""
-    assert argv[argv.index("--allowedTools") + 1] == "mcp__claude_ai_Slack__slack_read_user_profile"
+    assert rig.main("bridge", "login", "atlassian") == 0
+    captured = capsys.readouterr()
+    assert "logged in to Atlassian; the token is in the Keychain" in captured.out
+    assert "redirect URL for the login: http://127.0.0.1:8765/callback" in captured.err
     assert (
-        "mcp__claude_ai_Slack__slack_create_conversation"
-        in argv[argv.index("--disallowedTools") + 1]
+        atlassian.access not in captured.out + captured.err
+        and atlassian.refresh not in captured.out + captured.err
     )
+    assert rig.receiver.closed
+    assert rig.asked == []  # Atlassian registers itself: no client id, no secret asked
+
+    assert rig.main("bridge", "status") == 0
+    status = capsys.readouterr().out
+    assert "atlassian logged in; access token 60 min left" in status
+    assert atlassian.access not in status
+
+    assert rig.main("bridge", "tools", "atlassian") == 0
+    tools = capsys.readouterr().out
+    assert "atlassian_getJiraIssue" in tools and "offered" in tools
+    assert (
+        "atlassian_listJiraProjects" in tools and "NOT offered" in tools
+    )  # allowlisted, not on this fake
+    assert "createJiraIssue" not in tools  # a writer is never even named
+
+    assert rig.main("bridge", "logout", "atlassian") == 0
+    assert "logged out of atlassian" in capsys.readouterr().out
+    assert rig.secrets.items == {} and not mcp_oauth.meta_path(rig.root, ATLASSIAN).exists()
+    assert rig.main("bridge", "logout", "all") == 0
+    assert "there was no login to remove" in capsys.readouterr().out
 
 
-def test_a_denied_call_is_a_failure_not_an_ok_result() -> None:
-    denied = json.dumps({"result": "I could not", "permission_denials": [{"tool_name": "x"}]})
-    errored = json.dumps({"result": "boom", "is_error": True})
-
-    assert bridge.verdict(denied) == "1 tool call(s) denied by the permission fence"
-    assert bridge.verdict(errored) == "the run reported an error"
-    assert bridge.verdict(json.dumps({"result": "ok", "permission_denials": []})) is None
-    assert bridge.verdict("not json") is None and bridge.verdict("[1]") is None
-
-
-def test_run_headless_raises_on_a_denial_even_when_the_exit_code_is_zero(tmp_home: Path) -> None:
-    script = tmp_home / "denier"
-    script.write_text(
-        '#!/bin/sh\necho \'{"result":"no","permission_denials":[{"tool_name":"t"}]}\'\n'
-    )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-
-    with pytest.raises(BridgeError, match="denied by the permission fence"):
-        bridge.run_headless([str(script)], None, 5.0)
-
-
-def test_a_tools_override_cannot_map_a_tool_onto_a_write_tool() -> None:
-    with pytest.raises(UsageError, match="write tool slack_create_conversation"):
-        parse_config({"tools": {"slack_search": "slack_create_conversation"}})
-    with pytest.raises(UsageError, match="write tool createJiraIssue"):
-        parse_config({"tools": {"atlassian_get_issue": "createJiraIssue"}})
-    # a draft tool keeps its own default, and a harmless remap is fine
-    with pytest.raises(UsageError, match="write tool slack_send_message"):
-        parse_config({"tools": {"slack_search": "slack_send_message"}})
-    assert parse_config({"tools": {"outlook_create_draft": "outlook_create_draft"}})
-    assert parse_config({"tools": {"slack_create_draft": "slack_send_message_draft"}})
-    assert parse_config({"tools": {"slack_search": "slack_search_public"}})
-
-
-def test_a_nested_run_inherits_none_of_the_callers_secrets(
-    world: World, monkeypatch: pytest.MonkeyPatch
+def test_slack_login_asks_for_the_client_id_and_a_hidden_secret(
+    tmp_path: Path, slack: FakeUpstream, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    fresh_claude_account(world, "main", weekly=1, active=True)
-    monkeypatch.setenv("GH_TOKEN", "GHTOKEN0000000000")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPICKEY00000000")
-    monkeypatch.setenv("HARMLESS", "kept")
+    slack.dcr = False
+    rig = CliRig(tmp_path, slack)
 
-    bridge_for(world).call("slack_search", {"query": "x"})
+    assert rig.main("bridge", "login", "slack", "--drafts") == 0
 
-    (call,) = world.claude_calls(full=True)
-    seen = call["env"]
-    assert isinstance(seen, dict)
-    assert "GH_TOKEN" not in seen and "ANTHROPIC_API_KEY" not in seen
-    assert seen["HARMLESS"] == "kept"
-    assert not [
-        name for name in seen if name != "CLAUDE_CODE_OAUTH_TOKEN" and name.endswith("_TOKEN")
-    ]
-
-
-# --- the user settings preflight (connectors need the user source, so its rules still count) ---
-
-
-def settings(tmp_home: Path, document: object) -> Path:
-    config = tmp_home / ".claude"
-    config.mkdir(exist_ok=True)
-    (config / "settings.json").write_text(
-        document if isinstance(document, str) else json.dumps(document)
-    )
-    return config
-
-
-def test_settings_without_an_mcp_allow_rule_are_fine(tmp_home: Path) -> None:
-    assert bridge.settings_problem(tmp_home / ".claude") is None  # no file at all
-    ok = {"model": "sonnet", "permissions": {"allow": ["Bash(git status)", "Read"], "deny": ["x"]}}
-    assert bridge.settings_problem(settings(tmp_home, ok)) is None
-    assert bridge.settings_problem(settings(tmp_home, {"permissions": {}})) is None
-    assert bridge.settings_problem(settings(tmp_home, {"hooks": {}})) is None
-
-
-@pytest.mark.parametrize(
-    "document",
-    [
-        {"permissions": {"allow": ["mcp__claude_ai_Slack__slack_send_message"]}},
-        {"permissions": {"allow": ["Read", "mcp__claude_ai_Slack"]}},
-        {"permissions": {"allow": ["MCP"]}},
-        {"permissions": {"allow": "mcp__x"}},
-        "{not json",
-        "[1]",
-    ],
-)
-def test_an_mcp_allow_rule_or_unreadable_settings_refuse_the_call(
-    tmp_home: Path, document: object
-) -> None:
-    config = settings(tmp_home, document)
-
-    if document == "[1]":
-        assert bridge.settings_problem(config) is None  # a list has no permissions: nothing allowed
-        return
-    assert bridge.settings_problem(config) is not None
-
-
-def test_a_call_with_such_a_settings_file_is_refused_before_anything_runs(
-    world: World, tmp_home: Path
-) -> None:
-    fresh_claude_account(world, "main", weekly=1, active=True)
-    settings(tmp_home, {"permissions": {"allow": ["mcp__claude_ai_Slack__slack_send_message"]}})
-
-    text, failed = bridge_for(world).call("slack_search", {"query": "x"})
-
-    assert failed and text.startswith("refused:") and "allow rule for an MCP tool" in text
-    assert world.claude_calls() == []
-    # and the unsafe file is the only reason: with it removed the same call runs
-    (tmp_home / ".claude" / "settings.json").unlink()
-    assert bridge_for(world).call("slack_search", {"query": "x"})[1] is False
-
-
-def test_the_bridge_is_disabled_until_a_live_denial_has_been_shown(
-    tmp_home: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    ctx = cli.Context(
-        root=tmp_home / ".vibemaxxing",
-        client=None,  # type: ignore[arg-type]
-        port=None,  # type: ignore[arg-type]
-        now_s=NOW_S,
-    )
-
-    assert bridge.ENABLED is False  # the shipped value
-    assert cli.main(["bridge", "serve"], context=ctx) == 2
-    assert cli.main(["bridge", "add-command"], context=ctx) == 2
+    assert rig.asked == ["prompt", "secret"]
     err = capsys.readouterr().err
-    assert err.count("the bridge is disabled") == 2 and "non-allowed tool" in err
-    assert "claude mcp add" not in err  # nothing to register
+    assert "APPSECRET000000001" not in err
+    assert "chat:write" in urllib.parse.unquote(rig.opened[0])
+    assert mcp_oauth.service(SLACK, "client-secret") in rig.secrets.items
 
 
-# --- the fence check: the model is offered exactly the one allowed tool ---------------------------
+def test_an_unknown_upstream_and_microsoft_365_are_not_options(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rig = CliRig(tmp_path)
 
-FIXTURE = json.loads(
-    (Path(__file__).with_name("fixtures") / "init_tools_2026-11-03.json").read_text()
-)["tools"]
-ALLOWED = "mcp__claude_ai_Slack__slack_read_user_profile"
-
-
-def init_text(tools: list[str], *, pending: bool = False, mode: str = "default") -> str:
-    servers = sorted({t.split("__")[1] for t in FIXTURE})
-    return json.dumps(
-        {
-            "type": "system",
-            "subtype": "init",
-            "permissionMode": mode,
-            "tools": tools,
-            "mcp_servers": [
-                {
-                    "name": s,
-                    "status": "pending" if pending and s == "claude_ai_Slack" else "connected",
-                }
-                for s in servers
-            ],
-        }
-    )
+    with pytest.raises(SystemExit):
+        rig.main("bridge", "login", "m365")
+    assert "invalid choice" in capsys.readouterr().err
 
 
-class Probes:
-    """A fake probe runner: offers the recorded connectors' tools minus --disallowedTools."""
+def test_add_command_prints_the_line_for_extras_config_dir_and_runs_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rig = CliRig(tmp_path)
 
-    def __init__(self, *, offered: list[str] | None = None, pending: int = 0) -> None:
-        self.offered = list(FIXTURE if offered is None else offered)
-        self.pending = pending
-        self.calls: list[list[str]] = []
+    assert rig.main("bridge", "add-command") == 0
 
-    def __call__(self, argv: list[str]) -> str:
-        self.calls.append(argv)
-        assert "stream-json" in argv and "--verbose" in argv
-        assert argv[argv.index("-p") + 1] == bridge.PROBE_PROMPT  # no real prompt in a probe
-        denied = (
-            set(argv[argv.index("--disallowedTools") + 1].split(","))
-            if "--disallowedTools" in argv
-            else set()
-        )
-        tools = [t for t in self.offered if t not in denied]
-        if self.pending > 0:
-            self.pending -= 1
-            return init_text([t for t in tools if "claude_ai_Slack" not in t], pending=True)
-        return init_text(tools)
-
-
-def fence(**kw: object) -> tuple[bridge.Fence, list[float], list[float]]:
-    now = [1_000.0]
-    sleeps: list[float] = []
-    f = bridge.Fence(clock=lambda: now[0], sleep=sleeps.append, **kw)  # type: ignore[arg-type]
-    return f, now, sleeps
-
-
-TOOL = bridge.BY_NAME["slack_read_profile"]
-
-
-def test_the_recorded_listing_is_the_real_one() -> None:
-    assert len(FIXTURE) == 178 and ALLOWED in FIXTURE
-    assert "mcp__claude_ai_Slack__slack_send_message" in FIXTURE  # found only by the final init
-    assert any(t.startswith("mcp__chrome-devtools__") for t in FIXTURE)
-    assert any("send_mail" in t for t in FIXTURE)  # write tools were offered
-
-
-def test_the_init_event_is_parsed_and_judged() -> None:
-    listing = bridge.parse_init("noise\n" + init_text([ALLOWED]) + "\n" + '{"type":"result"}')
-    assert listing is not None and listing.tools == (ALLOWED,) and listing.settled
-    assert bridge.fence_problem(listing, ALLOWED) is None
-    assert bridge.parse_init("no events here") is None and bridge.parse_init("{broken") is None
-
-    other = bridge.parse_init(
-        init_text([ALLOWED, "mcp__x__a", "mcp__x__b", "mcp__x__c", "mcp__x__d"])
-    )
-    assert other is not None
-    problem = bridge.fence_problem(other, ALLOWED)
+    out = capsys.readouterr().out
     assert (
-        problem is not None
-        and "4 tool(s) other than the allowed one" in problem
-        and "and 1 more" in problem
+        "CLAUDE_CONFIG_DIR=~/.claude-extra claude mcp add --scope user vibe-bridge -- vibe bridge serve"
+        in out
     )
-    empty = bridge.parse_init(init_text([]))
-    assert empty is not None and "allowed tool is not offered" in str(
-        bridge.fence_problem(empty, ALLOWED)
+    assert "vibe does not" in out
+    assert rig.main("bridge", "add-command", "--config-dir", "~/.claude-work") == 0
+    assert "CLAUDE_CONFIG_DIR=~/.claude-work claude mcp" in capsys.readouterr().out
+
+
+def test_the_bridge_has_no_model_and_no_nested_claude_left() -> None:
+    source = (REPO / "src" / "vibemaxxing" / "bridge.py").read_text()
+    for gone in (
+        "claude_argv",
+        "run_headless",
+        "Fence",
+        "settings_problem",
+        "--allowedTools",
+        "subprocess",
+    ):
+        assert gone not in source, gone
+    launch = (REPO / "src" / "vibemaxxing" / "launch.py").read_text()
+    assert "bridge" not in launch
+
+
+# --- the HTTP layer the bridge relies on ---------------------------------------------------------------------
+
+
+def test_the_urllib_client_returns_headers_caps_the_body_and_keeps_a_401s_headers() -> None:
+    import http.server
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == "/401":
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Bearer resource_metadata="x"')
+                self.end_headers()
+                return
+            body = b"x" * (5000 if self.path == "/big" else 10)
+            self.send_response(200)
+            self.send_header("Mcp-Session-Id", "s-1")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a: object) -> None:
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    client = UrllibClient(frozenset({"127.0.0.1"}))
+    try:
+        ok = client.request("GET", f"{base}/ok", headers={})
+        assert ok.status == 200 and ok.headers["mcp-session-id"] == "s-1"
+        with pytest.raises(Exception, match="larger than 1000 bytes"):
+            client.request("GET", f"{base}/big", headers={}, max_bytes=1000)
+        with pytest.raises(HTTPError) as caught:
+            client.request("GET", f"{base}/401", headers={})
+        assert (
+            caught.value.status == 401
+            and "resource_metadata" in caught.value.headers["www-authenticate"]
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_bridge_client_talks_to_the_upstreams_hosts_only() -> None:
+    from vibemaxxing.httpclient import BRIDGE_HOSTS
+
+    assert (
+        frozenset({"mcp.slack.com", "slack.com", "mcp.atlassian.com", "auth.atlassian.com"})
+        == BRIDGE_HOSTS
     )
-    odd = bridge.parse_init(init_text([ALLOWED], mode="bypassPermissions"))
-    assert odd is not None and "bypassPermissions" in str(bridge.fence_problem(odd, ALLOWED))
-    builtin = bridge.parse_init(init_text([ALLOWED, "Bash"]))
-    assert builtin is not None and bridge.fence_problem(builtin, ALLOWED) is not None
-    pending = bridge.parse_init(init_text([], pending=True))
-    assert pending is not None and not pending.settled
+    assert SLACK.hosts | ATLASSIAN.hosts == BRIDGE_HOSTS
+    client = UrllibClient(BRIDGE_HOSTS)
+    for url in ("https://claude.ai/x", "https://api2.cursor.sh/x", "https://evil.example/x"):
+        with pytest.raises(Exception, match="refusing to contact"):
+            client.request("GET", url, headers={})
 
 
-def test_discovery_then_a_full_deny_list_then_a_verification() -> None:
-    probes = Probes()
-    f, _, _ = fence()
-
-    extra = f.deny_list(BridgeConfig(), TOOL, "real prompt", probes)
-
-    assert sorted(extra) == sorted(t for t in FIXTURE if t != ALLOWED)  # all servers incl. chrome
-    assert len(probes.calls) == 2
-    discovery, verification = probes.calls
-    assert "--disallowedTools" not in discovery  # discovery sees everything
-    denied = verification[verification.index("--disallowedTools") + 1].split(",")
-    assert ALLOWED not in denied and "mcp__chrome-devtools__click" in denied
-    assert "mcp__claude_ai_Microsoft_365__outlook_send_mail" in denied
-    for argv in probes.calls:  # the other fences are on in a probe too
-        assert argv[argv.index("--permission-prompts") + 1] == "none"
-        assert argv[argv.index("--tools") + 1] == "" and "--setting-sources" in argv
-
-
-def test_the_result_is_cached_per_argv_and_rechecked_after_ten_minutes() -> None:
-    probes = Probes()
-    f, now, _ = fence()
-    f.deny_list(BridgeConfig(), TOOL, "p", probes)
-
-    f.deny_list(BridgeConfig(), TOOL, "another prompt", probes)  # same argv hash: no probe
-    assert len(probes.calls) == 2
-
-    other = bridge.BY_NAME["slack_search"]  # another tool: discovery reused, one verification
-    f.deny_list(BridgeConfig(), other, "p", probes)
-    assert len(probes.calls) == 3
-
-    now[0] += bridge.RECHECK_S + 1  # the connector list may have moved: both again
-    f.deny_list(BridgeConfig(), TOOL, "p", probes)
-    assert len(probes.calls) == 5
-
-
-def test_a_connector_that_gains_a_tool_is_caught_and_denied_after_the_recheck() -> None:
-    probes = Probes()
-    f, now, _ = fence()
-    f.deny_list(BridgeConfig(), TOOL, "p", probes)
-
-    probes.offered.append("mcp__claude_ai_Slack__slack_new_writer")  # appears later
-    now[0] += bridge.RECHECK_S + 1
-    extra = f.deny_list(BridgeConfig(), TOOL, "p", probes)
-
-    assert "mcp__claude_ai_Slack__slack_new_writer" in extra  # rediscovered, and denied
-
-
-def test_something_that_cannot_be_denied_fails_the_check_and_forces_a_rediscovery() -> None:
-    class Stubborn(Probes):
-        def __call__(self, argv: list[str]) -> str:
-            self.calls.append(argv)
-            denied = (
-                set(argv[argv.index("--disallowedTools") + 1].split(","))
-                if "--disallowedTools" in argv
-                else set()
-            )
-            return init_text([t for t in FIXTURE if t not in denied] and [ALLOWED, "Bash"])
-
-    probes = Stubborn()
-    f, _, _ = fence()
-
-    with pytest.raises(BridgeError, match="fence check failed: 1 tool"):
-        f.deny_list(BridgeConfig(), TOOL, "p", probes)
-    before = len(probes.calls)
-    with pytest.raises(BridgeError):
-        f.deny_list(BridgeConfig(), TOOL, "p", probes)
-    assert len(probes.calls) >= before + 2  # nothing was cached: discovery and verification again
-
-
-def test_the_allowed_tool_missing_from_the_connectors_is_refused() -> None:
-    probes = Probes(offered=[t for t in FIXTURE if t != ALLOWED])
-    f, _, _ = fence()
-
-    with pytest.raises(BridgeError, match="allowed tool is not offered"):
-        f.deny_list(BridgeConfig(), TOOL, "p", probes)
-
-
-def test_a_pending_connector_is_waited_for_never_read_as_no_tools() -> None:
-    probes = Probes(pending=2)
-    f, _, sleeps = fence()
-
-    extra = f.deny_list(BridgeConfig(), TOOL, "p", probes)
-
-    assert ALLOWED not in extra and len(sleeps) == 2  # slept, retried, then found Slack connected
-    stuck = Probes(pending=99)
-    g, _, naps = fence()
-    with pytest.raises(BridgeError, match="stayed pending"):
-        g.deny_list(BridgeConfig(), TOOL, "p", stuck)
-    assert len(stuck.calls) == bridge.PENDING_RETRIES and len(naps) == bridge.PENDING_RETRIES - 1
-
-
-def test_a_probe_without_an_init_event_is_a_failure() -> None:
-    f, _, _ = fence()
-
-    with pytest.raises(BridgeError, match="printed no init event"):
-        f.deny_list(BridgeConfig(), TOOL, "p", lambda argv: "nothing useful")
-
-
-# --- through the bridge, on the fake claude ------------------------------------------------------
-
-
-def test_a_real_call_runs_the_probes_first_then_the_call_with_everything_else_denied(
-    world: World,
+def test_an_mcp_client_reads_a_json_array_batch_and_rejects_a_foreign_answer(
+    slack: FakeUpstream,
 ) -> None:
-    fresh_claude_account(world, "main", weekly=1, active=True)
-    server = bridge_for(world)
+    seed_client = McpClient(
+        _Router({"slack": slack}),
+        SLACK.mcp_url,
+        lambda force: Secret(slack.access),
+        timeout_s=5,
+        max_bytes=100_000,
+    )
+    assert [t["name"] for t in seed_client.list_tools()][:1]
 
-    text, failed = server.call("slack_read_profile", {"user": "U1"})
+    class Odd(FakeUpstream):
+        def _reply(self, ident, result, headers=None, error=None):  # type: ignore[no-untyped-def]
+            return self._json({"jsonrpc": "2.0", "id": 999, "result": {}})
 
-    assert (text, failed) == ('{"from": "claude"}', False)
-    assert len(world.claude_probes()) == 2
-    (call,) = world.claude_calls(full=True)
-    argv = call["argv"]
-    assert isinstance(argv, list)
-    denied = argv[argv.index("--disallowedTools") + 1].split(",")
-    assert sorted(denied) == sorted(t for t in FIXTURE if t != ALLOWED)
-    assert argv[argv.index("--allowedTools") + 1] == ALLOWED
-    server.call("slack_read_profile", {"user": "U2"})
-    assert len(world.claude_probes()) == 2  # cached: no new probe
-
-
-def test_a_fence_that_does_not_hold_stops_the_call_before_it_runs(
-    world: World, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fresh_claude_account(world, "main", weekly=1, active=True)
-    monkeypatch.setenv(
-        "FAKE_CLAUDE_EXTRA_TOOLS", "mcp__user_server__do_anything"
-    )  # cannot be denied
-
-    text, failed = bridge_for(world).call("slack_read_profile", {"user": "U1"})
-
-    assert failed and "fence check failed" in text and "do_anything" in text
-    assert world.claude_calls() == []  # the real call never started
-    entries = [json.loads(x) for x in bridge.log_path(world.root).read_text().splitlines()]
-    assert entries[-1]["outcome"] == "failed"
+    odd = Odd(SLACK, tools=dict(slack.tools), access=slack.access)
+    broken = McpClient(
+        _Router({"slack": odd}),
+        SLACK.mcp_url,
+        lambda force: Secret(odd.access),
+        timeout_s=5,
+        max_bytes=100_000,
+    )
+    with pytest.raises(McpError, match="holds no response to the request"):
+        broken.call_tool("slack_read_channel", {})
 
 
-def test_an_unexpected_permission_mode_stops_the_call(
-    world: World, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fresh_claude_account(world, "main", weekly=1, active=True)
-    monkeypatch.setenv("FAKE_CLAUDE_MODE", "bypassPermissions")
+def test_routing_still_accepts_a_bridge_member(tmp_path: Path) -> None:
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"schema": 1, "routing": {"bridge": {"max_calls_per_hour": 7}}})
+    )
 
-    text, failed = bridge_for(world).call("slack_read_profile", {"user": "U1"})
+    routing = route.read_routing(tmp_path)
 
-    assert failed and "bypassPermissions" in text and world.claude_calls() == []
-
-
-def test_a_connector_still_pending_is_retried_through_the_bridge(
-    world: World, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fresh_claude_account(world, "main", weekly=1, active=True)
-    monkeypatch.setenv("FAKE_CLAUDE_PENDING", "1")
-    monkeypatch.setattr("time.sleep", lambda _: None)
-
-    _, failed = bridge_for(world).call("slack_read_profile", {"user": "U1"})
-
-    assert failed is False and len(world.claude_probes()) >= 3  # one was pending, then settled
-
-
-def test_the_shipped_bridge_is_still_disabled_until_a_live_init_shows_the_allowed_tool_alone() -> (
-    None
-):
-    assert bridge.ENABLED is False
+    assert parse_config(routing.bridge).max_calls_per_hour == 7

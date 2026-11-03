@@ -51,6 +51,7 @@ class FakeHttpClient:
         headers: Mapping[str, str],
         body: bytes | None = None,
         timeout_s: float = 10.0,
+        max_bytes: int = 8 * 1024 * 1024,
     ) -> HttpResponse:
         self.requests.append(RecordedRequest(method, url, dict(headers), body))
         if not self.responses:

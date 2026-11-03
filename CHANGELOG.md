@@ -7,6 +7,13 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **vibe-bridge v2: no model in the bridge.** `vibe bridge serve` now forwards each call, as an MCP client,
+  straight to Slack's and Atlassian's own remote MCP servers with the user's own OAuth login (`vibe bridge
+  login|logout|status|tools`), exactly one allowlisted upstream tool per call (reads, and Slack's own
+  draft tool), tokens only in the Keychain, a timeout, a per-hour cap, a size cap and a content-free
+  log. The v1 nested-`claude -p` bridge, its fence check and its disabled switch are removed. No
+  Microsoft 365 (its remote MCP needs admin consent). `docs/CONTRACT.md` section 20.
+
 - **Cursor on every surface.** The TUI and the web dashboard show a Cursor seat as one more ledger
   entry (included + bonus, on-demand against the cap, reset, routing state), `vibe statusline` appends
   `cursor: 0.1% $0/$250` (`?` for unknown or old numbers, `spent (resets ...)`), and `status.json` has a

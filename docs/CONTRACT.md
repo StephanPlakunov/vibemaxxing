@@ -214,6 +214,10 @@ Rules, in force everywhere:
    - `cli` — the `CLAUDE_CODE_OAUTH_TOKEN` value in the child env of `vibe run`
    (fork) `cursor_usage._rpc()` — the `Authorization` header of the two Cursor usage calls
    (§19). The Cursor token is read at that request, held in a `Secret`, never stored.
+   (fork, §20) the bridge's upstream logins: `mcp_client.McpClient._post()` (the `Authorization` header
+   and the DELETE), `mcp_oauth.save()` (a token on the Keychain tool's standard input), and the
+   token-endpoint bodies in `mcp_oauth.login()` and `mcp_oauth.refresh_tokens()` (the user's own app
+   secret, the refresh token).
    (fork) `vibe add --from-config-dir` and `status.json` add none: the import parses the
    blob into `Secret`s and writes it through `credential_to_disk`, and the status holds no
    token.
@@ -253,7 +257,10 @@ passes it down. No test may reach the network.
 Allowed hosts, and no others: `claude.ai`, `platform.claude.com`, `api.anthropic.com`.
 No version pings, no analytics, no telemetry. (fork) A second client, `UrllibClient(CURSOR_HOSTS)`,
 may talk to `api2.cursor.sh` and nothing else; the default client refuses that host and the
-Cursor client refuses every Claude host, so neither token can reach the other's servers.
+Cursor client refuses every Claude host, so neither token can reach the other's servers. A third,
+`UrllibClient(BRIDGE_HOSTS)` (`mcp.slack.com`, `slack.com`, `mcp.atlassian.com`,
+`auth.atlassian.com`), is the bridge's (§20). `HttpResponse` carries lower-cased response headers,
+`HTTPError` the headers of a 4xx, and `request` takes `max_bytes` (the body is cut off past it).
 
 Every request carries `User-Agent: vibemaxxing/<version>` unless the caller sets its own.
 Cloudflare fronts all three hosts and rejects urllib's default `Python-urllib/3.x` with a
@@ -1703,8 +1710,7 @@ stops (exit 1, no output): `vibe run --trust-workspace` adds `--trust`, nothing 
 
 Every child `vibe run` starts gets `childenv.build(...)`: the Claude family
 (`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
-Bedrock/Vertex/Foundry switches) is always dropped; a *strict* child (Cursor, the bridge's nested
-run) also loses every name ending `_TOKEN`, `_API_KEY`, `_SECRET`, `_SECRET_KEY`, `_ACCESS_KEY`,
+Bedrock/Vertex/Foundry switches) is always dropped; a *strict* child (Cursor) also loses every name ending `_TOKEN`, `_API_KEY`, `_SECRET`, `_SECRET_KEY`, `_ACCESS_KEY`,
 `_PASSWORD` not named in `--pass-env`; a Claude credential can never be passed. What the account
 needs is set last. Names are reported, values never. When the shell carries a Claude token or
 config dir (`parent_carries_claude_account`), the chosen Claude account runs on its own token set
@@ -1734,73 +1740,61 @@ nothing.
 
 ---
 
-## 20. vibe-bridge (fork)
+## 20. vibe-bridge v2 (fork)
 
-**Disabled** (`bridge.ENABLED = False`, a constant): `vibe bridge serve` and `add-command` refuse.
-Live record (3 Nov 2026, scratch cwd, live login main, strict env): reading `slack_read_user_profile`
-works without `--setting-sources` and with `--setting-sources user` (2 turns, tool data returned, 0
-denials); with `--setting-sources project` the model could not call the tool (1 turn). Denial of a
-non-allowed read tool: two attempts, both with no tool call (1 turn, 0 denials), so not shown.
-Init listing (one run, production argv with `--output-format stream-json --verbose`, prompt "reply
-ok, call no tool", permission mode reported as `default`): the model is OFFERED about 150 tools:
-every tool of the claude.ai connectors Slack (21), Atlassian Rovo, Microsoft 365, Google Calendar,
-Google Drive and Claude Docs, write tools included, plus `chrome-devtools` (user-scope MCP). So
-`--tools ""` and `--setting-sources user` hide nothing of that, and a non-allowed call is stopped
-only by `--permission-prompts none` (documented; no denial observed yet). Connector names as
-listed: servers `claude_ai_Slack`, `claude_ai_Atlassian_Rovo`, `claude_ai_Microsoft_365`; Slack has no
-send-message or draft tool (a later init showed it does: see below).
+`vibe bridge serve` (`bridge.py`): a stdio MCP server (newline-delimited JSON-RPC 2.0: `initialize`,
+`ping`, `tools/list`, `tools/call`; notifications get no answer) for the extra account. A call is
+forwarded by vibe, as an MCP **client** (`mcp_client.py`, Streamable HTTP, JSON or event-stream answers),
+straight to a vendor's own remote MCP server as exactly one upstream tool. **No model is anywhere in the
+path.** (v1 ran a nested `claude -p`/`cursor-agent`; it could not be fenced, because a connector's
+offered tool set is partial and varies between runs, and is removed with no fallback.)
 
-Second init listing (one run): `--disallowedTools` = all 171 other tools (fixture
-`tests/fixtures/init_tools_2026-11-03.json`, 172 tools, 7 servers incl. `chrome-devtools`): exit 0,
-init lists **0 tools** with six servers `connected` and `claude.ai Slack` `pending`: deny rules remove
-tools from what the model is offered; the allowed tool was absent only because its connector had
-not connected when the init fired. `--strict-mcp-config` ("only use MCP servers from --mcp-config")
-would also drop the claude.ai connectors (Claude Code docs), so it is not used.
-`bridge.Fence` (built, tested on fakes, not yet live-verified): discovery probe (no deny list),
-deny = every offered tool but the allowed one (+ the write-tool names), verification probe whose
-`system/init` must offer exactly the allowed tool in permission mode default/manual; a `pending`
-server is retried (4 tries, 3 s), never read as "no tools"; cached per argv hash and re-discovered
-every 600 s; a failed check clears the cache and refuses the call before the real run. Enable
-(`ENABLED = True`) only after one live init shows exactly the allowed tool.
+**The allowlist is `bridge.TOOLS`**, in code: Slack reads (`slack_read_channel`, `slack_read_thread`,
+`slack_read_user_profile`, `slack_search_public`, `slack_search_public_and_private`,
+`slack_search_channels`, `slack_search_users`, `slack_list_channel_members`,
+`slack_list_user_channels`, `slack_get_reactions`, `slack_read_canvas`, `slack_read_file`,
+`slack_read_list`), the draft `slack_send_message_draft`, and Atlassian v2 reads (names prefixed
+`atlassian_`: `atlassianUserInfo`, `getAccessibleAtlassianResources`, `getJiraIssue`,
+`searchJiraIssuesUsingJql`, `listJiraProjects`, `listJiraIssueTransitions`, `listJiraIssueComments`,
+`lookupJiraAccountId`, `getConfluenceContent`, `searchConfluence`, `listConfluenceContent`,
+`listConfluenceSpaces`, `getConfluenceSpace`, `listConfluenceComments`, `search`). A test pins that each
+non-draft name starts with a read verb and holds no write word. Any other name is a result with
+`isError: true` and "ask the lead", before any network. `tools/list` shows the allowlisted tools of the
+upstreams the user is logged in to, with the upstream's own description and input schema (read from its
+own `tools/list`, cached 600 s, 60 s after a failure), leaving out a tool the upstream does not offer; an
+unreadable catalog lists the allowlist with a permissive schema. Arguments are passed verbatim (at most
+20 kB). No Microsoft 365: Work IQ MCP needs a Global Administrator's consent.
 
-Final live init (Slack `connected` after one try, the 171 tools of the first listing denied): offered
-the allowed tool PLUS `slack_add_reaction`, `slack_create_canvas`, `slack_schedule_message`,
-`slack_send_message`, `slack_send_message_draft`, `slack_update_canvas`. The first init had listed 21
-Slack tools while the server said `connected`; this one revealed six more (27 in all). So a listing,
-even of a connected server, is partial and varies between runs: an init check can pass on a partial
-listing while the real run is offered more. **`ENABLED` stays False**; the Fence is necessary, not
-sufficient. The first list's "no send tool" was an artifact; `WRITE_TOOLS` and the fixture hold all 27.
+**Auth (`mcp_oauth.py`)**: `Upstream` (id, MCP URL, protected-resource-metadata URL, host list,
+registration `dcr` | `preregistered`, read scopes, draft scopes). Slack: preregistered (its metadata
+offers no registration endpoint; MCP clients must be backed by a registered Slack app), redirect URL
+`http://127.0.0.1:<port>/callback`, `client_secret_post`; Atlassian: dynamic registration as a public
+client, resource `https://mcp.atlassian.com/v2/mcp`, issuer from its metadata. Authorization code with
+PKCE S256 (`oauth.new_verifier`), state checked by the one-shot `LoopbackReceiver`; token exchange and
+refresh as form posts. Scopes asked: read scopes only; `vibe bridge login --drafts` adds the draft
+scopes. Every URL in a discovery document must be `https` on the upstream's own hosts, else nothing is
+sent (`BRIDGE_HOSTS`, a client of its own like Cursor's). **Storage**: three Keychain items per
+upstream (`vibemaxxing-bridge-<id>-access|refresh|client-secret`, account `vibemaxxing`), written
+through `security -i` on its standard input (a value is never in argv; it is read back and compared,
+since `security -i` truncates long lines; a value must match `[A-Za-z0-9._~+/=-]{8,3500}`), and a non-secret
+`~/.vibemaxxing/bridge/<id>.json` (client id, expiry, scopes, endpoints). `refresh_tokens` refreshes
+within 60 s of expiry, under a lock file, re-reading what is stored first (another bridge process may
+have rotated the token), and stores the rotated pair before use; a 401 refreshes once and retries; a dead
+refresh token is "log in again". Errors carry the OAuth error code and status, never a body or a value.
+New permitted `reveal()` sites (§5): the Authorization header (`mcp_client`), the Keychain write
+(`mcp_oauth.save`), the token-endpoint bodies (`mcp_oauth.login`, `refresh_tokens`).
 
-`vibe bridge serve` (`bridge.py`): newline-delimited JSON-RPC 2.0 on stdio (`initialize`,
-`ping`, `tools/list`, `tools/call`; notifications get no answer). `tools/list` is the allowlist
-in `bridge.TOOLS`: reads and two drafts, each with a closed input schema. A call of any other name
-is a result with `isError: true` and "ask the lead", before any account is chosen. Arguments are
-checked (names, types) before anything is spent. A call: guard (calls per hour, sliding window,
-per process) -> `launch.bridge_pick` -> `launch.bridge_execute` -> the result, with fences
-stripped.
+**Per call**: a deadline (`routing.bridge.timeout_s`, 60; a daemon thread), a calls-per-hour cap per
+bridge process (30), a result size cap (`max_result_bytes`, 100 kB; larger is refused, never cut), text
+content returned as data (other content replaced by a note), an upstream `isError` result returned as an
+error result, and one log line in `bridge.log` (0600): `{at, upstream, tool, ms, bytes, outcome}` with
+outcome `ok`, `upstream-error`, `failed`, `timeout`, `too-large`, `limit` or `refused`. No arguments, no
+content, no token. `routing.bridge` (`timeout_s`, `max_calls_per_hour`, `max_result_bytes`) cannot add a
+tool or an upstream. Commands: `vibe bridge login <slack|atlassian> [--client-id] [--drafts] [--port]`,
+`logout <upstream|all>`, `status`, `tools <upstream>`, `serve`, `add-command [--config-dir]` (prints the
+`claude mcp add` line for `~/.claude-extra`, runs nothing).
 
-**Claude Code on main only, in code.** `bridge_pick` decides with the fixed order `main` (no
-budget, no last resort) and `claude_only=True`, whatever `settings.json` says; main must be
-healthy, else the call is refused with the reason. `bridge_execute` raises on a Cursor route, and
-`routing.bridge` has no key for the order or for Cursor (an old `order`, `cursor_effort` or
-`cursor_read_mode` is refused as unknown). Reason: Cursor has no per-run allowed-tools flag, its
-`--mode ask` is documented as "read-only exploration" and not as a boundary for MCP tools, and an
-attempt to show it blocks MCP writes is not allowed; a Cursor run could therefore be made to call a
-write tool by a prompt-injected result. Reads and drafts alike stay off Cursor until that is
-shown.
-
-The run: `claude -p <prompt> --model haiku --output-format json --tools "" --setting-sources
-user --settings '{"disableAllHooks": true}' --permission-mode manual --permission-prompts none --allowedTools <one tool> --disallowedTools <every known write tool of that connector>
---no-session-persistence`, started in `~/.vibemaxxing/bridge-workspace` with `CLAUDE_CONFIG_DIR`
-and `CLAUDE_CODE_OAUTH_TOKEN` of the caller removed; the account's token is lent only when it is
-not Claude Code's live login. `--permission-prompts none` is documented in `claude --help` as
-"nobody: anything that would prompt is denied automatically". The clock is read per call.
-`routing.bridge`: `timeout_s` (90), `max_calls_per_hour` (30), `claude_model`,
-`claude_tool_pattern` (`mcp__claude_ai_{server}__{tool}`), `tools` (bridge tool -> connector tool
-name). `bridge.log` (0600): `{at, account, kind, tool, ms, outcome}` with outcome `ok`, `failed`,
-`refused`, `limit` or `no-account`. `vibe bridge add-command` prints the `claude mcp add` line
-for `~/.claude-extra` and runs nothing. Connector tool names and write-tool lists are defaults;
-only `slack_read_user_profile` is checked against the live connector (with the final argv minus
-`--settings`). `settings_problem` reads `<home>/.claude/settings.json` before every call and refuses
-it if it holds an MCP allow rule or cannot be read (allow rules add to `--allowedTools`). A denial or
-an error result is a `failed` call. `tools` cannot remap a tool onto a write tool.
+**Not verified live**: nobody has logged in to either upstream, so the upstreams' actual tool names and
+argument shapes, Slack's redirect-URL rules and the scope its draft tool needs, Atlassian's
+acceptance of a loopback redirect and of these scopes, and the answers' exact shapes are from the
+vendors' documents and metadata only (`vibe bridge tools <upstream>` checks the names after a login).

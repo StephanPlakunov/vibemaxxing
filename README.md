@@ -311,8 +311,7 @@ Claude Code status line already runs `vibe statusline`, the new segment needs no
 
 ### The child's environment
 
-Every child vibe starts gets an environment built on purpose. For Cursor (and for the bridge's
-nested run) vibe drops `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`,
+Every child vibe starts gets an environment built on purpose. For Cursor vibe drops `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`,
 `ANTHROPIC_AUTH_TOKEN`, the Bedrock/Vertex switches and every `*_TOKEN`, `*_API_KEY`, `*_SECRET`,
 `*_PASSWORD` you did not pass on purpose (`vibe run cursor --pass-env NAME,NAME`; never a Claude
 credential). A Claude Code child loses only the Claude family and is then given its account's
@@ -410,76 +409,58 @@ is logged in to it, so check `--needs` runs on Cursor before relying on them.
 
 ## The connector bridge (`vibe-bridge`)
 
-**Disabled.** `vibe bridge serve` and `vibe bridge add-command` refuse until a live check has shown
-that a non-allowed tool of the same connector is denied (`bridge.ENABLED`, a constant: no setting
-switches it on). Reading through the connector works, measured live. The denial was not shown (two
-attempts: the nested run made no tool call at all). A stream-json init listing of the production
-argv shows why this is not a stronger fence: **the model is offered every tool of every connector**
-(Slack, Atlassian Rovo, Microsoft 365, Google Calendar and Drive, Claude Docs, plus the user-scope
-`chrome-devtools` server), write tools included (Jira create/edit/transition, Outlook send/delete,
-Teams send, Slack list and conversation writers). `--tools ""` hides only built-in tools and
-`--setting-sources user` does not hide user-scope MCP servers. What stops a non-allowed call is
-`--permission-prompts none` alone, which is documented but unproven live. A second init listing,
-with a deny list of every tool in the first except the allowed one, offered **no tool at all** (six
-servers connected, 171 tools denied): deny rules do remove tools from what the model is offered. The
-allowed Slack tool was missing too because that connector was still `pending` when the init fired.
-So the bridge carries a **fence check** (`bridge.Fence`, built and tested on fakes): it asks the
-connectors what they offer, denies all of it except the one allowed tool, and runs a second probe
-whose init must offer exactly that tool. **The final live run refused it:** with Slack `connected`
-and the 171 tools of the first listing denied, the model was still offered the allowed read plus six
-more Slack tools (`slack_send_message`, `slack_send_message_draft`, `slack_schedule_message`,
-`slack_add_reaction`, `slack_create_canvas`, `slack_update_canvas`). The first listing had shown 21 of
-Slack's 27 tools while the server already said `connected`. So an init listing is not a complete
-list, and a check on it can pass on a partial one while the real run is offered more. No check of
-the offered set is proof, and the bridge stays disabled.
-`--strict-mcp-config` is not an option: it ignores all other MCP configuration and, per Claude Code's
-docs, also suppresses the claude.ai connectors, i.e. the allowed tool.
+A session on the extra account has no Slack or Atlassian connector. `vibe bridge serve` is a small
+local stdio MCP server you register for extra only. Each call is forwarded **by vibe itself, as an MCP
+client, straight to the vendor's own remote MCP server**, as exactly one allowlisted upstream tool with
+the arguments given. **No model is in the path**: nothing sees the upstream's tool list, so there is
+nothing for a prompt injection to widen and nothing to fence with a prompt or a deny list.
 
-A session on extra has no Slack, Atlassian or Microsoft 365, and a running Claude Code session
-cannot switch accounts mid-way (it keeps the login and connector list it started with, and
-switching under it breaks Remote Control). So extra borrows a connector one call at a time:
-`vibe bridge serve` is a small local stdio MCP server whose tools mirror a short allowlist.
+- **The allowlist is code** (`bridge.TOOLS`): reads, and the upstream's own draft tool
+  (`slack_send_message_draft`). A name not on it is refused before any network is touched, whatever the
+  upstream offers. Never send, schedule, post, react, create, update or delete.
+- **Upstreams**: Slack's official MCP (`https://mcp.slack.com/mcp`) and Atlassian Rovo MCP v2
+  (`https://mcp.atlassian.com/v2/mcp`). **Microsoft 365 is left out**: Microsoft's own remote MCP (Work IQ)
+  needs a Global Administrator's consent, which is not your own OAuth.
+- **Your own OAuth login per upstream** (the MCP authorization spec: resource and server metadata,
+  dynamic client registration if offered, PKCE S256, the browser, a one-shot listener on `127.0.0.1`
+  for the redirect). Tokens live only in the macOS Keychain under `vibemaxxing-bridge-<upstream>-*`:
+  handed to the Keychain tool on its standard input, never a file, a log, an error or a command line.
+  Refresh is handled (the rotated token is stored before it is used, under a lock). Every endpoint a
+  discovery document names must be on that upstream's own hosts, or nothing is sent.
+- **Each call**: a timeout (60 s), at most 30 calls per hour per bridge process, a result size cap
+  (100 kB: refused, not cut), results returned as data, and one log line in `~/.vibemaxxing/bridge.log`
+  (upstream, tool, duration, bytes, outcome; never arguments or content). `routing.bridge` can set
+  `timeout_s`, `max_calls_per_hour`, `max_result_bytes`; it cannot add a tool or an upstream.
 
-- **Reads**: `slack_read_channel`, `slack_read_thread`, `slack_search`, `slack_read_profile`,
-  `atlassian_get_issue`, `atlassian_search_jql`, `atlassian_get_page`, `m365_search_mail`,
-  `m365_read_mail`, `m365_search_chat`, `m365_read_chat`. **Drafts**: `slack_create_draft`,
-  `outlook_create_draft`.
-- **Never**: sending, posting, creating or transitioning tickets, deleting, reactions. Any other
-  tool name is refused with "ask the lead".
-- Each call runs one headless **Claude Code** run on **main** and nowhere else, with only that one
-  tool allowed, on the cheap model (`haiku`), and returns the tool's JSON result. Never extra (it
-  has no connectors) and never Cursor, for reads and drafts alike: Cursor has no per-run
-  allowed-tools flag, its `--mode ask` is documented only as "read-only exploration", and a
-  prompt-injected result could otherwise make a Cursor run call a write tool. This is fixed in
-  code; no setting changes it. When main cannot take the call (spent, usage unknown, login gone)
-  the call is refused with the reason.
-- Fences around the one allowed tool: `--tools ""` (no Claude Code tools),
-  `--permission-prompts none` (in `-p` anything that would prompt is denied, so a tool outside
-  `--allowedTools` is denied, not asked), and `--disallowedTools` with every known write tool of
-  the same connector. Settings: the connectors need the user settings source (measured live:
-  `--setting-sources project` alone hides them; `user`, and no flag, reach them), so the bridge uses
-  `--setting-sources user` (no project or local settings), an explicit `--permission-mode manual`,
-  and before every call reads `~/.claude/settings.json`: any MCP allow rule, or a file it cannot
-  read, refuses the call, because `--allowedTools` adds to allow rules and does not replace them.
-  `--settings '{"disableAllHooks": true}'` asks for no hooks (not verified to take effect). The run
-  starts in an empty directory (`~/.vibemaxxing/bridge-workspace`) with a scrubbed environment and
-  main's token explicitly. A run that was denied or reported an error is a failure, never "ok".
-- Cost guard: a timeout per call (90 s), at most 30 calls per hour per bridge process, both in
-  `routing.bridge`. `~/.vibemaxxing/bridge.log` has one line per call: account, tool, duration,
-  outcome. Never arguments, content or a secret.
-- Register it for extra only. vibe prints the command and never runs it:
+What you run yourself, once:
 
 ```
-vibe bridge add-command
+# Atlassian: registers a public client by itself; asks for read scopes only
+vibe bridge login atlassian
+
+# Slack has NO dynamic client registration: it needs a Slack app of your own (an internal app in
+# your workspace, approved by its admin) with the redirect URL below. vibe asks for its client id and
+# secret (the secret is typed hidden, never an argument). Reads only; add --drafts for chat:write.
+vibe bridge login slack [--drafts] [--client-id ID] [--port N]
+#   redirect URL to register on the Slack app: http://127.0.0.1:8765/callback
+
+vibe bridge status        # who is logged in, token expiry, allowlist size; never a token
+vibe bridge tools slack   # which allowlisted tools the live upstream really offers (names only)
+vibe bridge logout slack|atlassian|all
+vibe bridge add-command   # prints the line that registers the bridge for extra; it never runs it
+```
+
+`vibe bridge add-command` prints, for `~/.claude-extra`:
+
+```
 CLAUDE_CONFIG_DIR=~/.claude-extra claude mcp add --scope user vibe-bridge -- vibe bridge serve
 ```
 
-The connector tool names the nested run calls are defaults. One is checked against the live
-connector (`slack_read_user_profile` as `mcp__claude_ai_Slack__...`, which ran without a
-permission denial); the rest, and the lists of write tools, are not. Override them in
-`routing.bridge.tools` / `claude_tool_pattern`. Text a connector returns (a Slack
-message, a Jira description) reaches the extra session as the tool result: it is data, but it is
-the same prompt-injection surface any connector has.
+`--drafts` adds `chat:write`, the scope Slack's draft tool presumably needs (its documentation names the
+tool's scope nowhere), and with it the token could also send a message; the bridge never calls a send
+tool, but anyone who can read the Keychain item could. Text an upstream returns (a Slack message, a Jira
+description) reaches the extra session as the tool result: data, and the same prompt-injection surface any
+connector has. It does not widen what the bridge can do.
 
 ## How it works
 

@@ -4,6 +4,7 @@ through redact.out / redact.err, so no path prints an unscrubbed byte."""
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from vibemaxxing import (
     history,
     keychain,
     launch,
+    mcp_oauth,
     oauth,
     route,
     statusline,
@@ -45,11 +47,11 @@ from vibemaxxing.errors import (
     UsageError,
     VibeError,
 )
-from vibemaxxing.httpclient import CURSOR_HOSTS, HttpClient, UrllibClient
+from vibemaxxing.httpclient import BRIDGE_HOSTS, CURSOR_HOSTS, HttpClient, UrllibClient
 from vibemaxxing.keychain import KeychainPort, default_port
 from vibemaxxing.models import AccountState
 from vibemaxxing.pool import Policy, dry_in
-from vibemaxxing.redact import err, install_excepthook, out
+from vibemaxxing.redact import Secret, err, install_excepthook, out
 from vibemaxxing.web import LOOPBACK
 
 DEFAULT_PORT: Final = 8787
@@ -78,6 +80,12 @@ class Context:
     agent: AgentPort = field(default_factory=CliAgent)
     cursor_client: HttpClient = field(default_factory=lambda: UrllibClient(CURSOR_HOSTS))
     cursor_token: CursorTokenPort = field(default_factory=AgentTokenStore)
+    # The bridge: the client that may reach only the upstreams' hosts, the Keychain for its tokens
+    # (created on first use), a hidden prompt, and the one-shot listener for the browser redirect.
+    bridge_client: HttpClient = field(default_factory=lambda: UrllibClient(BRIDGE_HOSTS))
+    secrets: mcp_oauth.SecretStore = field(default_factory=mcp_oauth.LazySecrets)
+    secret_prompt: Callable[[str], str] = getpass.getpass
+    receiver: Callable[[int], mcp_oauth.CodeReceiver] = mcp_oauth.LoopbackReceiver
 
     def services(self) -> launch.Services:
         return launch.Services(
@@ -907,24 +915,37 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
     return code
 
 
-def _token_env(ctx: Context, alias: str) -> dict[str, str]:
-    credential = _fresh_token(ctx, alias)
-    # Reveal site of the bridge's one nested run, same as `vibe run`: the child's environment.
-    return {childenv.TOKEN_VAR: credential.access_token.reveal()}
+def _bridge_upstream(name: str) -> mcp_oauth.Upstream:
+    found = bridge.UPSTREAMS.get(name)
+    if found is None:
+        raise UsageError(
+            f"unknown upstream {name!r}; known: {', '.join(bridge.UPSTREAMS)}",
+            "vibe bridge status",
+        )
+    return found
+
+
+def _bridge_config(ctx: Context) -> bridge.BridgeConfig:
+    return bridge.parse_config(route.read_routing(ctx.root).bridge)
+
+
+def _bridge_upstreams(ctx: Context, config: bridge.BridgeConfig) -> bridge.Upstreams:
+    return bridge.Upstreams(
+        client=ctx.bridge_client,
+        secrets=ctx.secrets,
+        root=ctx.root,
+        config=config,
+        clock=ctx.clock,
+    )
 
 
 def cmd_bridge_serve(args: argparse.Namespace, ctx: Context) -> int:
-    if not bridge.ENABLED:
-        raise UsageError(
-            bridge.DISABLED_REASON, "vibe bridge add-command   (nothing to register yet)"
-        )
-    routing = route.read_routing(ctx.root)
-    config = bridge.parse_config(routing.bridge)
-    svc = ctx.services()
+    config = _bridge_config(ctx)
+    upstreams = _bridge_upstreams(ctx, config)
     server = bridge.Bridge(
         config=config,
-        pick=launch.bridge_pick(svc, routing, config),
-        execute=launch.bridge_execute(svc, config, lambda alias: _token_env(ctx, alias)),
+        forward=upstreams.forward,
+        catalog=upstreams.catalog,
         log=lambda entry: bridge.append_log(ctx.root, entry),
     )
     # The protocol owns stdout; vibe's own words go to stderr.
@@ -932,9 +953,132 @@ def cmd_bridge_serve(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
+def cmd_bridge_login(args: argparse.Namespace, ctx: Context) -> int:
+    """The user's own OAuth login to one upstream. Needs the user in the browser."""
+    upstream = _bridge_upstream(args.upstream)
+    client_id: str | None = args.client_id
+    client_secret: Secret | None = None
+    if upstream.registration == "preregistered":
+        # Slack has no dynamic client registration: the user's own Slack app (an internal app, with
+        # the redirect URL below) supplies a client id and secret. The secret is never an argument.
+        if client_id is None:
+            err(f"{upstream.name} app client id: ")
+            client_id = ctx.prompt("").strip()
+        err(f"{upstream.name} app client secret (not shown): ")
+        client_secret = Secret(ctx.secret_prompt("").strip())
+    receiver = ctx.receiver(args.port)
+    try:
+        err(f"redirect URL for the login: {receiver.redirect_uri}\n")
+        tokens = mcp_oauth.login(
+            upstream,
+            client=ctx.bridge_client,
+            secrets=ctx.secrets,
+            root=ctx.root,
+            receiver=receiver,
+            open_browser=ctx.browser,
+            say=lambda text: err(text + "\n"),
+            now_s=ctx.clock(),
+            client_id=client_id or None,
+            client_secret=client_secret,
+            drafts=args.drafts,
+        )
+    finally:
+        receiver.close()
+    _emit(
+        _action("bridge login", upstream=upstream.id, scope=tokens.scope, drafts=args.drafts),
+        as_json=args.json,
+        human=f"logged in to {upstream.name}; the token is in the Keychain\n",
+    )
+    return 0
+
+
+def cmd_bridge_logout(args: argparse.Namespace, ctx: Context) -> int:
+    names = (
+        list(bridge.UPSTREAMS) if args.upstream == "all" else [_bridge_upstream(args.upstream).id]
+    )
+    gone = [
+        name for name in names if mcp_oauth.forget(ctx.root, ctx.secrets, bridge.UPSTREAMS[name])
+    ]
+    _emit(
+        _action("bridge logout", upstreams=gone),
+        as_json=args.json,
+        human=(
+            (
+                f"logged out of {', '.join(gone)}: the Keychain items are deleted. To invalidate "
+                "the token itself, remove the app from your Slack or Atlassian account.\n"
+            )
+            if gone
+            else "there was no login to remove\n"
+        ),
+    )
+    return 0
+
+
+def cmd_bridge_status(args: argparse.Namespace, ctx: Context) -> int:
+    """Per upstream: logged in or not, when the token expires, what was asked for. No token."""
+    lines: list[str] = []
+    entries: list[dict[str, object]] = []
+    for upstream in bridge.UPSTREAMS.values():
+        tokens = mcp_oauth.load(ctx.root, ctx.secrets, upstream)
+        allowed = [tool.name for tool in bridge.TOOLS if tool.upstream == upstream.id]
+        if tokens is None:
+            lines.append(f"{upstream.id:<10}not logged in  (vibe bridge login {upstream.id})")
+        else:
+            left = (
+                None if tokens.expires_at is None else round((tokens.expires_at - ctx.clock()) / 60)
+            )
+            when = (
+                "no expiry given"
+                if left is None
+                else f"access token {left} min left"
+                if left > 0
+                else "access token expired (refreshes on use)"
+            )
+            lines.append(f"{upstream.id:<10}logged in; {when}; scopes: {tokens.scope or 'default'}")
+        drafts = sum(1 for t in bridge.TOOLS if t.upstream == upstream.id and t.draft)
+        lines.append(f"{'':<10}{len(allowed)} allowlisted tools ({drafts} draft)")
+        entries.append(
+            {
+                "upstream": upstream.id,
+                "logged_in": tokens is not None,
+                "scope": tokens.scope if tokens else None,
+                "tools": len(allowed),
+            }
+        )
+    _emit(
+        _action("bridge status", upstreams=entries),
+        as_json=args.json,
+        human="\n".join(lines) + "\n",
+    )
+    return 0
+
+
+def cmd_bridge_tools(args: argparse.Namespace, ctx: Context) -> int:
+    """After a login: which allowlisted tools the live upstream really offers. Names only."""
+    upstream = _bridge_upstream(args.upstream)
+    offered = {
+        str(tool.get("name"))
+        for tool in _bridge_upstreams(ctx, _bridge_config(ctx)).upstream_tools(upstream)
+    }
+    lines: list[str] = []
+    for tool in bridge.TOOLS:
+        if tool.upstream == upstream.id:
+            mark = "offered" if tool.upstream_tool in offered else "NOT offered"
+            lines.append(f"  {tool.name:<40}{mark}{'  (draft)' if tool.draft else ''}")
+    others = len(offered - {t.upstream_tool for t in bridge.TOOLS if t.upstream == upstream.id})
+    lines.append(
+        f"{upstream.name} offers {len(offered)} tools; {others} others are not reachable "
+        "through the bridge"
+    )
+    _emit(
+        _action("bridge tools", upstream=upstream.id, offered=len(offered)),
+        as_json=args.json,
+        human="\n".join(lines) + "\n",
+    )
+    return 0
+
+
 def cmd_bridge_add(args: argparse.Namespace, ctx: Context) -> int:
-    if not bridge.ENABLED:
-        raise UsageError(bridge.DISABLED_REASON, "vibe list")
     command = bridge.print_add_command(args.config_dir)
     out(
         "run this yourself (vibe does not): it registers vibe-bridge with that config dir only\n"
@@ -976,6 +1120,11 @@ Every day
   vibe run auto -- claude     pick the account by need and budget, then run it
   vibe shell-init             print a zsh snippet that routes `claude` through that
   vibe usage web              the same dashboard in a browser, http://127.0.0.1:8787
+
+Connector bridge (for a session on the extra account)
+  vibe bridge login atlassian|slack     your own OAuth login, in the browser (run it yourself)
+  vibe bridge status|tools|logout       who is logged in; what the upstream offers; forget a login
+  vibe bridge add-command               print the `claude mcp add` line (it never runs it)
 
 Status line
   vibe statusline             one line: who is live and each account's limits, from the
@@ -1109,11 +1258,36 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(handler=cmd_run, command=[])
 
     bridge_cmd = subs.add_parser(
-        "bridge", help="vibe-bridge: lend a connector to a session on extra, one call at a time"
+        "bridge",
+        help="vibe-bridge: Slack and Atlassian reads for a session on extra (your own login)",
     )
     bridge_subs = bridge_cmd.add_subparsers(dest="bridge_command", required=True)
     serve = bridge_subs.add_parser("serve", help="the stdio MCP server (Claude Code starts it)")
     serve.set_defaults(handler=cmd_bridge_serve)
+    login = bridge_subs.add_parser(
+        "login", help="log in to an upstream in the browser (you run this)"
+    )
+    login.add_argument("upstream", choices=list(bridge.UPSTREAMS))
+    login.add_argument("--client-id", help="the client id of an app of your own (Slack)")
+    login.add_argument(
+        "--drafts", action="store_true", help="also ask for the scope a draft needs (chat:write)"
+    )
+    login.add_argument(
+        "--port", type=int, default=mcp_oauth.DEFAULT_PORT, help="127.0.0.1 port for the redirect"
+    )
+    _add_json(login)
+    login.set_defaults(handler=cmd_bridge_login)
+    logout = bridge_subs.add_parser("logout", help="delete an upstream's tokens from the Keychain")
+    logout.add_argument("upstream", choices=[*bridge.UPSTREAMS, "all"])
+    _add_json(logout)
+    logout.set_defaults(handler=cmd_bridge_logout)
+    status = bridge_subs.add_parser("status", help="who is logged in and what is allowlisted")
+    _add_json(status)
+    status.set_defaults(handler=cmd_bridge_status)
+    tools = bridge_subs.add_parser("tools", help="which allowlisted tools the live upstream offers")
+    tools.add_argument("upstream", choices=list(bridge.UPSTREAMS))
+    _add_json(tools)
+    tools.set_defaults(handler=cmd_bridge_tools)
     add_cmd = bridge_subs.add_parser(
         "add-command", help="print the `claude mcp add` command for the extra config dir"
     )

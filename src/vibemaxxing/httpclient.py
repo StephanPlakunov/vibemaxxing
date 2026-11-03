@@ -8,7 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final, Protocol
 
 from vibemaxxing import __version__
@@ -18,6 +18,13 @@ ALLOWED_HOSTS: Final = frozenset({"claude.ai", "platform.claude.com", "api.anthr
 # The Cursor seat's usage, and nothing else. A second client with its own list, so the
 # Claude client can never be pointed at it and a Cursor token can never reach a Claude host.
 CURSOR_HOSTS: Final = frozenset({"api2.cursor.sh"})
+# The bridge's upstreams (Slack's and Atlassian's own MCP servers) and their OAuth endpoints: one
+# more client with its own list, so the bridge's tokens can reach no other host.
+BRIDGE_HOSTS: Final = frozenset(
+    {"mcp.slack.com", "slack.com", "mcp.atlassian.com", "auth.atlassian.com"}
+)
+# What a response may weigh before the client stops reading it.
+DEFAULT_MAX_BYTES: Final = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_S: Final = 10.0
 # Cloudflare fronts all three hosts and answers urllib's default
 # "Python-urllib/3.x" with 403 "error code: 1010" before the request ever
@@ -29,11 +36,26 @@ USER_AGENT: Final = f"vibemaxxing/{__version__}"
 class HTTPError(Exception):
     """A 4xx/5xx from an allowed host. ``str`` never includes the body."""
 
-    def __init__(self, status: int, body: bytes, retry_after_s: float | None = None) -> None:
+    def __init__(
+        self,
+        status: int,
+        body: bytes,
+        retry_after_s: float | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         super().__init__(f"HTTP {status}")
         self.status = status
         self.body = body
         self.retry_after_s = retry_after_s
+        # Lower-cased names; a 401's WWW-Authenticate is the one that matters.
+        self.headers: Mapping[str, str] = headers or {}
+
+
+def _headers(raw: object) -> dict[str, str]:
+    items = getattr(raw, "items", None)
+    if not callable(items):
+        return {}
+    return {str(name).lower(): str(value) for name, value in items()}
 
 
 def _retry_after_s(raw: str | None) -> float | None:
@@ -51,6 +73,7 @@ def _retry_after_s(raw: str | None) -> float | None:
 class HttpResponse:
     status: int
     body: bytes
+    headers: Mapping[str, str] = field(default_factory=dict)  # lower-cased names
 
     def json(self) -> dict[str, object]:
         parsed: object
@@ -78,6 +101,7 @@ class HttpClient(Protocol):
         headers: Mapping[str, str],
         body: bytes | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        max_bytes: int = DEFAULT_MAX_BYTES,
     ) -> HttpResponse: ...
 
 
@@ -120,6 +144,7 @@ class UrllibClient:
         headers: Mapping[str, str],
         body: bytes | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        max_bytes: int = DEFAULT_MAX_BYTES,
     ) -> HttpResponse:
         host = urllib.parse.urlsplit(url).hostname
         allowed = ALLOWED_HOSTS if self._hosts is None else self._hosts
@@ -133,7 +158,12 @@ class UrllibClient:
         request = urllib.request.Request(url, data=body, headers=sent, method=method)
         try:
             with _OPENER.open(request, timeout=timeout_s) as response:
-                return HttpResponse(int(response.status), response.read())
+                data = response.read(max_bytes + 1)
+                if len(data) > max_bytes:
+                    raise NetworkError(
+                        f"the answer from {host} is larger than {max_bytes} bytes", "vibe list"
+                    )
+                return HttpResponse(int(response.status), data, _headers(response.headers))
         except urllib.error.HTTPError as exc:
             # Closed here: it holds the response body open, and Python 3.14 warns when
             # the collector has to do it, which the suite turns into a failure.
@@ -141,7 +171,10 @@ class UrllibClient:
                 # `from None`: the suppressed context holds the request object, whose
                 # headers carry the bearer token.
                 raise HTTPError(
-                    int(exc.code), exc.read(), _retry_after_s(exc.headers.get("Retry-After"))
+                    int(exc.code),
+                    exc.read(max_bytes + 1)[:max_bytes],
+                    _retry_after_s(exc.headers.get("Retry-After")),
+                    _headers(exc.headers),
                 ) from None
         except OSError as exc:
             raise NetworkError(

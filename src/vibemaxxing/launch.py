@@ -7,15 +7,13 @@ the person), so `vibe run --dry-run` can print it and the tests can compare it.
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
 from vibemaxxing import (
-    bridge,
     childenv,
     cursor,
     cursor_translate,
@@ -27,8 +25,7 @@ from vibemaxxing import (
 from vibemaxxing.cursor import AgentPort
 from vibemaxxing.cursor_usage import CursorTokenPort, CursorUsage
 from vibemaxxing.envelope import AccountView
-from vibemaxxing.errors import NotFoundError, UsageError, VibeError
-from vibemaxxing.fsutil import private_dir
+from vibemaxxing.errors import NotFoundError, UsageError
 from vibemaxxing.httpclient import HttpClient
 from vibemaxxing.keychain import KeychainPort
 from vibemaxxing.models import AccountState
@@ -594,100 +591,3 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
         chosen,
         claude_token=not live,
     )
-
-
-# --- vibe-bridge ---------------------------------------------------------------------
-
-
-BRIDGE_ONLY: Final = "main"
-BRIDGE_REFUSAL: Final = (
-    "the bridge only runs on {account}: Cursor cannot be limited to one tool, so no bridge call "
-    "ever goes there. {why}"
-)
-
-
-def bridge_workspace(root: Path) -> Path:
-    """An empty directory for the nested run: no project CLAUDE.md, settings or hooks of its own."""
-    path = root / "bridge-workspace"
-    private_dir(root)
-    private_dir(path)
-    return path
-
-
-def bridge_pick(svc: Services, routing: route.Routing, config: bridge.BridgeConfig) -> bridge.Pick:
-    """The account for a bridge call: main, and nothing else, decided here in code.
-
-    Not extra (no connectors), not Cursor (see bridge.py: a prompt is the only fence there), and
-    not configurable: ``config`` has no key for it. Main must be usable now; if it is spent, its
-    usage is unknown or its login is gone, the call is refused with the reason.
-    """
-    only_main = replace(
-        routing,
-        order={**routing.order, route.NEEDS_CLASS: (route.Step(BRIDGE_ONLY),)},
-    )
-
-    def pick(connector: str) -> route.Route:
-        # A bridge process lives for hours: every call reads the clock, never process start.
-        now_s = time.time()
-        try:
-            return route.decide(
-                candidates(replace(svc, now_s=now_s), only_main),
-                routing=only_main,
-                needs=(connector,),
-                claude_only=True,
-                now_s=now_s,
-            )
-        except UsageError as exc:
-            raise UsageError(
-                BRIDGE_REFUSAL.format(account=BRIDGE_ONLY, why=exc.message), exc.recovery
-            ) from None
-
-    return pick
-
-
-def bridge_execute(
-    svc: Services, config: bridge.BridgeConfig, token_env: Callable[[str], dict[str, str]]
-) -> bridge.Execute:
-    """One headless Claude Code run on the chosen account, with only the one tool allowed."""
-    fence = bridge.Fence()
-
-    def execute(
-        chosen: route.Route, tool: bridge.BridgeTool, arguments: Mapping[str, object]
-    ) -> str:
-        if chosen.kind != cursor.KIND_CLAUDE:
-            # Unreachable through bridge_pick; kept so no other caller can start a Cursor run here.
-            raise bridge.BridgeError("the bridge never runs on Cursor")
-        prompt = bridge.build_prompt(tool, bridge.upstream_name(config, tool), arguments)
-        # The nested run has no CLAUDE_CONFIG_DIR, so it reads the default one.
-        problem = bridge.settings_problem(svc.home / ".claude")
-        if problem:
-            raise bridge.BridgeError(f"refused: {problem}")
-        try:
-            # The nested run is its own Claude Code: not the config dir or token of the session
-            # that called the bridge. The live login keeps itself; any other account is lent
-            # its token for this one call.
-            lent = {}
-            if store.live_alias(svc.root, svc.port) != chosen.alias or (
-                childenv.parent_carries_claude_account(svc.environ)
-            ):
-                lent = token_env(chosen.alias)
-            # Strict: the nested run holds none of the caller's secrets either.
-            env = childenv.build(svc.environ, strict=True, set_vars=lent).env
-            workspace = bridge_workspace(svc.root)
-
-            def probe(argv: list[str]) -> str:
-                return bridge.run_process(argv, env, config.timeout_s, workspace)
-
-            # What the connectors offer is found, all of it but this one tool is denied, and the
-            # result is checked before the real call (cached; rechecked every ten minutes).
-            deny_also = fence.deny_list(config, tool, prompt, probe)
-            return bridge.run_headless(
-                bridge.claude_argv(config, tool, prompt, deny_also=deny_also),
-                env,
-                config.timeout_s,
-                workspace,
-            )
-        except VibeError as exc:
-            raise bridge.BridgeError(exc.message) from None
-
-    return execute

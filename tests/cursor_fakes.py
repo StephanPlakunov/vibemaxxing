@@ -213,33 +213,6 @@ seen = {
 with open("__RECORD__", "a") as handle:
     handle.write(json.dumps(seen) + "\\n")
 time.sleep(float(os.environ.get("FAKE_CLAUDE_SLEEP", "0")))
-if "stream-json" in argv:
-    # A probe: print the init event the way Claude Code does. Everything the connectors offer
-    # (a recorded real listing) minus what --disallowedTools denies; denied tools are not offered.
-    offered = json.load(open("__TOOLS__"))["tools"]
-    flag = "--disallowedTools"
-    denied = set(argv[argv.index(flag) + 1].split(",")) if flag in argv else set()
-    extra = os.environ.get("FAKE_CLAUDE_EXTRA_TOOLS", "")
-    tools = [t for t in offered if t not in denied] + [t for t in extra.split(",") if t]
-    if os.environ.get("FAKE_CLAUDE_NO_PROFILE"):
-        tools = [t for t in tools if not t.endswith("slack_read_user_profile")]
-    servers = sorted({t.split("__")[1] for t in offered})
-    counter = "__RECORD__.pending"
-    pending = 0
-    if os.environ.get("FAKE_CLAUDE_PENDING"):
-        done = int(open(counter).read()) if os.path.exists(counter) else 0
-        open(counter, "w").write(str(done + 1))
-        pending = 1 if done < int(os.environ["FAKE_CLAUDE_PENDING"]) else 0
-    slack = "claude_ai_Slack"
-    status = {s: ("pending" if pending and s == slack else "connected") for s in servers}
-    if pending:
-        tools = [t for t in tools if "claude_ai_Slack" not in t]
-    mode = os.environ.get("FAKE_CLAUDE_MODE", "default")
-    listed = [{"name": s, "status": status[s]} for s in servers]
-    print(json.dumps({"type": "system", "subtype": "init", "permissionMode": mode,
-                      "tools": tools, "mcp_servers": listed}))
-    print(json.dumps({"type": "result", "result": "ok"}))
-    sys.exit(0)
 print(json.dumps({"result": json.dumps({"from": "claude"})}))
 sys.exit(int(os.environ.get("FAKE_CLAUDE_EXIT", "0")))
 """
@@ -249,12 +222,7 @@ def install_fake_claude(fake: FakeAgent) -> Path:
     """A `claude` next to the fake cursor-agent: records its argv and whether a token was set."""
     record = fake.home / "fake-claude-calls.jsonl"
     script = fake.bin_dir / "claude"
-    tools = Path(__file__).with_name("fixtures") / "init_tools_2026-11-03.json"
-    text = (
-        _CLAUDE_SCRIPT.replace("__PYTHON__", sys.executable)
-        .replace("__RECORD__", str(record))
-        .replace("__TOOLS__", str(tools))
-    )
+    text = _CLAUDE_SCRIPT.replace("__PYTHON__", sys.executable).replace("__RECORD__", str(record))
     script.write_text(text)
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return record

@@ -111,16 +111,13 @@ class World:
         return [json.loads(line) for line in self.claude_record.read_text().splitlines()]
 
     def claude_calls(self, *, full: bool = False) -> list[dict[str, object]]:
-        """The real runs of the fake claude (the bridge's stream-json probes are not among them)."""
-        calls = [c for c in self._all_claude_calls() if "stream-json" not in c["argv"]]  # type: ignore[operator]
+        """The runs of the fake claude."""
+        calls = self._all_claude_calls()
         if not full:
             for call in calls:
                 for key in ("has_config_dir", "cwd", "env"):
                     call.pop(key, None)
         return calls
-
-    def claude_probes(self) -> list[dict[str, object]]:
-        return [c for c in self._all_claude_calls() if "stream-json" in c["argv"]]  # type: ignore[operator]
 
 
 @pytest.fixture
