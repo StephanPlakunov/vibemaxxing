@@ -234,17 +234,13 @@ def render(
     parts: list[str] = []
     alias, fixed = session
     seats = document.get("cursor")
-    cursor_aliases = (
-        {seat.get("alias") for seat in seats if isinstance(seat, dict)}
-        if isinstance(seats, list)
-        else set()
-    )
     if alias is None:
         live = _text(document.get("live")) or _text(document.get("active"))
         if live is not None:
             parts.append(f"▶ {live}")
     else:
-        parts.append(f"▶ {alias}" + (" (fixed)" if fixed and alias not in cursor_aliases else ""))
+        # Every session vibe pins says so, a Cursor seat's too: `vibe run <account>` means fixed.
+        parts.append(f"▶ {alias}" + (" (fixed)" if fixed else ""))
     models = _models(document)
     accounts = document.get("accounts")
     for entry in accounts if isinstance(accounts, list) else []:

@@ -247,9 +247,9 @@ def test_a_fixed_session_shows_its_own_account_whatever_is_live() -> None:
     assert line.startswith("▶ extra (fixed) · main: ")
 
 
-def test_a_cursor_session_shows_cursor_without_fixed() -> None:
+def test_a_cursor_session_shows_cursor_fixed() -> None:
     line = statusline.render(status(), now_s=NOW_S, session=("cursor", True))
-    assert line.startswith("▶ cursor · main: ")
+    assert line.startswith("▶ cursor (fixed) · main: ")
 
 
 def test_the_session_flag_is_read_in_both_spellings() -> None:
@@ -265,7 +265,7 @@ def test_the_cli_statusline_takes_the_session_flag(
 
     assert world.main("statusline", "--session", "cursor") == 0
 
-    assert capsys.readouterr().out.startswith("▶ cursor · ")
+    assert capsys.readouterr().out.startswith("▶ cursor (fixed) · ")
 
 
 # --- `vibe run <account>` with no command --------------------------------------------------------
