@@ -19,32 +19,20 @@ within about a minute, without a restart.
 
 ## What you do
 
-1. **Close every session that runs in `~/.claude-extra`.** They hold extra's login and renew it;
-   the release refuses while one runs and names their PIDs. To see them:
+In a **new** Terminal window (not inside a Claude session):
 
-   ```
-   for p in $(pgrep -x claude); do ps -E -o command= -p $p | grep -q 'CLAUDE_CONFIG_DIR=/Users/stephanplakunov/.claude-extra' && ps -o pid=,command= -p $p; done
-   ```
+```
+zsh ~/vibemaxxing/scripts/switch-to-shared-login.zsh
+```
 
-2. **Release extra** in a fresh terminal (`source ~/.zshrc` first, or open a new window):
+It notes every conversation that runs in `~/.claude-extra`, waits while you type `/exit` in each
+(it never closes or kills anything), runs `vibe release extra`, reopens every conversation in its
+own folder on the shared login (`vibe run auto --no-needs --claude-only -- claude --resume <id>`:
+always Claude Code, so nothing is lost), and shows `vibe auto status`. `--dry-run` shows what it
+would do and changes nothing.
 
-   ```
-   vibe release extra
-   ```
-
-   It moves extra's login from `~/.claude-extra`'s Keychain item into vibe and deletes that item,
-   so the login exists in one place only. `~/.claude-extra` has no login afterwards; don't log in
-   there again (a second login of the same account in two places is what revoked sessions before).
-
-3. **Check:**
-
-   ```
-   vibe auto status     # policy with "today's budget", live main, next step extra
-   vibe list            # extra is listed without a config dir
-   ```
-
-4. **Continue in a `cw` session** and ask it to verify the live switch (below); the session that
-   built this can be resumed with `cw --resume 715f45b0-0bf9-424c-bae3-f671814a0d10`.
+After it: `~/.claude-extra` has no login; don't log in there again (a second login of the same
+account in two places is what revoked sessions before).
 
 ## Live check (not done yet)
 

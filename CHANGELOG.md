@@ -10,6 +10,8 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - **One shared login** (`routing.shared_login`): `vibe run auto` puts every Claude run on Claude Code's own
   login, which the background tick moves between the accounts, so open sessions follow a switch.
 - **`cw` and `cs`** from `vibe shell-init` (with and without connectors); `claude` stays plain Claude Code.
+- **`vibe run <account>` is always fixed to that account** (its own token, `▶ main (fixed)`), even while it is the
+  shared login; with no `-- <cmd>` it starts a session. `cw` and `cs` follow the background switch.
 - **The status line shows this session's account** (`VIBE_SESSION`, set on every `vibe run` child, then
   `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN`), not the account a new session would get;
   `vibe statusline --session cursor` for Cursor's own status line.

@@ -496,7 +496,7 @@ and Claude Code re-reads it (a 30-second Keychain cache in Claude Code 2.1.318),
 session follows a switch without a restart. The order still decides between Claude and Cursor;
 it no longer decides which Claude account, so `cs` runs on the same account as `cw`. The bridge
 is added when any Claude account the session may move to lacks an upstream it has a login for.
-A named account that is the shared login now runs as it; any other is fixed to its own token.
+A named account (`vibe run main`) is always fixed to it, even while it is the shared login: it runs on its own token, which the background switch never moves and which cannot renew, so the session ends when that token does (at most about 8 hours; an interactive run prints the time).
 An account that lives in its own config dir cannot be the shared login (`vibe release` moves it
 back). A Claude account that is already
 Claude Code's own login runs without a token override; any other runs on its own token, which

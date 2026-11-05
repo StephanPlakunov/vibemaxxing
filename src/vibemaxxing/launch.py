@@ -528,10 +528,8 @@ def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags)
         raise NotFoundError(f'there is no account named "{alias}"', "vibe list")
     argv, bridge_notes = _with_bridge(svc, alias, command, flags)
     config_dir = _config_dir_of(svc, alias)
-    if config_dir is None and _shared(svc) and store.live_alias(svc.root, svc.port) == alias:
-        # The shared login is this account right now: run as it, so the session follows the
-        # background switch instead of holding a token that cannot renew.
-        return Plan(alias, cursor.KIND_CLAUDE, argv, tuple(bridge_notes))
+    # A named account is always fixed to it, even when it is the shared login right now: `cw` and
+    # `cs` follow the background switch, `vibe run <account>` never does.
     if config_dir is not None:
         notes = _config_dir_notes(svc, alias, config_dir)
         return Plan(alias, cursor.KIND_CLAUDE, argv, (*notes, *bridge_notes), config_dir=config_dir)
@@ -730,13 +728,6 @@ def _without(
     have = set(routing.connectors.get(role, routing.connectors.get(alias, ()))) | bridged
     without = sorted(set(needs) - have)
     return [f"warning: no {', '.join(without)} on {alias}"] if without else []
-
-
-def _shared(svc: Services) -> bool:
-    try:
-        return route.read_routing(svc.root).shared_login
-    except UsageError:
-        return False
 
 
 def _claude_aliases(routing: route.Routing) -> list[str]:

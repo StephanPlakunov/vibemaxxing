@@ -151,19 +151,20 @@ def test_without_the_setting_auto_keeps_routing_per_session(world: World) -> Non
 # --- a named account ---------------------------------------------------------------------------
 
 
-def test_a_named_account_that_is_the_shared_login_runs_as_it_and_says_nothing(
+def test_a_named_account_is_fixed_even_when_it_is_the_shared_login(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=10)
+    auto_world(world, main_weekly=10)  # main is the shared login now
     shared(world)
 
     assert world.main("run", "main", "--", "claude", "-p", "hi") == 0
 
     call = only_call(world)
-    assert call["has_token"] is False
+    assert call["has_token"] is True  # its own token: the background switch never moves it
     env = call["env"]
-    assert isinstance(env, dict) and env["VIBE_SESSION"] == "live"
-    assert capsys.readouterr().err == ""
+    assert isinstance(env, dict) and env["VIBE_SESSION"] == "main"
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "main-live-token"  # the live login's, not refreshed
+    assert capsys.readouterr().err == ""  # headless: no line about when the token ends
 
 
 def test_a_named_account_that_is_not_the_shared_login_is_fixed_to_it(
