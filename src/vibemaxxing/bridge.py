@@ -171,7 +171,8 @@ TOOLS: Final = (
        "The sites (cloud ids) the user can reach."),
     BridgeTool(
         "atlassian_discover", "atlassian", "discover",
-        "Find which read operations exist for a topic (then run one with atlassian_executeRead).",
+        "Find which operations exist for a topic, reads and writes (then run a read with "
+        "atlassian_executeRead, a change with atlassian_executeWrite).",
         (("query", _S),), ("query",),
     ),
     BridgeTool(
