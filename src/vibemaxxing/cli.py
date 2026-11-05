@@ -23,6 +23,7 @@ from vibemaxxing import (
     adopt,
     auto,
     bridge,
+    broker,
     childenv,
     credentials,
     cursor,
@@ -559,6 +560,8 @@ def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
     readings = ctx.cursor_readings()
     views, dry = _collect_and_record(ctx)
     human = _render_accounts(views, now_s=ctx.now_s, dry=dry)
+    for problem in broker.problems(ctx.root):
+        human += f"broker problem: {problem}\n"
     if readings:
         shown = [line for reading in readings for line in (*_render_cursor(reading), "")]
         if views:
@@ -752,9 +755,12 @@ def cmd_auto_status(args: argparse.Namespace, ctx: Context) -> int:
             policy=auto.policy_document(status.settings.policy),
             step=None if status.step is None else status.step + 1,
             next_step=None if status.next_step is None else status.next_step + 1,
+            broker=_broker_entries(ctx),
         ),
         as_json=args.json,
-        human=_render_status(status, ctx.now_s),
+        # Only once it is on: an install that never used the broker reads as it always did.
+        human=_render_status(status, ctx.now_s)
+        + "".join(f"{line}\n" for line in _broker_lines(ctx) if status_shows_broker(ctx)),
     )
     return 0
 
@@ -762,7 +768,12 @@ def cmd_auto_status(args: argparse.Namespace, ctx: Context) -> int:
 def cmd_auto_tick(args: argparse.Namespace, ctx: Context) -> int:
     ctx.refresh_cursor_cache()  # before the tick, so the status file it writes has fresh numbers
     result = auto.tick(
-        ctx.root, client=ctx.client, port=ctx.port, now_s=ctx.now_s, notify=ctx.notify
+        ctx.root,
+        client=ctx.client,
+        port=ctx.port,
+        now_s=ctx.now_s,
+        notify=ctx.notify,
+        port_for=ctx.port_for,
     )
     _emit(
         _action("auto tick", switched=result.switched, line=result.line),
@@ -823,6 +834,14 @@ def cmd_remove(args: argparse.Namespace, ctx: Context) -> int:
     if cursor.is_cursor(ctx.root, args.alias):
         cursor.delete_marker(ctx.root, args.alias)  # the Cursor login itself is cursor-agent's
     else:
+        if broker.is_on(ctx.root) and store.read_active(ctx.root) == args.alias:
+            # With the broker on, vibe's store holds the only refresh token of the live login;
+            # Claude Code's default item is a mirror that ends with its access token.
+            raise UsageError(
+                f'"{args.alias}" is the live login, and with the token broker on vibe holds its '
+                "only refresh token: removing it would end every session on it within hours",
+                "vibe broker off   (or vibe switch <another> first)",
+            )
         store.delete_account(ctx.root, args.alias)
     _emit(
         _action("remove", alias=args.alias),
@@ -850,7 +869,150 @@ def cmd_release(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
+# --- the token broker ------------------------------------------------------------
+
+
+def _hhmm(at_ms: int, now_s: float) -> str:
+    at = datetime.fromtimestamp(at_ms / 1000)
+    return at.strftime("%H:%M" if at.date() == datetime.fromtimestamp(now_s).date() else "%a %H:%M")
+
+
+def _broker_lines(ctx: Context) -> list[str]:
+    settings = broker.read_settings(ctx.root)
+    lines = [f"broker       {'on' if settings.on else 'off'}"]
+    if not settings.on:
+        return lines
+    for row in broker.describe(ctx.root):
+        where = ", ".join(row.mirrors) or "no mirror yet"
+        text = (
+            f"  {row.alias:<10} token ends {_hhmm(row.expires_at_ms, ctx.now_s)}, renewed at "
+            f"{_hhmm(row.refresh_at_ms, ctx.now_s)}; mirrors: {where}"
+        )
+        if row.problem:
+            text += f"\n  {'':<10} problem: {row.problem}"
+            if row.retry_at_s is not None:
+                text += f" (next try {_hhmm(int(row.retry_at_s * 1000), ctx.now_s)})"
+        lines.append(text)
+    return lines
+
+
+def _broker_entries(ctx: Context) -> dict[str, object]:
+    settings = broker.read_settings(ctx.root)
+    return {
+        "on": settings.on,
+        "accounts": [
+            {
+                "alias": row.alias,
+                "expires_at_ms": row.expires_at_ms,
+                "refresh_at_ms": row.refresh_at_ms,
+                "mirrors": list(row.mirrors),
+                "problem": row.problem,
+                "retry_at_s": row.retry_at_s,
+            }
+            for row in (broker.describe(ctx.root) if settings.on else [])
+        ],
+    }
+
+
+def status_shows_broker(ctx: Context) -> bool:
+    return broker.is_on(ctx.root)
+
+
+def cmd_broker_status(args: argparse.Namespace, ctx: Context) -> int:
+    _emit(
+        _action("broker status", **_broker_entries(ctx)),
+        as_json=args.json,
+        human="\n".join(_broker_lines(ctx)) + "\n",
+    )
+    return 0
+
+
+def cmd_broker_on(args: argparse.Namespace, ctx: Context) -> int:
+    """Make vibe the one refresher: the default login becomes a mirror, every account's dir too."""
+    report = broker.turn_on(
+        ctx.root,
+        client=ctx.client,
+        default_port=ctx.port,
+        port_for=ctx.port_for,
+        now_s=ctx.now_s,
+    )
+    said = [*report.lines, *(f"problem: {problem}" for problem in report.problems)]
+    _emit(
+        _action("broker on", lines=list(report.lines), problems=list(report.problems)),
+        as_json=args.json,
+        human="broker on: vibe renews every login; Claude Code reads mirrors\n"
+        + "".join(f"  {line}\n" for line in said),
+    )
+    return 0
+
+
+def cmd_broker_off(args: argparse.Namespace, ctx: Context) -> int:
+    said = broker.turn_off(ctx.root, default_port=ctx.port, port_for=ctx.port_for)
+    _emit(
+        _action("broker off", lines=said),
+        as_json=args.json,
+        human="broker off\n" + "".join(f"  {line}\n" for line in said),
+    )
+    return 0
+
+
+def cmd_broker_mirror(args: argparse.Namespace, ctx: Context) -> int:
+    """Name (or create) the config dir that mirrors an account, link what ~/.claude shares."""
+    if not broker.brokered(ctx.root, args.alias):
+        raise UsageError(
+            f'"{args.alias}" is not an account vibe holds (unknown, Cursor, or still living in '
+            "its own config dir)",
+            f"vibe release {args.alias}",
+        )
+    settings = broker.read_settings(ctx.root)
+    mirrors = dict(settings.mirrors)
+    if args.dir is not None:
+        mirrors[args.alias] = str(keychain.resolve_config_dir(Path(args.dir)))
+    settings = replace(settings, mirrors=mirrors)
+    directory = broker.mirror_dir(settings, args.alias, Path.home())
+    for other in broker.brokered_aliases(ctx.root):
+        if other != args.alias and broker.mirror_dir(settings, other, Path.home()) == directory:
+            raise UsageError(f"{directory} already mirrors {other}", "vibe broker status")
+    for other in store.list_aliases(ctx.root):
+        given = store.read_account(ctx.root, other).config_dir
+        if given is not None and Path(given).resolve() == directory.resolve():
+            raise UsageError(
+                f"{directory} is the config dir {other} lives in: Claude Code's login, "
+                "not a mirror",
+                f"vibe release {other}",
+            )
+    if directory == Path.home() / ".claude":
+        raise UsageError(
+            "~/.claude is the default login, which mirrors the live account", "vibe broker status"
+        )
+    said = broker.prepare_dir(directory, Path.home())
+    broker.write_settings(ctx.root, settings)
+    if settings.on:
+        report = broker.run(
+            ctx.root,
+            client=ctx.client,
+            default_port=ctx.port,
+            port_for=ctx.port_for,
+            now_s=ctx.now_s,
+            only=(args.alias,),
+        )
+        said += [*report.lines, *(f"problem: {problem}" for problem in report.problems)]
+    _emit(
+        _action("broker mirror", alias=args.alias, dir=str(directory), lines=said),
+        as_json=args.json,
+        human=f"{args.alias} mirrors into {directory}\n" + "".join(f"  {s}\n" for s in said),
+    )
+    return 0
+
+
 def cmd_alias(args: argparse.Namespace, ctx: Context) -> int:
+    if broker.is_on(ctx.root) and broker.brokered(ctx.root, args.old):
+        # The mirror dir, the broker's state and running fixed sessions are keyed by the name.
+        raise UsageError(
+            f'"{args.old}" has token broker mirrors under its name; renaming it would leave '
+            "them unrenewed",
+            "vibe broker off   (rename, then vibe broker on)",
+        )
     if cursor.is_cursor(ctx.root, args.old):
         _require_unused(ctx.root, args.new)
         if args.new in store.list_aliases(ctx.root):
@@ -998,6 +1160,19 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
     elif plan.kind == cursor.KIND_CURSOR:
         # No credential of ours goes anywhere: cursor-agent reads its own login.
         code = _spawn(plan.argv, marked)
+    elif plan.mirror and plan.config_dir is not None:
+        # The token broker's mirror of this account: vibe puts a working access token (and no
+        # refresh token) into the dir's Keychain item now and renews it there from the tick, so
+        # the session is fixed to this account and never dies from its token. No token override.
+        directory = broker.ensure_for_run(
+            ctx.root,
+            plan.alias,
+            client=ctx.client,
+            default_port=ctx.port,
+            port_for=ctx.port_for,
+            now_s=ctx.now_s,
+        )
+        code = _spawn(plan.argv, {**marked, "CLAUDE_CONFIG_DIR": str(directory)})
     elif plan.config_dir is not None:
         # The account's login is Claude Code's, in that dir: it reads and refreshes it there. Not a
         # token of ours, so a session that outlives the access token keeps its login, and vibe
@@ -1288,6 +1463,13 @@ Housekeeping
   vibe usage --once           fetch the numbers once and print them
   vibe --version              the installed version
 
+Token broker (off until you turn it on; docs/BROKER.md)
+  vibe broker on              vibe renews every login; Claude Code reads mirrors with no
+                              refresh token, so `vibe run main` stays on main for good and
+                              cs/cw/claude follow the switch; `off` gives the login back
+  vibe broker mirror main     create ~/.claude-main (links CLAUDE.md, settings, skills, projects)
+  vibe broker status          when each token ends and is renewed, its mirrors, any problem
+
 Automatic switching (off until you turn it on)
   vibe auto on                leave the live account for the one with the most room once its
                               session or week reaches 99%; `off` stops it
@@ -1465,6 +1647,28 @@ def build_parser() -> argparse.ArgumentParser:
     give_back.add_argument("alias")
     _add_json(give_back)
     give_back.set_defaults(handler=cmd_release)
+
+    brokering = subs.add_parser(
+        "broker", help="token broker: vibe renews every login, Claude Code reads mirrors"
+    )
+    broker_subs = brokering.add_subparsers(
+        dest="broker_command", required=True, metavar="{on,off,status,mirror}"
+    )
+    for name, handler, summary in (
+        ("on", cmd_broker_on, "take the default login over as a mirror; renew every login"),
+        ("off", cmd_broker_off, "give the live login back to Claude Code; remove dir mirrors"),
+        ("status", cmd_broker_status, "when each token ends and is renewed, its mirrors"),
+    ):
+        broker_sub = broker_subs.add_parser(name, help=summary)
+        _add_json(broker_sub)
+        broker_sub.set_defaults(handler=handler)
+    mirror_cmd = broker_subs.add_parser(
+        "mirror", help="the config dir `vibe run ALIAS` uses (default ~/.claude-ALIAS)"
+    )
+    mirror_cmd.add_argument("alias")
+    mirror_cmd.add_argument("dir", nargs="?", help="default: ~/.claude-ALIAS")
+    _add_json(mirror_cmd)
+    mirror_cmd.set_defaults(handler=cmd_broker_mirror)
 
     rename = subs.add_parser("alias", help="rename an account")
     rename.add_argument("old")

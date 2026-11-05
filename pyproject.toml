@@ -57,7 +57,7 @@ filterwarnings = ["error"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
-extend-exclude = ["*.md"]
+extend-exclude = ["*.md", "scripts/cc-mirror-experiment"]  # measurement tools, docs/BROKER.md
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

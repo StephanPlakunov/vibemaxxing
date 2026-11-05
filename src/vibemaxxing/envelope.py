@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import credentials, keychain, oauth, store, usage
+from vibemaxxing import broker, credentials, keychain, oauth, store, usage
 from vibemaxxing.credentials import EMPTY_IDENTITY, Credential, Identity
 from vibemaxxing.errors import StoreError, VibeError
 from vibemaxxing.httpclient import HttpClient, HTTPError
@@ -409,7 +409,9 @@ def _view(
         account.credential.subscription_type, account.credential.rate_limit_tier
     )
 
-    if active:
+    # With the token broker on, the default item is a mirror of a lineage vibe holds and
+    # refreshes: the active account is read like any other (broker.py).
+    if active and not broker.is_on(root):
         token, problem = active_token(root, account, port, now_ms=now_ms)
         base = AccountView(alias, active, AccountState.OK, None, identity, plan, None, None)
         if not fetch:

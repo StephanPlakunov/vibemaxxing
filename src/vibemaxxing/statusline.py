@@ -172,20 +172,48 @@ def _cursor(entry: Mapping[str, object], now_s: float) -> str | None:
     return f"{alias}: {' '.join(cells)}{stale}"
 
 
-def _config_dir_alias(root: Path, directory: str) -> str | None:
-    """The account whose login lives in ``directory``, from its account file; None if none."""
+def _broker_mirrors(root: Path) -> dict[str, str] | None:
+    """The token broker's mirror dirs named in settings.json; None while the broker is off.
+
+    broker.read_settings, not imported (see above); an alias not named mirrors into
+    ~/.claude-<alias>.
+    """
+    try:
+        parsed = json.loads((root / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    raw = parsed.get("broker") if isinstance(parsed, dict) else None
+    if not isinstance(raw, dict) or raw.get("on") is not True:
+        return None
+    mirrors = raw.get("mirrors")
+    if not isinstance(mirrors, dict):
+        return {}
+    return {str(k): v for k, v in mirrors.items() if isinstance(v, str) and v}
+
+
+def _config_dir_alias(root: Path, directory: str, home: Path | None = None) -> str | None:
+    """The account whose login lives in ``directory`` (its account file's config dir, or its
+    token broker mirror); None if none."""
     try:
         wanted = Path(directory).expanduser().resolve()
         files = sorted((root / "accounts").glob("*.json"))
     except (OSError, RuntimeError):
         return None
+    mirrors = _broker_mirrors(root)
     for path in files:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            given = raw.get("config_dir") if isinstance(raw, dict) else None
+            if not isinstance(raw, dict):
+                continue
+            named = raw.get("alias")
+            alias = named if isinstance(named, str) else path.stem
+            given = raw.get("config_dir")
             if isinstance(given, str) and Path(given).expanduser().resolve() == wanted:
-                alias = raw.get("alias")
-                return alias if isinstance(alias, str) else path.stem
+                return alias
+            if mirrors is not None and given is None and home is not None:
+                mirror = mirrors.get(alias) or str(home / f".claude-{alias}")
+                if Path(mirror).expanduser().resolve() == wanted:
+                    return alias
         except (OSError, ValueError, RuntimeError):
             continue
     return None
@@ -211,7 +239,7 @@ def session_account(
         except (OSError, RuntimeError):
             default = False
         if not default:
-            return _config_dir_alias(root, directory) or UNKNOWN_SESSION, True
+            return _config_dir_alias(root, directory, home) or UNKNOWN_SESSION, True
     if environ.get(_TOKEN_VAR):
         return UNKNOWN_SESSION, True
     return None, False

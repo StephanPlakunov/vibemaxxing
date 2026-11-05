@@ -11,12 +11,15 @@ The exceptions are a config dir's own item, which `vibe add --from-config-dir <d
 
 from __future__ import annotations
 
+import contextlib
 import getpass
 import hashlib
 import os
 import subprocess
 import sys
+import time
 import unicodedata
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -229,3 +232,56 @@ def config_dir_port(config_dir: Path) -> KeychainPort:
     if platform == "darwin":
         return MacKeychain(config_dir_service(config_dir))
     return FileKeychain(config_dir / ".credentials.json")
+
+
+# Claude Code 2.1.318 changes its credential item only under this lock in the config dir (a
+# proper-lockfile directory, `<dir>/.storage-write` + `.lock`, stale after 15 s), as a
+# read-modify-write of the whole item. The token broker writes a mirror the same way under the
+# same lock, so neither side drops what the other just wrote (an MCP server's login, say).
+STORAGE_LOCK: Final = ".storage-write.lock"
+STORAGE_LOCK_STALE_S: Final = 15.0
+STORAGE_LOCK_WAIT_S: Final = 5.0
+
+
+@contextlib.contextmanager
+def storage_lock(
+    config_dir: Path,
+    *,
+    wait_s: float = STORAGE_LOCK_WAIT_S,
+    clock: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Iterator[None]:
+    """Hold Claude Code's own write lock of ``config_dir`` (no lock when the dir does not exist)."""
+    path = config_dir / STORAGE_LOCK
+    if not config_dir.is_dir():
+        yield
+        return
+    deadline = clock() + wait_s
+    while True:
+        try:
+            os.mkdir(path, 0o700)
+            break
+        except FileExistsError:
+            try:
+                stale = path.stat().st_mtime + STORAGE_LOCK_STALE_S <= clock()
+            except FileNotFoundError:
+                continue
+            if stale:
+                with contextlib.suppress(OSError):
+                    os.rmdir(path)
+                continue
+            if clock() >= deadline:
+                raise VibeError(
+                    f"Claude Code is writing its login in {config_dir} right now ({path} is held)",
+                    "vibe auto tick",
+                ) from None
+            sleep(0.1)
+        except OSError as exc:
+            raise VibeError(
+                f"could not take {path}: {exc.__class__.__name__}", "vibe auto tick"
+            ) from None
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            os.rmdir(path)

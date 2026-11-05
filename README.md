@@ -116,6 +116,37 @@ token may still be using it); `vibe run`, whose child cannot renew a token, keep
 refresh can be: once per access token. It cannot keep a `CLAUDE_CODE_OAUTH_TOKEN` session alive past that token's
 end, which no refresh can; an adopted account can.
 
+### The token broker: fixed sessions and the background switch side by side
+
+```
+vibe broker mirror main          # ~/.claude-main: created, CLAUDE.md/settings/skills/projects linked
+vibe broker on                   # vibe renews every login; Claude Code reads mirrors
+vibe run main                    # ▶ main (fixed), for good; cs / cw / claude follow the switch
+vibe broker status               # when each token ends and is renewed, its mirrors, any problem
+```
+
+With the broker on, **vibe is the only refresher** of every account it holds. Claude Code
+reads **mirrors**: Keychain items vibe keeps filled with the account's current access token
+and **no refresh token**.
+
+- **One mirror per account:** its own dir, `~/.claude-<alias>`. `vibe run <alias>` starts
+  Claude Code there with `CLAUDE_CONFIG_DIR` and no token variable.
+- **The default login:** `~/.claude` mirrors whichever account the switch made live, so `cs`,
+  `cw` and a plain `claude` follow the switch.
+
+Claude Code 2.1.318 never refreshes a login that has no refresh token. It re-reads a replaced
+item within 30 s, and again after a 401. Both are measured with the real binary and fake
+tokens, and the evidence is in [docs/BROKER.md](docs/BROKER.md).
+
+The minute tick renews each account at half its token's lifetime (at the latest an hour
+before the end) and rewrites its mirrors. It does this while auto-switch is off too. A
+failed renewal changes nothing: every mirror keeps its token until that really ends. The
+failure shows in `vibe broker status`, `vibe auto status` and `vibe list`.
+
+`vibe broker off` gives the live login back to Claude Code and removes the dir mirrors. An
+account that still lives in its own config dir is not brokered: run `vibe release <alias>`
+first.
+
 ## Every day
 
 ```
@@ -129,6 +160,7 @@ cw / cs                       a session with / without connectors; vibe picks th
 vibe shell-init               print the zsh snippet that defines `cw` and `cs`
 vibe remove <name>            forget an account
 vibe release <name>           move a --from-config-dir login into vibe (the dir keeps none)
+vibe broker on|off|status     vibe renews every login, Claude Code reads mirrors, see above
 vibe alias <old> <new>        rename one
 vibe auto on|off|status       switch accounts by itself, see below
 vibe statusline               one line for Claude Code's status line, see below
