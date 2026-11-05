@@ -64,6 +64,8 @@ fi
 # on disk by then; a busy one is never interrupted), with SIGTERM, the way closing its window would.
 after=""
 [[ "${1:-}" == "--after-pid" ]] && after="${2:-}"
+# --close-idle: no session to wait for first; close every session on extra once it is idle.
+[[ "${1:-}" == "--close-idle" ]] && after="none"
 IDLE_S=30
 idle_for() {  # seconds session $1 has been idle, from its own state file; -1 if busy or unknown
   python3 -I - "$EXTRA/sessions/$1.json" <<'EOF2'
@@ -76,8 +78,10 @@ print(int(time.time() - d.get("statusUpdatedAt", 0) / 1000) if d.get("status") =
 EOF2
 }
 if [[ -n "$after" ]]; then
-  say "Waiting until session $after has exited (restart it now)..."
-  while kill -0 "$after" 2>/dev/null; do sleep 2; done
+  if [[ "$after" != "none" ]]; then
+    say "Waiting until session $after has exited (restart it now)..."
+    while kill -0 "$after" 2>/dev/null; do sleep 2; done
+  fi
   while IFS=$'\t' read -r sid cwd pid; do
     [[ "$pid" == "$after" ]] && continue
     kill -0 "$pid" 2>/dev/null || continue
