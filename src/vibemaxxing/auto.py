@@ -23,13 +23,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import cursor, envelope, oauth, pool, route, statusline, store, usage
-from vibemaxxing.credentials import parse_blob
+from vibemaxxing import broker, cursor, envelope, oauth, pool, route, statusline, store, usage
+from vibemaxxing.credentials import holds_refresh_token, parse_blob
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, UsageError, VibeError
 from vibemaxxing.fsutil import FILE_MODE, private_dir, write_private
 from vibemaxxing.httpclient import HttpClient
-from vibemaxxing.keychain import KeychainPort
+from vibemaxxing.keychain import KeychainPort, config_dir_port
 from vibemaxxing.pool import (
     DEFAULT_COOLDOWN_S,
     DEFAULT_THRESHOLD,
@@ -247,12 +247,12 @@ def settings_for_edit(root: Path) -> Settings:
     return Settings()
 
 
-def _carried_routing(root: Path) -> object | None:
+def _carried(root: Path, key: str) -> object | None:
     try:
         parsed: object = json.loads(settings_path(root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return parsed.get("routing") if isinstance(parsed, dict) else None
+    return parsed.get(key) if isinstance(parsed, dict) else None
 
 
 def write_settings(root: Path, settings: Settings) -> None:
@@ -267,11 +267,13 @@ def write_settings(root: Path, settings: Settings) -> None:
     policy = policy_document(settings.policy)
     if policy is not None:
         document["policy"] = policy
-    # The routing of `vibe run auto` lives in the same file but is not auto-switch's: carry it
-    # over untouched, or `vibe auto on` would silently delete it.
-    carried = _carried_routing(root)
-    if carried is not None:
-        document["routing"] = carried
+    # The routing of `vibe run auto` and the token broker's settings live in the same file but
+    # are not auto-switch's: carry them over untouched, or `vibe auto on` would silently delete
+    # them (and a broker dropped that way would stop renewing every mirror).
+    for key in ("routing", broker.SETTINGS_KEY):
+        carried = _carried(root, key)
+        if carried is not None:
+            document[key] = carried
     write_private(settings_path(root), json.dumps(document, indent=2) + "\n")
 
 
@@ -386,6 +388,12 @@ def renewal_wait(port: KeychainPort, live: str, now_s: float) -> str | None:
     """
     try:
         raw = port.read()
+        if raw is not None and not holds_refresh_token(raw):
+            # A token broker mirror: Claude Code holds no refresh token here and can renew
+            # nothing, so there is nothing a switch could race. (Parsed first: a blob with no
+            # access token either is no mirror, and stays a wait below.)
+            parse_blob(raw, mirror_ok=True)
+            return None
         expires_s = parse_blob(raw).expires_at_ms / 1000 if raw is not None else None
     except VibeError:
         expires_s = None
@@ -409,6 +417,8 @@ def tick(
     port: KeychainPort,
     now_s: float,
     notify: Callable[[str], None],
+    port_for: Callable[[Path], KeychainPort] = config_dir_port,
+    home: Path | None = None,
 ) -> TickResult:
     """One evaluation and, if it is due, one switch. Safe to run every minute.
 
@@ -416,8 +426,26 @@ def tick(
     vibe does not know, a target that turned out dead. None of them is retried in the
     same tick, and none is an exit code. Every tick that returns leaves status.json
     behind, so the status line is never older than the scheduler's interval.
+
+    With the token broker on, its pass comes first and runs whether or not auto-switch is on:
+    every mirror needs its token renewed, and a switch then writes a token that is fresh. After
+    a switch the mirrors are synced again, so the incoming account's dir mirror and the default
+    item agree at once.
     """
+    report = broker.run(
+        root, client=client, default_port=port, port_for=port_for, now_s=now_s, home=home
+    )
     result, live = _tick(root, client=client, port=port, now_s=now_s, notify=notify)
+    if result.switched:
+        after = broker.run(
+            root, client=client, default_port=port, port_for=port_for, now_s=now_s, home=home
+        )
+        report = broker.Report(
+            report.lines + after.lines, tuple(dict.fromkeys(report.problems + after.problems))
+        )
+    said = [*report.lines, *(f"problem: {problem}" for problem in report.problems)]
+    if said:
+        result = replace(result, line=f"{result.line} | broker: {'; '.join(said)}")
     publish_status(root, live=live, now_s=now_s)
     if result.switched or int(now_s) // LOG_EVERY_S != int(now_s - TICK_INTERVAL_S) // LOG_EVERY_S:
         log_tick(root, result, live=live, now_s=now_s)

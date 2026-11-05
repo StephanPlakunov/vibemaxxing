@@ -217,6 +217,15 @@ def _barred_as_owned(root: Path, alias: str) -> RefreshOutcome | None:
     return RefreshOutcome(None, "owned") if owned else None
 
 
+def _claude_code_holds_active(root: Path, alias: str) -> bool:
+    """Whether ``alias`` is the active account and Claude Code, not vibe, refreshes it."""
+    if store.read_active(root) != alias:
+        return False
+    from vibemaxxing import broker  # broker refreshes through this module
+
+    return not broker.is_on(root)
+
+
 def refresh(
     root: Path,
     alias: str,
@@ -227,7 +236,9 @@ def refresh(
 ) -> RefreshOutcome:
     # The active account's lineage is Claude Code's: it refreshes the Keychain
     # copy, and the refresh token survives only one refresher. CONTRACT section 8.
-    if store.read_active(root) == alias:
+    # Not with the token broker on: then the default item is a mirror with no refresh token, and
+    # vibe is the one refresher of every account it holds (broker.py).
+    if _claude_code_holds_active(root, alias):
         return RefreshOutcome(None, "active")
     # So is the lineage of an account imported from a config dir: Claude Code sessions run
     # with that dir hold its refresh token, and a refresh here would log every one of them
@@ -257,7 +268,7 @@ def refresh(
         # Again under the claim: `vibe switch` takes the same claim before it
         # writes this account into the Keychain, so a switch that landed after the
         # check above is visible here, and one that has not started yet waits.
-        if store.read_active(root) == alias:
+        if _claude_code_holds_active(root, alias):
             store.release_refresh(root, alias)
             return RefreshOutcome(None, "active")
         # And again under the claim: `vibe add --adopt-stored-login` hands this very refresh token

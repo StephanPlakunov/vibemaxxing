@@ -22,6 +22,7 @@ from vibemaxxing.credentials import (
     Identity,
     credential_to_blob,
     credential_to_disk,
+    holds_refresh_token,
     login_lapsed,
     parse_blob,
     parse_blob_members,
@@ -488,9 +489,10 @@ def _uuid_owner(root: Path, uuid: str, *, prefer: str | None) -> str | None:
 
 
 def _holds_login(blob: str) -> bool:
-    # `{"claudeAiOauth": {}}` is a blob and not a login: there is no token in it to lose.
+    # `{"claudeAiOauth": {}}` is a blob and not a login: there is no token in it to lose. A
+    # broker mirror (an access token and no refresh token) is a login: Claude Code runs on it.
     try:
-        parse_blob(blob)
+        parse_blob(blob, mirror_ok=True)
     except StoreError:
         return False
     return True
@@ -570,6 +572,16 @@ def refuse_owned(account: Account) -> None:
         )
 
 
+def _port_blob(root: Path, credential: Credential, base: Mapping[str, object] | None) -> str:
+    """What the default item gets: the whole login, or with the token broker on only a mirror of
+    it (no refresh token), so Claude Code can never refresh the lineage vibe holds."""
+    from vibemaxxing import broker  # broker builds on this module
+
+    if broker.is_on(root):
+        return broker.mirror_blob(credential, base)
+    return credential_to_blob(credential, base)
+
+
 def switch(root: Path, alias: str, port: KeychainPort, *, now_s: float | None = None) -> None:
     incoming = read_account(root, alias)  # an unknown alias must fail before the port is touched
     refuse_owned(incoming)
@@ -624,7 +636,15 @@ def _switch_claimed(
     # is free to check, so check it: resync only when the live account uuid is
     # unknown or agrees.
     holder = owner if owner is not None else outgoing
-    if base_raw is not None and holder is not None and account_path(root, holder).exists():
+    # Only a blob with a refresh token is a login Claude Code holds and may have rotated. A broker
+    # mirror carries none (vibe holds the lineage and refreshes it): copying it into the account
+    # file would replace the account's refresh token with nothing.
+    if (
+        base_raw is not None
+        and holds_refresh_token(base_raw)
+        and holder is not None
+        and account_path(root, holder).exists()
+    ):
         account = read_account(root, holder)
         stored_uuid = account.identity.account_uuid
         if live_uuid is None or stored_uuid is None or live_uuid == stored_uuid:
@@ -652,7 +672,7 @@ def _switch_claimed(
         incoming = replace(incoming, credential=successor)
         write_account(root, incoming)
         delete_stash(root, alias)
-    port.write(credential_to_blob(incoming.credential, base))
+    port.write(_port_blob(root, incoming.credential, base))
     # After the port, never before: the identity file only describes who the
     # credential belongs to, so it must not name the incoming account while the
     # port still holds the outgoing one.

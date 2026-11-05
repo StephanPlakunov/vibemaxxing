@@ -7,6 +7,12 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Token broker** (`vibe broker on|off|status|mirror`): vibe is the only refresher of every Claude account it
+  holds, and Claude Code reads mirrors (an access token and no refresh token, in each account's
+  `~/.claude-<alias>` and in the default login for the live account). `vibe run main` / `vibe run extra` are fixed
+  for good and never die from their token; `cs`, `cw` and `claude` follow the switch. Renewal at half the token's
+  lifetime from the minute tick (also while auto-switch is off). A failed renewal keeps every mirror and is reported
+  in `vibe broker status`, `vibe auto status` and `vibe list`. Off by default. Evidence and design: `docs/BROKER.md`.
 - **One shared login** (`routing.shared_login`): `vibe run auto` puts every Claude run on Claude Code's own
   login, which the background tick moves between the accounts, so open sessions follow a switch.
 - **`cw` and `cs`** from `vibe shell-init` (with and without connectors); `claude` stays plain Claude Code.

@@ -16,6 +16,7 @@ from typing import Final
 
 from vibemaxxing import (
     bridge,
+    broker,
     childenv,
     credentials,
     cursor,
@@ -104,6 +105,9 @@ class Plan:
     config_dir: str | None = None
     # `claude --version` and friends: no account, no environment of ours.
     passthrough: bool = False
+    # ``config_dir`` is the account's token broker mirror: vibe writes a working token into it
+    # right before the child starts (broker.ensure_for_run), and the child never refreshes it.
+    mirror: bool = False
 
 
 # --- what Claude Code would run ------------------------------------------------------
@@ -538,10 +542,40 @@ def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags)
     config_dir = _config_dir_of(svc, alias)
     # A named account is always fixed to it, even when it is the shared login right now: `cw` and
     # `cs` follow the background switch, `vibe run <account>` never does.
+    mirrored = _mirror_plan(svc, alias, argv, bridge_notes)
+    if mirrored is not None:
+        return mirrored
     if config_dir is not None:
         notes = _config_dir_notes(svc, alias, config_dir)
         return Plan(alias, cursor.KIND_CLAUDE, argv, (*notes, *bridge_notes), config_dir=config_dir)
     return Plan(alias, cursor.KIND_CLAUDE, argv, tuple(bridge_notes), claude_token=True)
+
+
+def _mirror_plan(
+    svc: Services,
+    alias: str,
+    argv: Sequence[str],
+    notes: Sequence[str],
+    route_: route.Route | None = None,
+) -> Plan | None:
+    """With the token broker on: a session in the account's own mirror dir, no token override.
+
+    The dir's Keychain item holds the account's current access token and no refresh token; vibe
+    renews it there every few hours (broker.py), so the session is fixed to the account and never
+    dies from its token. None when the broker is off or the account lives in its own config dir.
+    """
+    if not broker.is_on(svc.root) or not broker.brokered(svc.root, alias):
+        return None
+    directory = broker.mirror_dir(broker.read_settings(svc.root), alias, svc.home)
+    return Plan(
+        alias,
+        cursor.KIND_CLAUDE,
+        tuple(argv),
+        tuple(notes),
+        route_,
+        config_dir=str(directory),
+        mirror=True,
+    )
 
 
 def _with_bridge(
@@ -697,6 +731,10 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
         live = False
     argv, bridge_notes = _with_bridge(svc, chosen.alias, (command[0], *args), flags)
     notes += _without(routing, chosen.alias, needs, bridged=_bridged(svc, bridge_notes))
+    if not live:
+        mirrored = _mirror_plan(svc, chosen.alias, argv, (*notes, *bridge_notes), chosen)
+        if mirrored is not None:
+            return mirrored
     return Plan(
         chosen.alias,
         cursor.KIND_CLAUDE,
