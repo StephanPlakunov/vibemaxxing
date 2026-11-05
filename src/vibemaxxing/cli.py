@@ -924,12 +924,16 @@ def _spawn(argv: Sequence[str], env: dict[str, str] | None) -> int:
         ) from None
 
 
+DEFAULT_COMMAND: Final = "claude"
+
+
 def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
     # Only the leading separator is ours; a `--` the child itself needs must
     # survive into its argv.
     command = args.command[1:] if args.command[:1] == ["--"] else list(args.command)
     if not command:
-        raise UsageError("vibe run needs a command after --", "vibe run work -- claude")
+        # `vibe run cursor` means a session: Claude Code, or Cursor's agent for a Cursor seat.
+        command = [DEFAULT_COMMAND]
     flags = _run_flags(args)
     plan = launch.plan_run(ctx.services(), args.alias, command, flags)
     # The child's environment is built on purpose, never inherited whole (childenv.py).
@@ -1218,12 +1222,12 @@ Getting started
 Every day
   vibe                        the dashboard, in the terminal
   vibe list                   each account's limits and the pooled headroom
-  vibe run work -- claude     one command on one account; the active login is untouched
+  cw                          a session that may need Slack or Jira (vibe picks the account)
+  cs                          a session that needs no connectors (vibe picks the account)
+  vibe run main|extra|cursor  a session on that account (`-- <cmd>` runs something else)
+  vibe shell-init             print the zsh snippet that defines `cw` and `cs`
   vibe add cursor --kind cursor
-                              a Cursor seat (log in with `cursor-agent login`); then
-                              `vibe run cursor -- claude ...` runs it on cursor-agent
-  vibe run auto -- claude     pick the account by need and budget, then run it
-  vibe shell-init             print the zsh snippet for `cw` (connectors) and `cs` (solo)
+                              a Cursor seat (log in with `cursor-agent login` first)
   vibe usage web              the same dashboard in a browser, http://127.0.0.1:8787
 
 Connector bridge (for a session on the extra account)
@@ -1332,16 +1336,13 @@ def build_parser() -> argparse.ArgumentParser:
     switch.set_defaults(handler=cmd_switch)
 
     run = subs.add_parser(
-        "run", help="run one command pinned to one account (`auto` picks it, `cursor` is Cursor)"
+        "run", help="a session on one account: main, extra or cursor (`cw`/`cs` pick it for you)"
     )
-    run.add_argument("alias", help="an account, or `auto` to pick by the routing rules")
-    run.add_argument(
-        "--needs", metavar="LIST", help="connectors the run needs: slack,atlassian,m365,gcal"
-    )
-    run.add_argument("--no-needs", action="store_true", help="the run needs no connector")
-    run.add_argument(
-        "--claude-only", action="store_true", help="never translate this run to Cursor"
-    )
+    run.add_argument("alias", help="main, extra or cursor (`auto` is what `cw` and `cs` run)")
+    # What `cw` and `cs` (and agents) pass to `vibe run auto`; not part of the everyday surface.
+    run.add_argument("--needs", metavar="LIST", help=argparse.SUPPRESS)
+    run.add_argument("--no-needs", action="store_true", help=argparse.SUPPRESS)
+    run.add_argument("--claude-only", action="store_true", help=argparse.SUPPRESS)
     run.add_argument(
         "--allow-force", action="store_true", help="on Cursor: let bypassPermissions mean --force"
     )
@@ -1364,12 +1365,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="on Cursor: pass --trust (headless runs refuse a workspace nobody trusted)",
     )
-    run.add_argument(
-        "--brief", metavar="TEXT", help="the original task, for a fresh run after a move"
-    )
-    run.add_argument(
-        "--handover", type=Path, metavar="FILE", help="notes the fresh run reads first after a move"
-    )
+    run.add_argument("--brief", metavar="TEXT", help=argparse.SUPPRESS)
+    run.add_argument("--handover", type=Path, metavar="FILE", help=argparse.SUPPRESS)
     run.add_argument("--dry-run", action="store_true", help="print what would run; run nothing")
     # The command is cut off before parsing (split_run_command); nothing is left for argparse.
     _add_json(run)

@@ -265,3 +265,18 @@ def test_the_cli_statusline_takes_the_session_flag(
     assert world.main("statusline", "--session", "cursor") == 0
 
     assert capsys.readouterr().out.startswith("▶ cursor · ")
+
+
+# --- `vibe run <account>` with no command --------------------------------------------------------
+
+
+def test_a_run_without_a_command_starts_a_session(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert world.main("run", "cursor") == 0
+    assert world.fake.calls()[-1] == []  # Cursor's own TUI, on the model Cursor picks
+
+    auto_world(world, main_weekly=10)
+    shared(world)
+    assert world.main("run", "auto") == 0
+    assert only_call(world)["argv"] == []  # plain `claude` on the shared login

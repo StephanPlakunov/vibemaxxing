@@ -102,9 +102,10 @@ vibe                          open the dashboard in the terminal
 vibe usage web                open it in a browser at http://127.0.0.1:8787
 vibe list                     every account, its limits, the pooled total
 vibe switch <name>            change the active account
+vibe run <name>               a session on one account: `claude`, or Cursor's agent for `cursor`
 vibe run <name> -- <cmd>      run one command as one account (`cursor`: translated for Cursor)
-vibe run auto -- claude       pick the account by the routing rules, then run
-vibe shell-init               print the zsh snippet for `cw` (connectors) and `cs` (solo)
+cw / cs                       a session with / without connectors; vibe picks the account
+vibe shell-init               print the zsh snippet that defines `cw` and `cs`
 vibe remove <name>            forget an account
 vibe alias <old> <new>        rename one
 vibe auto on|off|status       switch accounts by itself, see below

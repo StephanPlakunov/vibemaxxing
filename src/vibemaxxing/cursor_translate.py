@@ -283,6 +283,13 @@ def translate(claude_args: Sequence[str], options: Options) -> Translation:
         access = "interactive agent: what it may do without asking is Cursor's own setting"
 
     chosen = model if model is not None else options.default_model
+    if chosen is None and not print_mode:
+        # An interactive session with no model named anywhere: Cursor's own pick, which the
+        # person changes in Cursor's UI. Only a headless run must know what it will run on.
+        out += extra
+        if prompt:
+            out += ["--", *prompt] if any(word.startswith("-") for word in prompt) else prompt
+        return Translation(tuple(out), interactive=True, model="", access=access)
     if chosen is None:
         raise UsageError(
             "cannot tell which Claude model this run would use (no --model, no ANTHROPIC_MODEL, "
