@@ -17,6 +17,10 @@ from typing import Final
 from vibemaxxing.errors import UsageError
 
 TOKEN_VAR: Final = "CLAUDE_CODE_OAUTH_TOKEN"
+# Set on every child `vibe run` starts, for `vibe statusline`: the account this session is, or
+# SESSION_LIVE for a session on Claude Code's own login, which follows the background switch.
+SESSION_VAR: Final = "VIBE_SESSION"
+SESSION_LIVE: Final = "live"
 # What decides which Claude account a Claude Code process is, or which provider it talks to.
 CLAUDE_FAMILY: Final = frozenset(
     {

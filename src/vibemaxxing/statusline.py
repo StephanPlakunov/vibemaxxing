@@ -9,9 +9,10 @@ that collects usage and every tick; this module only knows its path and its shap
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Final
@@ -27,6 +28,14 @@ _SCOPED_KIND: Final = "weekly_scoped"
 _SCOPED_PREFIX: Final = "Weekly · "  # usage.SCOPED_LABEL_PREFIX, not imported: see above
 # English, whatever the locale: strftime("%a") follows LC_TIME.
 _WEEKDAYS: Final = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+# childenv.SESSION_VAR and SESSION_LIVE, and what pins an account: not imported, see above.
+SESSION_VAR: Final = "VIBE_SESSION"
+SESSION_LIVE: Final = "live"
+_TOKEN_VAR: Final = "CLAUDE_CODE_OAUTH_TOKEN"
+_CONFIG_VAR: Final = "CLAUDE_CONFIG_DIR"
+UNKNOWN_SESSION: Final = "?"
 
 
 def default_root() -> Path:
@@ -163,14 +172,79 @@ def _cursor(entry: Mapping[str, object], now_s: float) -> str | None:
     return f"{alias}: {' '.join(cells)}{stale}"
 
 
-def render(document: Mapping[str, object] | None, *, now_s: float) -> str:
-    """One line: the live account, then each account's session and weekly rows."""
+def _config_dir_alias(root: Path, directory: str) -> str | None:
+    """The account whose login lives in ``directory``, from its account file; None if none."""
+    try:
+        wanted = Path(directory).expanduser().resolve()
+        files = sorted((root / "accounts").glob("*.json"))
+    except (OSError, RuntimeError):
+        return None
+    for path in files:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            given = raw.get("config_dir") if isinstance(raw, dict) else None
+            if isinstance(given, str) and Path(given).expanduser().resolve() == wanted:
+                alias = raw.get("alias")
+                return alias if isinstance(alias, str) else path.stem
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return None
+
+
+def session_account(
+    environ: Mapping[str, str], *, root: Path, home: Path
+) -> tuple[str | None, bool]:
+    """The account of the session this status line belongs to, and whether it is fixed.
+
+    ``(None, False)`` is a session on Claude Code's own login: it is whatever account that
+    login is now, and follows the background switch. Claude Code and Cursor run the status
+    line command with their own environment, which `vibe run` marked (``VIBE_SESSION``); a
+    session vibe did not start is told apart by the variables that pin an account.
+    """
+    marked = environ.get(SESSION_VAR)
+    if marked:
+        return (None, False) if marked == SESSION_LIVE else (marked, True)
+    directory = environ.get(_CONFIG_VAR)
+    if directory:
+        try:
+            default = Path(directory).expanduser().resolve() == (home / ".claude").resolve()
+        except (OSError, RuntimeError):
+            default = False
+        if not default:
+            return _config_dir_alias(root, directory) or UNKNOWN_SESSION, True
+    if environ.get(_TOKEN_VAR):
+        return UNKNOWN_SESSION, True
+    return None, False
+
+
+def render(
+    document: Mapping[str, object] | None,
+    *,
+    now_s: float,
+    session: tuple[str | None, bool] = (None, False),
+) -> str:
+    """One line: this session's account, then each account's session and weekly rows.
+
+    ``session`` comes from `session_account`: a session on the shared login shows the account
+    that login is now (the one the background switch last moved it to); a fixed one shows its
+    own account and says so.
+    """
     if document is None:
         return NO_STATUS
     parts: list[str] = []
-    live = _text(document.get("live")) or _text(document.get("active"))
-    if live is not None:
-        parts.append(f"▶ {live}")
+    alias, fixed = session
+    seats = document.get("cursor")
+    cursor_aliases = (
+        {seat.get("alias") for seat in seats if isinstance(seat, dict)}
+        if isinstance(seats, list)
+        else set()
+    )
+    if alias is None:
+        live = _text(document.get("live")) or _text(document.get("active"))
+        if live is not None:
+            parts.append(f"▶ {live}")
+    else:
+        parts.append(f"▶ {alias}" + (" (fixed)" if fixed and alias not in cursor_aliases else ""))
     models = _models(document)
     accounts = document.get("accounts")
     for entry in accounts if isinstance(accounts, list) else []:
@@ -178,7 +252,6 @@ def render(document: Mapping[str, object] | None, *, now_s: float) -> str:
             text = _account(entry, models, now_s)
             if text is not None:
                 parts.append(text)
-    seats = document.get("cursor")
     for seat in seats if isinstance(seats, list) else []:
         if isinstance(seat, dict):
             text = _cursor(seat, now_s)
@@ -187,7 +260,20 @@ def render(document: Mapping[str, object] | None, *, now_s: float) -> str:
     return " · ".join(parts) or NO_STATUS
 
 
-def main() -> int:
+def parse_session_flag(args: Sequence[str]) -> str | None:
+    """``--session NAME`` (or ``--session=NAME``), the account a caller names for its session."""
+    for index, arg in enumerate(args):
+        if arg == "--session" and index + 1 < len(args):
+            return args[index + 1]
+        if arg.startswith("--session="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def main(args: Sequence[str] = ()) -> int:
     """The console script's fast path for `vibe statusline`. Never fails the redraw."""
-    sys.stdout.write(render(read(default_root()), now_s=time.time()) + "\n")
+    root = default_root()
+    named = parse_session_flag(args)
+    session = (named, True) if named else session_account(os.environ, root=root, home=Path.home())
+    sys.stdout.write(render(read(root), now_s=time.time(), session=session) + "\n")
     return 0

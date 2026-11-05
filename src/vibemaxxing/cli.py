@@ -805,7 +805,12 @@ def cmd_auto_uninstall(args: argparse.Namespace, ctx: Context) -> int:
 def cmd_statusline(args: argparse.Namespace, ctx: Context) -> int:
     # The console script answers this before it imports cli (entry.py); this is the same
     # line for `python -m vibemaxxing statusline` and the tests.
-    out(statusline.render(statusline.read(ctx.root), now_s=ctx.now_s) + "\n")
+    session = (
+        (args.session, True)
+        if args.session
+        else statusline.session_account(os.environ, root=ctx.root, home=Path.home())
+    )
+    out(statusline.render(statusline.read(ctx.root), now_s=ctx.now_s, session=session) + "\n")
     return 0
 
 
@@ -934,11 +939,7 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
         child = childenv.build(
             os.environ, strict=plan.kind == cursor.KIND_CURSOR, pass_env=flags.pass_env
         )
-        if child.dropped:
-            _say(
-                f"not passed to the child: {', '.join(child.dropped)} "
-                "(names only; --pass-env NAME passes one to Cursor)"
-            )
+        # What was dropped is in the --json and --dry-run output (names only), not on every start.
     # Last, so the line about a move to Cursor's own UI is the final thing before it starts.
     for note in plan.notes:
         _say(note)
@@ -957,32 +958,36 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
             human=f"would run on {plan.alias} ({plan.kind}): {' '.join(plan.argv)}\n",
         )
         return 0
+    # Which account this session is, for its status line: "live" follows Claude Code's own login
+    # (and so the background switch); an alias is fixed for the life of the session.
+    session = (
+        childenv.SESSION_LIVE
+        if plan.kind == cursor.KIND_CLAUDE and plan.config_dir is None and not plan.claude_token
+        else plan.alias
+    )
+    marked = {**child.env, childenv.SESSION_VAR: session} if child is not None else {}
     if child is None:
         code = _spawn(plan.argv, None)  # `claude --version` and friends: no account involved
     elif plan.kind == cursor.KIND_CURSOR:
         # No credential of ours goes anywhere: cursor-agent reads its own login.
-        code = _spawn(plan.argv, child.env)
+        code = _spawn(plan.argv, marked)
     elif plan.config_dir is not None:
         # The account's login is Claude Code's, in that dir: it reads and refreshes it there. Not a
         # token of ours, so a session that outlives the access token keeps its login, and vibe
         # starting another run can never take it away.
-        code = _spawn(plan.argv, {**child.env, "CLAUDE_CONFIG_DIR": plan.config_dir})
+        code = _spawn(plan.argv, {**marked, "CLAUDE_CONFIG_DIR": plan.config_dir})
     elif not plan.claude_token:
         # Claude Code's own login: no token override, and no inherited Claude variable either.
-        code = _spawn(plan.argv, child.env)
+        code = _spawn(plan.argv, marked)
     else:
         credential = _fresh_token(ctx, plan.alias)
         if cursor_translate.is_claude_command(plan.argv) and not {"-p", "--print"} & set(plan.argv):
             ends = datetime.fromtimestamp(credential.expires_at_ms / 1000).strftime("%H:%M")
-            _say(
-                f"this session carries a token that ends at {ends} and cannot renew it: "
-                f"for a longer one give {plan.alias} its own config dir "
-                f"(vibe add {plan.alias} --from-config-dir DIR)"
-            )
+            _say(f"fixed to {plan.alias} until {ends}: its login cannot renew in this session")
         # The fifth permitted reveal() site: the child's environment. The
         # global Keychain credential is untouched, so other shells keep their account.
         explicit = {childenv.TOKEN_VAR: credential.access_token.reveal()}
-        code = _spawn(plan.argv, {**child.env, **explicit})
+        code = _spawn(plan.argv, {**marked, **explicit})
     if args.json and code != 130:
         out(envelope.dumps(_action("run", alias=plan.alias, kind=plan.kind, exit_code=code)) + "\n")
     return code
@@ -1186,10 +1191,11 @@ def cmd_bridge_add(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
-SHELL_INIT: Final = """# vibe: route Claude Code sessions to the account with room (add to ~/.zshrc)
-claude() { vibe run auto -- claude "$@"; }
-# a short name for code-only sessions: no Slack/Atlassian needed, so extra comes first
-claude-code() { vibe run auto --no-needs -- claude "$@"; }
+SHELL_INIT: Final = """# vibemaxxing (add to ~/.zshrc): `claude` itself stays plain Claude Code
+# cw: Claude, work - a session that may need Slack or Jira
+cw() { vibe run auto -- claude "$@"; }
+# cs: Claude, solo - a session that needs no connectors
+cs() { vibe run auto --no-needs -- claude "$@"; }
 """
 
 
@@ -1217,7 +1223,7 @@ Every day
                               a Cursor seat (log in with `cursor-agent login`); then
                               `vibe run cursor -- claude ...` runs it on cursor-agent
   vibe run auto -- claude     pick the account by need and budget, then run it
-  vibe shell-init             print a zsh snippet that routes `claude` through that
+  vibe shell-init             print the zsh snippet for `cw` (connectors) and `cs` (solo)
   vibe usage web              the same dashboard in a browser, http://127.0.0.1:8787
 
 Connector bridge (for a session on the extra account)
@@ -1404,7 +1410,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_cmd.set_defaults(handler=cmd_bridge_add)
 
     init = subs.add_parser(
-        "shell-init", help="print a zsh snippet that routes `claude` through `vibe run auto`"
+        "shell-init", help="print the zsh snippet for `cw` (connectors) and `cs` (solo)"
     )
     init.set_defaults(handler=cmd_shell_init)
 
@@ -1462,6 +1468,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     line = subs.add_parser(
         "statusline", help="one line for Claude Code's status line, from the last numbers"
+    )
+    line.add_argument(
+        "--session",
+        metavar="ACCOUNT",
+        help="the account this session is (Cursor's status line passes `cursor`)",
     )
     line.set_defaults(handler=cmd_statusline)
 

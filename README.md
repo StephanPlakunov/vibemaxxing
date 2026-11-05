@@ -104,7 +104,7 @@ vibe list                     every account, its limits, the pooled total
 vibe switch <name>            change the active account
 vibe run <name> -- <cmd>      run one command as one account (`cursor`: translated for Cursor)
 vibe run auto -- claude       pick the account by the routing rules, then run
-vibe shell-init               print a zsh snippet that routes `claude` through that
+vibe shell-init               print the zsh snippet for `cw` (connectors) and `cs` (solo)
 vibe remove <name>            forget an account
 vibe alias <old> <new>        rename one
 vibe auto on|off|status       switch accounts by itself, see below
@@ -248,6 +248,23 @@ in Claude Code, add this to `~/.claude/settings.json`:
 
 ```json
 {"statusLine": {"type": "command", "command": "vibe statusline"}}
+```
+
+**`▶` is the account of the session the line belongs to**, not the one a new session would get.
+Claude Code and Cursor run the status line command with the session's own environment, and
+`vibe run` marks every child with `VIBE_SESSION`: `live` for a session on Claude Code's own login
+(it shows whichever account that login is now, so it changes when the background switch moves the
+login), or the account a session is fixed to (`▶ extra (fixed)`). A session vibe did not start is
+told apart by `CLAUDE_CONFIG_DIR` (the account whose dir it is) and `CLAUDE_CODE_OAUTH_TOKEN`
+(`▶ ? (fixed)`); otherwise it is on the live login.
+
+Cursor's terminal agent has the same kind of status line (an undocumented `statusLine` key in
+`~/.cursor/cli-config.json`; it replaces Cursor's own footer, and a running `cursor-agent` may
+overwrite the file when it exits, so edit it with none running). Pass the account, since the
+session is always the seat:
+
+```json
+{"statusLine": {"type": "command", "command": "vibe statusline --session cursor", "padding": 2}}
 ```
 
 ### See what is left
@@ -394,10 +411,10 @@ Defaults, all configurable under `routing` in `~/.vibemaxxing/settings.json`:
   counts as spent after that, until the cycle resets.
 - `--needs m365` can only go to main. `--claude-only` never picks Cursor.
 - An account with unknown usage is unavailable, and vibe prints why it was skipped.
-- When a run moves between Claude and Cursor, vibe prints which account and why. An interactive
-move prints one last line before Cursor's own UI starts: why main was passed over, which model,
-that there are no Claude hooks, skills or Remote Control there, and `vibe run main -- claude` to
-override. A Claude session
+- `vibe run auto` prints one line, `vibemaxxing: auto picked main: 75% < 80%` (main's weekly use
+  against today's budget) or `vibemaxxing: auto picked cursor: main 82% > 80%` (why the first choice
+  was passed over), plus one line when it adds the bridge and one per real warning. A run on an
+  account you name prints nothing unless something may go wrong. A Claude session
   id cannot be resumed on Cursor, nor the reverse: it starts a fresh run with `--brief "<task>"`
   and `--handover <file>` instead, and says so.
 
@@ -417,9 +434,21 @@ through to Cursor. A Cursor step cannot be the last resort.
              "cursor_margin_cents": 1000}}
 ```
 
-`vibe shell-init` prints (and never writes) a zsh snippet: `claude` becomes
-`vibe run auto -- claude`, and `claude-code` is `vibe run auto --no-needs -- claude`.
-`claude --version` and `claude mcp ...` pass through untouched. A Claude account that is already
+`vibe shell-init` prints (and never writes) a zsh snippet with two commands, and leaves `claude`
+itself plain Claude Code: `cw` ("Claude, work": a session that may need Slack or Jira) is
+`vibe run auto -- claude`, and `cs` ("Claude, solo": no connectors) is
+`vibe run auto --no-needs -- claude`. `cw --version` and `cw mcp ...` pass through untouched.
+
+**One shared login** (`"routing": {"shared_login": true}`): every Claude run that `vibe run auto`
+routes goes on Claude Code's own login, with no token override and no config dir, whichever
+account that login is now; `vibe auto tick` moves the login between the accounts by the policy,
+and Claude Code re-reads it (a 30-second Keychain cache in Claude Code 2.1.318), so an open
+session follows a switch without a restart. The order still decides between Claude and Cursor;
+it no longer decides which Claude account, so `cs` runs on the same account as `cw`. The bridge
+is added when any Claude account the session may move to lacks an upstream it has a login for.
+A named account that is the shared login now runs as it; any other is fixed to its own token.
+An account that lives in its own config dir cannot be the shared login (`vibe release` moves it
+back). A Claude account that is already
 Claude Code's own login runs without a token override; any other runs on its own token, which
 cannot refresh itself (see Known limitations).
 

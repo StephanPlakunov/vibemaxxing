@@ -45,6 +45,8 @@ DEFAULT_CONNECTORS: Final[Mapping[str, tuple[str, ...]]] = {
     "extra": (),
 }
 CONNECTORS: Final = ("slack", "atlassian", "m365", "gcal")
+# The end of the warning for a run that goes without a connector it needs.
+DEGRADED_SUFFIX: Final = ": this session runs without it"
 # The three roles an order names. `routing.roles` maps each to the alias it is stored under;
 # without it a role is the alias of the same name.
 ROLES: Final = ("main", "extra", "cursor")
@@ -110,6 +112,9 @@ class Routing:
     spent_percent: int = 99
     # The `bridge` member, validated by vibe-bridge (bridge.py) where it is used.
     bridge: object = None
+    # One shared login: every Claude run that vibe routes goes on Claude Code's own login, which
+    # `vibe auto tick` moves between the accounts, so a running session follows the switch.
+    shared_login: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,6 +138,9 @@ class Route:
     reason: str
     warnings: tuple[str, ...] = ()
     skipped: tuple[str, ...] = ()
+    # The reason in a few words, for the one line `vibe run auto` prints ("75% < 80%",
+    # "main spent"); empty when the first choice simply had room.
+    short: str = ""
 
 
 # --- settings.json `routing` ---------------------------------------------------------
@@ -174,6 +182,7 @@ def parse_routing(raw: object, path: Path) -> Routing:
         "roles",
         "cursor_cap_cents",
         "bridge",
+        "shared_login",
     }
     unknown = sorted(set(raw) - known)
     if unknown:
@@ -232,6 +241,9 @@ def parse_routing(raw: object, path: Path) -> Routing:
         raise _fail(path, "cursor_margin_cents must be a number of cents, 0 or more")
     if spent is None or not 50 <= spent <= 100:
         raise _fail(path, "spent_percent must be between 50 and 100")
+    shared = raw.get("shared_login", False)
+    if not isinstance(shared, bool):
+        raise _fail(path, "shared_login must be true or false")
     return Routing(
         timezone=tz,
         weekday_budget=tuple(item for item in budget if item is not None),
@@ -244,6 +256,7 @@ def parse_routing(raw: object, path: Path) -> Routing:
         cursor_margin_cents=margin,
         spent_percent=spent,
         bridge=raw.get("bridge"),
+        shared_login=shared,
     )
 
 
@@ -320,6 +333,8 @@ def decide(
         lookup = by_alias.get
     budget = today_budget(routing, now_s)
     skipped: list[str] = []
+    # The same reasons in a few words; the first one is why the pick is not the first choice.
+    brief: list[str] = []
     wanted = set(needs)
     exclusive = wanted & set(routing.no_degrade)
 
@@ -333,6 +348,7 @@ def decide(
         if candidate is None:
             what = step.account if alias == step.account else f"{step.account} (alias {alias!r})"
             skipped.append(f"{what}: no such account")
+            brief.append(f"no account {alias}")
             if step.account in CLAUDE_ROLES:
                 unresolved.append(f"{step.account} -> {alias!r}")
             continue
@@ -341,6 +357,7 @@ def decide(
             continue
         if candidate.health is Health.DEAD:
             skipped.append(f"{candidate.alias}: {candidate.why}")
+            brief.append(f"{candidate.alias} logged out")
             continue
         have = set(routing.connectors.get(step.account, routing.connectors.get(alias, ())))
         missing = sorted(wanted - have)
@@ -349,10 +366,9 @@ def decide(
             if not step.degraded or exclusive - have:
                 gone = ", ".join(missing)
                 skipped.append(f"{candidate.alias}: has no {gone}")
+                brief.append(f"{candidate.alias} has no {gone}")
                 continue
-            warnings.append(
-                f"{candidate.alias} has no {', '.join(missing)}: this session runs without it"
-            )
+            warnings.append(f"{candidate.alias} has no {', '.join(missing)}{DEGRADED_SUFFIX}")
         if candidate.kind == KIND_CURSOR and unresolved:
             raise UsageError(
                 f"{', '.join(unresolved)} is not a stored account, so this run would have gone "
@@ -360,24 +376,28 @@ def decide(
                 "set routing.roles in ~/.vibemaxxing/settings.json to your account aliases",
             )
         if step.last_resort:
-            return _chosen(candidate, step, skipped, routing, budget, warnings)
+            return _chosen(candidate, step, skipped, routing, budget, warnings, brief)
         if candidate.health is Health.UNKNOWN:
             skipped.append(f"{candidate.alias}: usage unknown, so not used ({candidate.why})")
+            brief.append(f"{candidate.alias} usage unknown")
             continue
         if candidate.health is Health.OUT:
             skipped.append(f"{candidate.alias}: spent ({candidate.why})")
+            brief.append(f"{candidate.alias} spent")
             continue
         if step.budget and candidate.kind == KIND_CLAUDE:
             if candidate.weekly_percent is None or not candidate.weekly_fresh:
                 skipped.append(f"{candidate.alias}: weekly usage unknown, so the budget is unknown")
+                brief.append(f"{candidate.alias} usage unknown")
                 continue
             if candidate.weekly_percent > budget:
                 skipped.append(
                     f"{candidate.alias}: weekly {candidate.weekly_percent}% is over today's "
                     f"{budget}% budget"
                 )
+                brief.append(f"{candidate.alias} {candidate.weekly_percent}% > {budget}%")
                 continue
-        return _chosen(candidate, step, skipped, routing, budget, warnings)
+        return _chosen(candidate, step, skipped, routing, budget, warnings, brief)
     reasons = "; ".join(skipped) or "no step in the order"
     raise UsageError(f"no account can take this run ({reasons})", "vibe list")
 
@@ -389,7 +409,9 @@ def _chosen(
     routing: Routing,
     budget: int,
     warnings: Sequence[str],
+    brief: Sequence[str] = (),
 ) -> Route:
+    short = brief[0] if brief else ""
     if step.last_resort:
         reason = f"last resort: every other choice was unavailable ({'; '.join(skipped)})"
         if candidate.health is Health.OUT:
@@ -404,6 +426,17 @@ def _chosen(
             f"weekly {candidate.weekly_percent}% is within today's {budget}% budget"
             f" ({routing.timezone})"
         )
+        short = short or budget_text(candidate.weekly_percent, budget)
     else:
         reason = candidate.why or "has room"
-    return Route(candidate.alias, candidate.kind, reason, tuple(warnings), tuple(skipped))
+    if step.last_resort:
+        short = "last resort" + (f", {short}" if short else "")
+    return Route(candidate.alias, candidate.kind, reason, tuple(warnings), tuple(skipped), short)
+
+
+def budget_text(percent: int | None, budget: int) -> str:
+    """Main's weekly use against today's budget in a few words: ``75% < 80%``."""
+    if percent is None:
+        return f"budget {budget}%"
+    sign = "<" if percent < budget else "=" if percent == budget else ">"
+    return f"{percent}% {sign} {budget}%"

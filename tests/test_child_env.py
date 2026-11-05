@@ -119,8 +119,7 @@ def test_cursor_agent_gets_no_secret_and_no_claude_credential(
     assert values_in(json.dumps(seen)) == []
     assert seen["HARMLESS"] == "kept" and "PATH" in seen
     err = capsys.readouterr().err
-    assert "not passed to the child:" in err and "CLAUDE_CODE_OAUTH_TOKEN" in err
-    assert values_in(err) == []  # names only, never values
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in err and values_in(err) == []  # nothing said, no value
 
 
 def test_pass_env_hands_one_variable_through_on_purpose(world: World) -> None:
@@ -199,7 +198,7 @@ def test_a_stale_extra_token_never_decides_the_account(
     assert "CLAUDE_CONFIG_DIR" not in seen and "ANTHROPIC_API_KEY" not in seen
     assert seen["GH_TOKEN"] == SECRETS["GH_TOKEN"]  # Claude Code on main keeps the person's own
     err = capsys.readouterr().err
-    assert "carries a Claude token or config dir" in err and "never on the inherited one" in err
+    assert err == "vibemaxxing: auto picked main: 10% < 40%\n" and "EXTRATOKEN" not in err
 
 
 def test_the_live_login_runs_without_an_override_only_when_nothing_is_inherited(

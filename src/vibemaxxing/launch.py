@@ -37,7 +37,7 @@ from vibemaxxing.poll import USAGE_FRESH_S
 from vibemaxxing.pool import WEEKLY_ALL_KIND, blocking
 
 AUTO: Final = "auto"
-VIBE_LINE: Final = "vibe: "
+VIBE_LINE: Final = "vibemaxxing: "
 
 
 @dataclass(frozen=True)
@@ -433,20 +433,12 @@ def _cursor_plan(
             if text:
                 args = _with_prompt(args, text)
     translation = _translate(svc, alias, args, flags, needs=needs)
+    if "--force" in translation.args:
+        notes.append(f"warning: {translation.access}")  # the one mode worth a line every time
     if not translation.interactive and not flags.trust_workspace:
         notes.append(
-            "headless cursor-agent stops at a workspace it was never told to trust (exit 1, no "
-            "output); trust this one once in `cursor-agent`, or pass --trust-workspace"
-        )
-    notes.append(f"model {translation.model} (Cursor's name for the Claude model)")
-    notes.append(f"what it may do: {translation.access}")
-    if translation.interactive:
-        # The last thing printed before cursor-agent's own UI takes the terminal.
-        lead = f"{why_moved} \u2192 s" if why_moved else "S"
-        notes.append(
-            f"{lead}tarting Cursor's agent with {translation.model}; no Claude hooks, skills or "
-            f"Remote Control here"
-            + (f"; `vibe run {main_alias} -- claude` to override" if why_moved else "")
+            "headless Cursor stops at a workspace it never trusted: trust it once in "
+            "`cursor-agent`, or pass --trust-workspace"
         )
     return Plan(
         alias,
@@ -489,10 +481,7 @@ def _config_dir_notes(svc: Services, alias: str, directory: str) -> list[str]:
             f'{path} is logged in as {there.email or there.account_uuid}, not as "{alias}"',
             f"vibe add {alias} --from-config-dir {path}",
         )
-    notes = [
-        f"{alias} runs with CLAUDE_CONFIG_DIR={path}: Claude Code keeps that login and "
-        "refreshes it itself, no token override"
-    ]
+    notes: list[str] = []
     base = svc.home / ".claude"
     lacking = [
         name
@@ -539,6 +528,10 @@ def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags)
         raise NotFoundError(f'there is no account named "{alias}"', "vibe list")
     argv, bridge_notes = _with_bridge(svc, alias, command, flags)
     config_dir = _config_dir_of(svc, alias)
+    if config_dir is None and _shared(svc) and store.live_alias(svc.root, svc.port) == alias:
+        # The shared login is this account right now: run as it, so the session follows the
+        # background switch instead of holding a token that cannot renew.
+        return Plan(alias, cursor.KIND_CLAUDE, argv, tuple(bridge_notes))
     if config_dir is not None:
         notes = _config_dir_notes(svc, alias, config_dir)
         return Plan(alias, cursor.KIND_CLAUDE, argv, (*notes, *bridge_notes), config_dir=config_dir)
@@ -546,7 +539,12 @@ def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags)
 
 
 def _with_bridge(
-    svc: Services, alias: str, command: Sequence[str], flags: RunFlags
+    svc: Services,
+    alias: str,
+    command: Sequence[str],
+    flags: RunFlags,
+    *,
+    also: Sequence[str] = (),
 ) -> tuple[tuple[str, ...], list[str]]:
     """``command``, with vibe-bridge added when this Claude run lacks what the bridge offers.
 
@@ -556,7 +554,8 @@ def _with_bridge(
     itself, as a vibe-owned config holding only vibe-bridge (`--mcp-config=PATH`, the one-token form
     so a prompt after it is never read as a second config; not --strict-mcp-config, so the account's
     own servers stay). Only for a Claude session, only for an upstream the bridge is logged in to
-    and the account lacks, never for Cursor, and `--no-bridge` turns it off.
+    and the account lacks, never for Cursor, and `--no-bridge` turns it off. ``also`` names the
+    other accounts the session may move to (the shared login): what any of them lacks counts.
     """
     unchanged: tuple[tuple[str, ...], list[str]] = (tuple(command), [])
     if (
@@ -569,20 +568,20 @@ def _with_bridge(
         routing = route.read_routing(svc.root)
     except UsageError:
         routing = route.Routing()  # a wrong routing must not stop a session from starting
-    role = next((name for name, held in routing.roles.items() if held == alias), alias)
-    have = set(routing.connectors.get(role, routing.connectors.get(alias, ())))
+    lacking: set[str] = set()
+    for name in dict.fromkeys((alias, *also)):
+        role = next((key for key, held in routing.roles.items() if held == name), name)
+        have = set(routing.connectors.get(role, routing.connectors.get(name, ())))
+        lacking |= {upstream.id for upstream in bridge.UPSTREAMS.values()} - have
     missing = [
         upstream.id
         for upstream in bridge.UPSTREAMS.values()
-        if upstream.id not in have and mcp_oauth.has_login(svc.root, upstream)
+        if upstream.id in lacking and mcp_oauth.has_login(svc.root, upstream)
     ]
     if not missing:
         return unchanged
     path = bridge.write_mcp_config(svc.root)
-    note = (
-        f"added vibe-bridge to this run ({alias} has no {', '.join(missing)} connector): "
-        "read-only tools, through your own login; --no-bridge turns it off"
-    )
+    note = f"added vibe-bridge ({', '.join(missing)}) to this run: --no-bridge turns it off"
     return (command[0], f"--mcp-config={path}", *command[1:]), [note]
 
 
@@ -634,24 +633,21 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
         )
     if cursor_translate.is_not_a_session(command[1:]):
         # `claude --version`, `claude mcp list`: nothing to route, and nothing to spend.
-        return Plan(
-            "-", cursor.KIND_CLAUDE, tuple(command), ("not a session: ran as is",), passthrough=True
-        )
+        return Plan("-", cursor.KIND_CLAUDE, tuple(command), passthrough=True)
     routing = route.read_routing(svc.root)
     needs = route.needs_for(routing, needs=flags.needs, no_needs=flags.no_needs)
     if flags.needs is not None and flags.no_needs:
         raise UsageError("--needs and --no-needs contradict each other", "vibe run --help")
+    lookup = candidates(svc, routing)
     chosen = route.decide(
-        candidates(svc, routing),
+        lookup,
         routing=routing,
         needs=needs,
         claude_only=flags.claude_only,
         now_s=svc.now_s,
     )
-    notes = [f"auto picked {chosen.alias} ({chosen.kind}): {chosen.reason}"]
-    notes += [f"skipped {line}" for line in chosen.skipped if "Claude-only" not in line]
-    notes += [f"warning: {warning}" for warning in chosen.warnings]
     if chosen.kind == cursor.KIND_CURSOR:
+        notes = [_picked(chosen.alias, chosen.short), *_warnings(chosen.warnings)]
         passed_over = next((line for line in chosen.skipped if "Claude-only" not in line), None)
         return _cursor_plan(
             svc,
@@ -666,15 +662,21 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
             main_alias=routing.roles["main"],
         )
     args = list(command[1:])
+    resumed: list[str] = []
     given = cursor_translate.resume_id(args)
     if given is not None and svc.agent.chat_exists(given):
         args, _ = cursor_translate.strip_resume(args)
-        notes.append(
+        resumed.append(
             "that is a Cursor chat id, which Claude Code cannot resume: starting a fresh run"
         )
         text = _fresh_run_prompt(flags)
         if text:
             args = _with_prompt(args, text)
+    if routing.shared_login:
+        return _plan_shared(
+            svc, routing, chosen, lookup, (command[0], *args), flags, needs, resumed
+        )
+    notes = [_picked(chosen.alias, chosen.short), *_warnings(_kept(chosen.warnings)), *resumed]
     # The account Claude Code is logged in as right now keeps its own login: no token override,
     # so it refreshes itself and keeps the scopes (and connectors) of a normal login.
     config_dir = _config_dir_of(svc, chosen.alias)
@@ -682,22 +684,13 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
         # Its login is Claude Code's in that dir: never the live login, never a token override.
         notes += _config_dir_notes(svc, chosen.alias, config_dir)
     live = store.live_alias(svc.root, svc.port) == chosen.alias and config_dir is None
-    inherited = childenv.parent_carries_claude_account(svc.environ)
-    if live and inherited:
+    if live and childenv.parent_carries_claude_account(svc.environ):
         # This process runs inside a session pinned to an account by a token or a config dir.
         # "The live login" would then depend on what is dropped, so the account is set
         # explicitly instead.
         live = False
-        notes.append(
-            f"this shell carries a Claude token or config dir: {chosen.alias} runs on its own "
-            "token, set explicitly, never on the inherited one"
-        )
-    elif live:
-        notes.append(
-            f"{chosen.alias} is Claude Code's own login: it runs as that, no token override "
-            "(the inherited Claude variables are dropped)"
-        )
     argv, bridge_notes = _with_bridge(svc, chosen.alias, (command[0], *args), flags)
+    notes += _without(routing, chosen.alias, needs, bridged=_bridged(svc, bridge_notes))
     return Plan(
         chosen.alias,
         cursor.KIND_CLAUDE,
@@ -707,3 +700,102 @@ def _plan_auto(svc: Services, command: Sequence[str], flags: RunFlags) -> Plan:
         claude_token=not live and config_dir is None,
         config_dir=config_dir,
     )
+
+
+def _picked(alias: str, short: str) -> str:
+    return f"auto picked {alias}" + (f": {short}" if short else "")
+
+
+def _warnings(warnings: Sequence[str]) -> list[str]:
+    return [f"warning: {warning}" for warning in warnings]
+
+
+def _kept(warnings: Sequence[str]) -> list[str]:
+    """The route's warnings, less the missing-connector ones `_without` says more exactly."""
+    return [warning for warning in warnings if not warning.endswith(route.DEGRADED_SUFFIX)]
+
+
+def _bridged(svc: Services, bridge_notes: Sequence[str]) -> set[str]:
+    """The upstreams the bridge added to this run reads from: those it has a login for."""
+    if not bridge_notes:
+        return set()
+    return {u.id for u in bridge.UPSTREAMS.values() if mcp_oauth.has_login(svc.root, u)}
+
+
+def _without(
+    routing: route.Routing, alias: str, needs: Sequence[str], *, bridged: set[str]
+) -> list[str]:
+    """One warning naming the connectors this session needs and will not have, if any."""
+    role = next((key for key, held in routing.roles.items() if held == alias), alias)
+    have = set(routing.connectors.get(role, routing.connectors.get(alias, ()))) | bridged
+    without = sorted(set(needs) - have)
+    return [f"warning: no {', '.join(without)} on {alias}"] if without else []
+
+
+def _shared(svc: Services) -> bool:
+    try:
+        return route.read_routing(svc.root).shared_login
+    except UsageError:
+        return False
+
+
+def _claude_aliases(routing: route.Routing) -> list[str]:
+    return [routing.roles.get(role, role) for role in route.CLAUDE_ROLES]
+
+
+def _plan_shared(
+    svc: Services,
+    routing: route.Routing,
+    chosen: route.Route,
+    lookup: Callable[[str], route.Candidate | None],
+    argv: Sequence[str],
+    flags: RunFlags,
+    needs: Sequence[str],
+    resumed: Sequence[str],
+) -> Plan:
+    """A Claude run on the shared login: Claude Code's own login, whichever account it is now.
+
+    `vibe auto tick` moves that login between the accounts by the policy, and Claude Code
+    re-reads it, so the session follows a switch without a restart. No token override and no
+    config dir: a token of ours could not renew and would pin the session to one account.
+    """
+    live = store.live_alias(svc.root, svc.port)
+    if live is None:
+        raise UsageError(
+            "Claude Code's own login is not an account vibe knows, so the shared login is unknown",
+            "vibe add",
+        )
+    if _config_dir_of(svc, live) is not None:
+        raise UsageError(
+            f'"{live}" lives in its own config dir, so it cannot be the shared login',
+            f"vibe release {live}",
+        )
+    short = _live_short(routing, lookup, live, svc.now_s) or (
+        chosen.short if chosen.alias == live else ""
+    )
+    notes = [_picked(live, short)]
+    others = [alias for alias in _claude_aliases(routing) if alias != live]
+    out, bridge_notes = _with_bridge(svc, live, argv, flags, also=others)
+    notes += _without(routing, live, needs, bridged=_bridged(svc, bridge_notes))
+    return Plan(live, cursor.KIND_CLAUDE, out, (*notes, *resumed, *bridge_notes), chosen)
+
+
+def _live_short(
+    routing: route.Routing,
+    lookup: Callable[[str], route.Candidate | None],
+    live: str,
+    now_s: float,
+) -> str:
+    """Why the shared login is ``live`` now, in a few words, as the policy sees it."""
+    main = routing.roles.get("main", "main")
+    candidate = lookup(main)
+    if candidate is None:
+        return ""
+    budget = route.today_budget(routing, now_s)
+    if live == main:
+        return route.budget_text(candidate.weekly_percent, budget)
+    if candidate.health is route.Health.OUT:
+        return f"{main} spent"
+    if candidate.weekly_percent is not None and candidate.weekly_percent > budget:
+        return f"{main} {route.budget_text(candidate.weekly_percent, budget)}"
+    return ""

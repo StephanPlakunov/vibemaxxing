@@ -231,7 +231,7 @@ def test_a_run_uses_the_config_dir_and_no_token_and_scrubs_what_was_inherited(
     assert not any(t in blob for t in ("INHERITED", "extra-stored-token", "extra-dir-token"))
     assert token_requests(world) == [] and world.client.requests == []
     err = capsys.readouterr().err
-    assert f"extra runs with CLAUDE_CONFIG_DIR={directory}" in err and "no token override" in err
+    assert "CLAUDE_CONFIG_DIR" not in err  # a run on a named account says nothing about it
 
 
 def test_an_interactive_run_is_not_given_a_token_that_would_end_in_eight_hours(
@@ -375,6 +375,5 @@ def test_an_interactive_run_on_a_token_override_says_when_the_token_ends(
     assert world.main("run", "extra", "--", "claude", "-p", "hi") == 0
     scripted = capsys.readouterr().err
 
-    assert "carries a token that ends at" in interactive and "cannot renew it" in interactive
-    assert "vibe add extra --from-config-dir DIR" in interactive
+    assert "fixed to extra until" in interactive and "cannot renew" in interactive
     assert "cannot renew it" not in scripted

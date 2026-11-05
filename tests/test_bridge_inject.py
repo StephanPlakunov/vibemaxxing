@@ -61,8 +61,8 @@ def test_a_run_on_extra_gets_the_bridge_as_a_vibe_owned_mcp_config(
     assert argv[1:] == ["-p", "hello"]
     assert "--strict-mcp-config" not in argv  # the account's own servers stay
     err = capsys.readouterr().err
-    assert err.count("added vibe-bridge to this run") == 1
-    assert "extra has no atlassian connector" in err and "--no-bridge turns it off" in err
+    assert err.count("added vibe-bridge (") == 1
+    assert "added vibe-bridge (atlassian) to this run: --no-bridge turns it off" in err
 
 
 def test_the_config_holds_only_vibe_bridge_and_nothing_secret(world: World) -> None:
@@ -100,7 +100,7 @@ def test_which_upstreams_are_named_follows_what_the_account_lacks_and_the_bridge
 
     world.main("run", "extra", "--", "claude", "-p", "x")
 
-    assert "extra has no atlassian connector" in capsys.readouterr().err  # slack it has itself
+    assert "vibe-bridge (atlassian)" in capsys.readouterr().err  # slack it has itself
 
 
 def test_an_account_that_has_every_connector_the_bridge_offers_gets_nothing(
