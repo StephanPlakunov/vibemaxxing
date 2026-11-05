@@ -449,6 +449,18 @@ def _adopt(root: Path, alias: str, mirror: Mirror, *, now_ms: int, home: Path) -
     return f"took over the login Claude Code holds in {mirror.name} for {alias}"
 
 
+def dead_login_text(alias: str) -> str:
+    """What to say about a login the server rejected, with the broker on.
+
+    Not "run vibe add": that is a new browser sign-in, which an account may not allow (extra's
+    mailbox cannot be reached), and a wrong dead mark is cleared by looking, not by a new login.
+    """
+    return (
+        f'the server rejected the refresh token of "{alias}" - report it; do not run '
+        f"vibe add {alias} (a new sign-in may be impossible)"
+    )
+
+
 def _refresh(
     root: Path,
     alias: str,
@@ -476,11 +488,7 @@ def _refresh(
     failures = state.failures + 1
     dead = outcome.error in ("invalid_grant", "no_refresh_token")
     retry = None if dead else now_s + min(RETRY_BASE_S * 2 ** (failures - 1), RETRY_MAX_S)
-    why = (
-        f'the refresh token for "{alias}" was rejected - run: vibe add {alias}'
-        if dead
-        else f"refresh failed ({outcome.error})"
-    )
+    why = dead_login_text(alias) if dead else f"refresh failed ({outcome.error})"
     return None, replace(state, error=why, failures=failures, retry_at_s=retry), why
 
 
@@ -553,7 +561,7 @@ def run(
                 elif why is not None:
                     problems.append(f"{alias}: {why}")
             elif dead:
-                why = account.message or f'the login for "{alias}" was rejected'
+                why = dead_login_text(alias)
                 state = replace(state, error=why)
                 problems.append(f"{alias}: {why}")
             elif state.error is not None:
@@ -655,6 +663,13 @@ def turn_on(
         )
     if not brokered(root, active):
         raise UsageError(f'"{active}" lives in its own config dir', f"vibe release {active}")
+    if _settings_document(root) is None:
+        # Checked before anything is written: a mirror in the default item with the setting
+        # still off would leave the live login renewed by nobody.
+        raise UsageError(
+            f"{settings_path(root)} is not valid JSON, so the broker setting cannot be saved",
+            f"cat {settings_path(root)}",
+        )
     raw = default_port.read()
     if holds_refresh_token(raw):
         waiting = auto.renewal_wait(default_port, active, now_s)
@@ -705,34 +720,19 @@ def turn_off(
     Claude Code renews it, as before the broker. Dir mirrors hold no refresh token and would end
     with their access token, so they are deleted; an account that should live in its dir again
     gets it with `vibe add <alias> --from-config-dir <dir> --adopt-stored-login`.
+
+    Also undoes a `broker on` that stopped half way (the default item a mirror of the active
+    account while the setting still says off): nobody would renew that login otherwise.
     """
     home = Path.home() if home is None else home
     settings = read_settings(root)
-    if not settings.on:
+    active = store.read_active(root)
+    partial = not settings.on and _default_is_mirror_of(root, active, default_port)
+    if not settings.on and not partial:
         return ["the broker is already off"]
     said: list[str] = []
-    active = store.read_active(root)
     if active is not None and brokered(root, active):
-        with (
-            store.hold_refresh_claim(root, active, "vibe broker off"),
-            keychain.storage_lock(home / ".claude"),
-        ):
-            # Off first, under the claim and the write lock: no refresh of this account can start
-            # after this line, one under way holds the claim (this waits for it), and a pass that
-            # is about to write the default mirror asks again under the lock and stops.
-            write_settings(root, replace(settings, on=False))
-            account = store.read_account(root, active)
-            raw = default_port.read()
-            if holds_refresh_token(raw) and not _same_lineage(raw, account.credential):
-                # A `claude /login` since: that login is the only copy of its refresh token.
-                said.append(
-                    "Claude Code's default login holds a login vibe did not write; left alone "
-                    f"({active}'s login stays in vibe: vibe switch {active} puts it there)"
-                )
-            else:
-                base = credentials.parse_blob_members(raw) if raw is not None else None
-                default_port.write(credentials.credential_to_blob(account.credential, base))
-                said.append(f"gave {active}'s login back to Claude Code's default login")
+        said += _give_back(root, active, settings, default_port=default_port, home=home)
     else:
         write_settings(root, replace(settings, on=False))
     for alias in brokered_aliases(root):
@@ -751,6 +751,73 @@ def turn_off(
                 port.delete()
                 said.append(f"removed the mirror of {alias} in {directory}")
     return said
+
+
+def _default_is_mirror_of(root: Path, active: str | None, default_port: KeychainPort) -> bool:
+    """Whether the default item holds vibe's mirror of ``active`` (no refresh token, its token)."""
+    if active is None:
+        return False
+    try:
+        raw = default_port.read()
+        if raw is None or holds_refresh_token(raw):
+            return False
+        held = credentials.parse_blob(raw, mirror_ok=True)
+        return held.access_token == store.read_account(root, active).credential.access_token
+    except VibeError:
+        return False
+
+
+def _give_back(
+    root: Path,
+    active: str,
+    settings: BrokerSettings,
+    *,
+    default_port: KeychainPort,
+    home: Path,
+) -> list[str]:
+    """Under ``active``'s claim and Claude Code's write lock: broker off, then the whole login of
+    ``active`` into the default item.
+
+    Refused, with the broker left as it was, when a switch landed since ``active`` was read, or
+    when ~/.claude.json names another account: writing ``active``'s whole login there would give
+    Claude Code a refresh token vibe keeps refreshing as a non-active account, two holders of one
+    login.
+    """
+    with (
+        store.hold_refresh_claim(root, active, "vibe broker off"),
+        keychain.storage_lock(home / ".claude"),
+    ):
+        if store.read_active(root) != active:
+            raise UsageError("a switch just ran; nothing was changed", "vibe broker off")
+        account = store.read_account(root, active)
+        there = credentials.read_claude_identity(home / ".claude.json").account_uuid
+        if account.identity.account_uuid is not None and there != account.identity.account_uuid:
+            raise UsageError(
+                f"~/.claude.json does not name {active}, vibe's active account, so its login "
+                "was not written back; nothing was changed",
+                f"vibe switch {active}   (then vibe broker off)",
+            )
+        # Off first, under the claim and the write lock: no refresh of this account can start
+        # after this line, one under way holds the claim (this waits for it), and a pass that is
+        # about to write the default mirror asks again under the lock and stops.
+        write_settings(root, replace(settings, on=False))
+        # A refresh the server completed whose successor never reached the account file is the
+        # live login, and the file's copy its spent predecessor: fold it in before handing over.
+        successor = store.read_stash(root, active)
+        if successor is not None:
+            account = replace(account, credential=successor, state=AccountState.OK, message=None)
+            store.write_account(root, account)
+            store.delete_stash(root, active)  # it is the account file's credential now
+        raw = default_port.read()
+        if holds_refresh_token(raw) and not _same_lineage(raw, account.credential):
+            # A `claude /login` since: that login is the only copy of its refresh token.
+            return [
+                "Claude Code's default login holds a login vibe did not write; left alone "
+                f"({active}'s login stays in vibe: vibe switch {active} puts it there)"
+            ]
+        base = credentials.parse_blob_members(raw) if raw is not None else None
+        default_port.write(credentials.credential_to_blob(account.credential, base))
+    return [f"gave {active}'s login back to Claude Code's default login"]
 
 
 def prepare_dir(directory: Path, home: Path) -> list[str]:
@@ -818,7 +885,9 @@ def ensure_for_run(
         held = None
     if held is None or credentials.is_expired(held, now_ms=int(now_s * 1000)):
         why = "; ".join(report.problems) or f"no working token for {alias}"
-        raise NeedsLoginError(f"cannot start a session on {alias}: {why}", f"vibe add {alias}")
+        raise NeedsLoginError(
+            f"cannot start a session on {alias}: {why}", f"report it - do not run vibe add {alias}"
+        )
     return directory
 
 
@@ -856,7 +925,7 @@ def describe(root: Path, *, home: Path | None = None) -> list[Row]:
             names.append("default")
         problem = state.error
         if account.state is AccountState.NEEDS_LOGIN:
-            problem = account.message or f'the login for "{alias}" was rejected'
+            problem = dead_login_text(alias)
         rows.append(
             Row(
                 alias,

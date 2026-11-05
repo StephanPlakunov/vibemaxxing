@@ -367,7 +367,7 @@ def test_a_rejected_refresh_token_keeps_the_mirror_and_says_how_to_fix_it(tmp_ho
     report = w.run()
 
     assert oauth_member(w.dir_port("main").blob)["accessToken"] == "main-at-1"
-    assert "vibe add main" in report.problems[0]
+    assert "report it" in report.problems[0] and "do not run vibe add main" in report.problems[0]
     assert store.read_account(w.root, "main").state is AccountState.NEEDS_LOGIN
     w.run(NOW_S + 3600)
     assert len(w.token_requests()) == 1  # a dead lineage is not posted again
@@ -802,3 +802,123 @@ def test_vibe_broker_mirror_refuses_a_config_dir_account_s_dir(run_world: World)
     )
 
     assert run_world.main("broker", "mirror", "main", str(run_world.home / ".claude-x")) != 0
+
+
+# --- review round 2 -----------------------------------------------------------------------------
+
+
+def test_off_refuses_when_a_switch_lands_between_reading_active_and_the_claim(
+    w: Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's probe: extra is active and live; the first read of `active` says main."""
+    store.switch(w.root, "extra", w.port, now_s=NOW_S)
+    before = w.port.blob
+    reads = iter(["main"])
+    real = store.read_active
+    monkeypatch.setattr(store, "read_active", lambda root: next(reads, None) or real(root))
+
+    with pytest.raises(VibeError, match="a switch just ran"):
+        broker.turn_off(w.root, default_port=w.port, port_for=w.port_for, home=w.home)
+
+    assert w.port.blob == before  # main's whole login was not written over extra's mirror
+    assert "refreshToken" not in oauth_member(w.port.blob)
+    assert broker.is_on(w.root)  # still renewing
+
+
+def test_off_refuses_when_claude_codes_profile_names_another_account(w: Broker) -> None:
+    (w.home / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "uextra"}}))
+    before = w.port.blob
+
+    with pytest.raises(VibeError, match="does not name main"):
+        broker.turn_off(w.root, default_port=w.port, port_for=w.port_for, home=w.home)
+
+    assert w.port.blob == before and broker.is_on(w.root)
+
+
+def test_off_hands_over_the_stashed_successor_not_its_spent_predecessor(w: Broker) -> None:
+    successor = make_credential(
+        access="main-at-2", refresh="main-rt-2", expires_at_ms=NOW_MS + 8 * HOUR_MS
+    )
+    store.write_stash(w.root, "main", successor)  # the server rotated; the file never got it
+
+    broker.turn_off(w.root, default_port=w.port, port_for=w.port_for, home=w.home)
+
+    assert oauth_member(w.port.blob)["refreshToken"] == "main-rt-2"
+    assert w.stored("main").refresh_token.reveal() == "main-rt-2"
+    assert store.read_stash(w.root, "main") is None
+
+
+def test_off_undoes_a_broker_on_that_stopped_before_saving_the_setting(tmp_home: Path) -> None:
+    w = Broker(tmp_home, on=False)  # the default item already holds main's mirror
+
+    said = broker.turn_off(w.root, default_port=w.port, port_for=w.port_for, home=w.home)
+
+    assert oauth_member(w.port.blob)["refreshToken"] == "main-rt-1"
+    assert said[0] == "gave main's login back to Claude Code's default login"
+    assert not broker.is_on(w.root)
+
+
+def test_off_with_nothing_to_undo_says_so_and_writes_nothing(tmp_home: Path) -> None:
+    w = Broker(tmp_home, on=False)
+    w.port.blob = credential_to_blob(w.stored("main"))  # Claude Code holds it, as before the broker
+    w.port.log.clear()
+
+    assert broker.turn_off(w.root, default_port=w.port, port_for=w.port_for, home=w.home) == [
+        "the broker is already off"
+    ]
+    assert "keychain.write" not in w.port.log
+
+
+def test_on_refuses_a_settings_file_it_cannot_save_before_writing_anything(
+    tmp_home: Path,
+) -> None:
+    w = Broker(tmp_home, on=False)
+    w.port.blob = credential_to_blob(w.stored("main"))  # Claude Code's own login
+    before = w.port.blob
+    (w.root / "settings.json").write_text("{not json")
+
+    with pytest.raises(VibeError, match="not valid JSON"):
+        broker.turn_on(
+            w.root,
+            client=w.client,
+            default_port=w.port,
+            port_for=w.port_for,
+            now_s=NOW_S,
+            home=w.home,
+        )
+
+    assert w.port.blob == before
+
+
+def test_a_dead_login_is_never_answered_with_vibe_add(tmp_home: Path) -> None:
+    w = Broker(tmp_home)
+    account = store.read_account(w.root, "extra")
+    store.write_account(
+        w.root,
+        replace(account, state=AccountState.NEEDS_LOGIN, message="run: vibe add extra"),
+    )
+
+    (problem,) = broker.problems(w.root, home=w.home)
+
+    assert "report it" in problem and "do not run vibe add extra" in problem
+
+
+def test_a_run_refuses_a_login_of_the_same_account_vibe_has_not_taken_over_yet(
+    run_world: World,
+) -> None:
+    """The refresh-token guard on its own: same account (the profile agrees), a login that works
+    for hours, but the takeover could not run (another vibe holds the account's claim)."""
+    import time
+
+    directory = run_world.home / ".claude-main"
+    directory.mkdir()
+    (directory / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "umain"}}))
+    held = credential_to_blob(
+        make_credential(access="cc-at", refresh="cc-rt", expires_at_ms=4_102_444_900_000)
+    )
+    run_world.port_for(directory).blob = held
+    assert store.claim_refresh(run_world.root, "main", now_s=time.time())
+
+    assert run_world.main("run", "main", "--", "claude", "-p", "hi") != 0
+    assert run_world.claude_calls() == []
+    assert run_world.port_for(directory).blob == held

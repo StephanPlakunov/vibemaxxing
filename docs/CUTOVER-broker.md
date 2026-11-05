@@ -89,6 +89,11 @@ done
 `vibe broker status` should show main and extra, each with "renewed at" a few hours ahead, their
 mirrors (`default` for main) and no problem.
 
+**If `vibe broker on` stopped half way** (an error or a crash part way through): run
+`vibe broker off` anyway. It sees that the default item holds vibe's mirror of main while the setting
+still says off, and gives main's whole login back. `vibe broker on` refuses a `settings.json` it
+cannot save before it writes anything.
+
 **Undo:** `vibe broker off`. Main's whole login goes back into the default item, and Claude Code
 renews it again. The dir mirrors are deleted.
 
@@ -146,6 +151,11 @@ That is the "never dies from its token" proof.
 - A `True` in the Keychain check, meaning Claude Code wrote a refresh token back.
 
 On any of these, do not switch by hand. Report it with `vibe broker status --json` and the tick line.
+
+**Never run `vibe add extra`; report it.** extra cannot sign in again (its mailbox cannot be reached),
+and `vibe add` is a new browser sign-in. When vibe says the server rejected a login, it says
+"report it; do not run vibe add", for main too: a wrong mark is cleared by looking at it, not by a
+new login.
 
 ## Full rollback (back to the state before step 1)
 
