@@ -368,7 +368,7 @@ def auto_world(world: World, *, main_weekly: int, extra_weekly: int | None = 5) 
 def test_auto_with_needs_and_main_within_budget_runs_claude_on_main_as_its_own_login(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=40)
+    auto_world(world, main_weekly=39)  # Tuesday's budget is 40%: below it, as the tick counts
 
     assert world.main("run", "auto", "--needs", "slack", "--", "claude", "-p", "hi") == 0
 
@@ -376,7 +376,7 @@ def test_auto_with_needs_and_main_within_budget_runs_claude_on_main_as_its_own_l
     assert world.claude_calls() == [{"argv": ["-p", "hi"], "has_token": False}]
     assert world.fake.calls() == []
     err = capsys.readouterr().err
-    assert err == "vibemaxxing: auto picked main: 40% = 40%\n"
+    assert err == "vibemaxxing: auto picked main: 39% < 40%\n"
     assert world.cursor_client.requests == []  # main answered; Cursor was not even asked...
     # ...although its usage was read for the routing table (queued answers untouched or used)
 

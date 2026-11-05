@@ -57,17 +57,19 @@ def pick(
 
 
 def test_needs_main_within_budget_goes_to_main() -> None:
-    chosen = pick([main_(40), cursor_(), extra()])  # 40% <= Tuesday's 40%
+    chosen = pick([main_(39), cursor_(), extra()])  # below Tuesday's 40%, as the tick counts
 
     assert (chosen.alias, chosen.warnings) == ("main", ())
     assert "within today's 40% budget" in chosen.reason
 
 
 def test_needs_main_over_budget_goes_to_cursor() -> None:
-    chosen = pick([main_(41), cursor_(), extra()])
+    chosen = pick([main_(40), cursor_(), extra()])  # at the budget is out
 
     assert chosen.alias == "cursor"
-    assert any("main: weekly 41% is over today's 40% budget" in line for line in chosen.skipped)
+    assert any(
+        "main: weekly 40% is at or over today's 40% budget" in line for line in chosen.skipped
+    )
 
 
 def test_needs_cursor_spent_goes_to_extra_without_connectors_and_warns() -> None:
@@ -179,7 +181,7 @@ def test_no_needs_extra_first() -> None:
 
 
 def test_no_needs_extra_spent_main_within_budget() -> None:
-    chosen = pick([main_(40), cursor_(), extra(Health.OUT)], needs=())
+    chosen = pick([main_(39), cursor_(), extra(Health.OUT)], needs=())
 
     assert chosen.alias == "main"
 

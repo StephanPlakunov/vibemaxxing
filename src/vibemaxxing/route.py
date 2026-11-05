@@ -390,12 +390,13 @@ def decide(
                 skipped.append(f"{candidate.alias}: weekly usage unknown, so the budget is unknown")
                 brief.append(f"{candidate.alias} usage unknown")
                 continue
-            if candidate.weekly_percent > budget:
+            # Below the budget, as the tick's budget step counts it (a row at its limit is out).
+            if candidate.weekly_percent >= budget:
                 skipped.append(
-                    f"{candidate.alias}: weekly {candidate.weekly_percent}% is over today's "
+                    f"{candidate.alias}: weekly {candidate.weekly_percent}% is at or over today's "
                     f"{budget}% budget"
                 )
-                brief.append(f"{candidate.alias} {candidate.weekly_percent}% > {budget}%")
+                brief.append(f"{candidate.alias} {budget_text(candidate.weekly_percent, budget)}")
                 continue
         return _chosen(candidate, step, skipped, routing, budget, warnings, brief)
     reasons = "; ".join(skipped) or "no step in the order"

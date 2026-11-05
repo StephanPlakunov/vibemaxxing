@@ -280,3 +280,14 @@ def test_a_run_without_a_command_starts_a_session(
     shared(world)
     assert world.main("run", "auto") == 0
     assert only_call(world)["argv"] == []  # plain `claude` on the shared login
+
+
+def test_at_exactly_the_budget_main_is_out_for_routing_as_for_the_tick(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    auto_world(world, main_weekly=40)  # Tuesday: budget 40%
+
+    args = ("--", "claude", "-p", "hi", "--model", "sonnet")
+    assert world.main("run", "auto", "--needs", "slack", *args) == 0
+
+    assert "auto picked cursor: main 40% = 40%" in capsys.readouterr().err
