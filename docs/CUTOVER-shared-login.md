@@ -45,7 +45,7 @@ With one `cw` session open and busy on a harmless task:
 
 Not known until then: whether claude.ai connectors (Slack, Atlassian, Microsoft 365, which belong
 to main) keep working in a session after the login moved to extra. Expect them to fail while extra
-is live; Atlassian reads still work through vibe-bridge.
+is live (seen: claude.ai Atlassian Rovo answers "Server not found"); Atlassian reads and non-deleting writes still work through vibe-bridge.
 
 ## Undo
 
