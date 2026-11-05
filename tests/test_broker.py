@@ -701,3 +701,104 @@ def test_a_tick_switch_with_the_broker_on_moves_the_default_mirror_and_keeps_bot
     assert store.read_account(w.root, "a").credential.refresh_token.reveal() == "a-rt"
     assert store.read_account(w.root, "b").credential.refresh_token.reveal() == "b-rt"
     assert [r for r in w.client.requests if r.url == oauth.TOKEN_URL] == []
+
+
+# --- review round 1: races and logins vibe did not write ----------------------------------------
+
+
+class Landing(FakeKeychain):
+    """A default item whose first read lets something land in another process mid-pass."""
+
+    def __init__(self, blob: str | None, land: object) -> None:
+        super().__init__(blob=blob)
+        self.land = land
+
+    def read(self) -> str | None:
+        land, self.land = self.land, None
+        if callable(land):
+            land()
+        return super().read()
+
+
+def test_a_broker_off_landing_mid_pass_is_not_undone_by_that_pass(w: Broker) -> None:
+    w.port = Landing(
+        w.port.blob,
+        lambda: broker.write_settings(w.root, broker.BrokerSettings(on=False)),
+    )
+    before = w.port.blob
+    w.port.blob = credential_to_blob(w.stored("main"))  # what `broker off` gave back
+    given_back = w.port.blob
+
+    w.run()
+
+    assert w.port.blob == given_back and before != given_back
+    assert "keychain.write" not in w.port.log
+
+
+def test_a_switch_landing_mid_pass_keeps_the_incoming_account_in_the_default_item(
+    w: Broker,
+) -> None:
+    def switched() -> None:
+        store.write_active(w.root, "extra")
+
+    # The switch has written extra's mirror into the default item by the time the pass writes.
+    w.port = Landing(broker.mirror_blob(w.stored("extra"), None), switched)
+
+    w.run()
+
+    assert oauth_member(w.port.blob)["accessToken"] == "extra-at-1"  # main's did not land over it
+
+
+def test_off_leaves_a_login_vibe_did_not_write_in_the_default_item(w: Broker) -> None:
+    stranger = credential_to_blob(make_credential(access="s-at", refresh="s-rt"))
+    w.port.blob = stranger
+
+    said = broker.turn_off(w.root, default_port=w.port, port_for=w.port_for, home=w.home)
+
+    assert w.port.blob == stranger
+    assert "left alone" in said[0]
+    assert not broker.is_on(w.root)
+
+
+def test_a_run_refuses_a_mirror_dir_holding_another_login(run_world: World) -> None:
+    directory = run_world.home / ".claude-main"
+    directory.mkdir()
+    (directory / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "uother"}}))
+    run_world.port_for(directory).blob = credential_to_blob(
+        make_credential(access="o-at", refresh="o-rt")
+    )
+
+    assert run_world.main("run", "main", "--", "claude", "-p", "hi") != 0
+    assert run_world.claude_calls() == []
+    assert oauth_member(run_world.port_for(directory).blob)["refreshToken"] == "o-rt"
+
+
+def test_the_live_account_cannot_be_removed_or_renamed_with_the_broker_on(
+    run_world: World,
+) -> None:
+    assert run_world.main("remove", "main") != 0
+    assert run_world.main("alias", "extra", "spare") != 0
+    assert store.list_aliases(run_world.root) == ["extra", "main"]
+
+
+def test_a_dir_an_account_lives_in_is_never_a_mirror(tmp_home: Path) -> None:
+    w = Broker(tmp_home)
+    account = store.read_account(w.root, "extra")
+    store.write_account(w.root, replace(account, config_dir=str(tmp_home / ".claude-main")))
+    held = credential_to_blob(make_credential(access="cc-at", refresh="cc-rt"))
+    w.dir_port("main").blob = held
+
+    report = w.run()
+
+    assert w.dir_port("main").blob == held
+    assert any("config dir an account lives in" in problem for problem in report.problems)
+    assert oauth_member(w.port.blob)["accessToken"] == "main-at-1"  # the default still renewed
+
+
+def test_vibe_broker_mirror_refuses_a_config_dir_account_s_dir(run_world: World) -> None:
+    account = store.read_account(run_world.root, "extra")
+    store.write_account(
+        run_world.root, replace(account, config_dir=str(run_world.home / ".claude-x"))
+    )
+
+    assert run_world.main("broker", "mirror", "main", str(run_world.home / ".claude-x")) != 0

@@ -32,7 +32,7 @@ from vibemaxxing.credentials import (
 )
 from vibemaxxing.errors import NeedsLoginError, NotFoundError, StoreError, UsageError, VibeError
 from vibemaxxing.fsutil import private_dir, write_private
-from vibemaxxing.keychain import KeychainPort
+from vibemaxxing.keychain import KeychainPort, storage_lock
 from vibemaxxing.models import AccountState
 
 SCHEMA_VERSION: Final = 1
@@ -606,7 +606,11 @@ def switch(root: Path, alias: str, port: KeychainPort, *, now_s: float | None = 
         # into `outgoing` would write one account's tokens into another's file.
         if read_active(root) != outgoing:
             raise UsageError("another vibe switch just ran", f"vibe switch {alias}")
-        _switch_claimed(root, alias, outgoing, owner, port)
+        # Claude Code's own write lock on its default config dir: it changes the item only as a
+        # read-modify-write under it, and so does the token broker (broker.write_mirror), so none
+        # of the three writes over what another just wrote.
+        with storage_lock(Path.home() / ".claude"):
+            _switch_claimed(root, alias, outgoing, owner, port)
 
 
 def _switch_claimed(

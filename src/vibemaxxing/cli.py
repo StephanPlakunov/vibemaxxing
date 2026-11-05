@@ -834,6 +834,14 @@ def cmd_remove(args: argparse.Namespace, ctx: Context) -> int:
     if cursor.is_cursor(ctx.root, args.alias):
         cursor.delete_marker(ctx.root, args.alias)  # the Cursor login itself is cursor-agent's
     else:
+        if broker.is_on(ctx.root) and store.read_active(ctx.root) == args.alias:
+            # With the broker on, vibe's store holds the only refresh token of the live login;
+            # Claude Code's default item is a mirror that ends with its access token.
+            raise UsageError(
+                f'"{args.alias}" is the live login, and with the token broker on vibe holds its '
+                "only refresh token: removing it would end every session on it within hours",
+                "vibe broker off   (or vibe switch <another> first)",
+            )
         store.delete_account(ctx.root, args.alias)
     _emit(
         _action("remove", alias=args.alias),
@@ -965,6 +973,14 @@ def cmd_broker_mirror(args: argparse.Namespace, ctx: Context) -> int:
     for other in broker.brokered_aliases(ctx.root):
         if other != args.alias and broker.mirror_dir(settings, other, Path.home()) == directory:
             raise UsageError(f"{directory} already mirrors {other}", "vibe broker status")
+    for other in store.list_aliases(ctx.root):
+        given = store.read_account(ctx.root, other).config_dir
+        if given is not None and Path(given).resolve() == directory.resolve():
+            raise UsageError(
+                f"{directory} is the config dir {other} lives in: Claude Code's login, "
+                "not a mirror",
+                f"vibe release {other}",
+            )
     if directory == Path.home() / ".claude":
         raise UsageError(
             "~/.claude is the default login, which mirrors the live account", "vibe broker status"
@@ -990,6 +1006,13 @@ def cmd_broker_mirror(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def cmd_alias(args: argparse.Namespace, ctx: Context) -> int:
+    if broker.is_on(ctx.root) and broker.brokered(ctx.root, args.old):
+        # The mirror dir, the broker's state and running fixed sessions are keyed by the name.
+        raise UsageError(
+            f'"{args.old}" has token broker mirrors under its name; renaming it would leave '
+            "them unrenewed",
+            "vibe broker off   (rename, then vibe broker on)",
+        )
     if cursor.is_cursor(ctx.root, args.old):
         _require_unused(ctx.root, args.new)
         if args.new in store.list_aliases(ctx.root):

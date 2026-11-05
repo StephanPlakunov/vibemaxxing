@@ -46,6 +46,8 @@ from vibemaxxing.keychain import KeychainPort
 from vibemaxxing.models import AccountState
 
 SETTINGS_KEY: Final = "broker"
+# The name of the mirror in Claude Code's default item (~/.claude), the live account's.
+DEFAULT_MIRROR: Final = "default"
 STATE_FILE: Final = "broker.json"
 SCHEMA_VERSION: Final = 1
 # The share of an access token's lifetime that may be left before vibe refreshes it.
@@ -332,13 +334,25 @@ def _identity_ok(profile: Path, identity: Identity) -> bool:
     return there is not None and there == identity.account_uuid
 
 
-def write_mirror(mirror: Mirror, credential: Credential, identity: Identity) -> str:
+def write_mirror(
+    mirror: Mirror,
+    credential: Credential,
+    identity: Identity,
+    *,
+    still_wanted: Callable[[], bool] = lambda: True,
+) -> str:
     """Make ``mirror`` hold ``credential`` (without its refresh token). One Keychain write, only
     when something changed; the profile only when it names another account or none.
 
-    Returns "written", "unchanged". Raises VibeError when the item cannot be written.
+    ``still_wanted`` is asked again under Claude Code's write lock, right before the write: a
+    `vibe broker off` or a switch in another process since this pass began makes it False, and
+    then nothing is written (`broker off` and `store.switch` write the default item under the
+    same lock). Returns "written", "unchanged" or "skipped". Raises VibeError when the item
+    cannot be written.
     """
     with keychain.storage_lock(mirror.lock_dir):
+        if not still_wanted():
+            return "skipped"
         raw = mirror.port.read()
         if credentials.holds_refresh_token(raw) and not _same_lineage(raw, credential):
             # Claude Code holds a login here (a `claude /login` since the last look): never
@@ -383,11 +397,11 @@ def mirrors_of(
     ``alias`` is the account vibe made live."""
     found: list[Mirror] = []
     directory = mirror_dir(settings, alias, home)
-    if directory.is_dir():
+    if directory.is_dir() and directory.resolve() not in _owned_dirs(root):
         port = port_for(directory)
         found.append(Mirror(alias, str(directory), port, directory / ".claude.json", directory))
     if store.read_active(root) == alias:
-        found.append(Mirror(alias, "default", default_port, None, home / ".claude"))
+        found.append(Mirror(alias, DEFAULT_MIRROR, default_port, None, home / ".claude"))
     return found
 
 
@@ -494,10 +508,19 @@ def run(
     lines: list[str] = []
     problems: list[str] = []
     wanted = set(only) if only is not None else None
+    touched: list[str] = []
     for alias in brokered_aliases(root):
         if wanted is not None and alias not in wanted:
             continue
         state = states.get(alias, Holding())
+        touched.append(alias)
+        own = mirror_dir(settings, alias, home)
+        with contextlib.suppress(OSError, RuntimeError):
+            if own.is_dir() and own.resolve() in _owned_dirs(root):
+                problems.append(
+                    f"{alias}: {own} is the config dir an account lives in, so it gets no mirror "
+                    f"(vibe broker mirror {alias} <another dir>)"
+                )
         try:
             mirrors = mirrors_of(
                 root,
@@ -540,7 +563,15 @@ def run(
                 if dead and credentials.is_expired(credential, now_ms=now_ms, buffer_ms=0):
                     continue  # nothing usable to write; the old mirror ends on its own
                 try:
-                    if write_mirror(mirror, credential, account.identity) == "written":
+                    if (
+                        write_mirror(
+                            mirror,
+                            credential,
+                            account.identity,
+                            still_wanted=_still_wanted(root, alias, mirror),
+                        )
+                        == "written"
+                    ):
                         lines.append(f"mirrored {alias} into {mirror.name}")
                     written[mirror.name] = _fingerprint(credential)
                 except (VibeError, OSError) as exc:
@@ -550,8 +581,32 @@ def run(
         except VibeError as exc:
             problems.append(f"{alias}: {exc.message}")
         states[alias] = state
-    write_state(root, states)
+    # Merged, not replaced: a `vibe run` pass (``only``) beside the tick must not roll back what
+    # the other wrote about the accounts it did not touch.
+    merged = read_state(root)
+    merged.update({alias: states[alias] for alias in touched})
+    write_state(root, merged)
     return Report(tuple(lines), tuple(problems))
+
+
+def _still_wanted(root: Path, alias: str, mirror: Mirror) -> Callable[[], bool]:
+    def check() -> bool:
+        if not is_on(root):
+            return False
+        return mirror.name != DEFAULT_MIRROR or store.read_active(root) == alias
+
+    return check
+
+
+def _owned_dirs(root: Path) -> set[Path]:
+    """The config dirs accounts live in (`--from-config-dir`): Claude Code's, never a mirror."""
+    found: set[Path] = set()
+    for alias in store.list_aliases(root):
+        with contextlib.suppress(VibeError, OSError, RuntimeError):
+            given = store.read_account(root, alias).config_dir
+            if given is not None:
+                found.add(Path(given).expanduser().resolve())
+    return found
 
 
 def _safe_read(port: KeychainPort) -> str | None:
@@ -605,20 +660,28 @@ def turn_on(
         waiting = auto.renewal_wait(default_port, active, now_s)
         if waiting is not None:
             raise UsageError(waiting, "vibe broker on   (again, in a few minutes)")
-        with store.hold_refresh_claim(root, active, "vibe broker on"):
-            raw = default_port.read()
-            if holds_refresh_token(raw):
-                assert raw is not None
-                account = store.read_account(root, active)
-                taken = credentials.parse_blob(raw)
-                store.write_account(
-                    root, replace(account, credential=taken, state=AccountState.OK, message=None)
-                )
-                store.delete_stash(root, active)
-                base = credentials.parse_blob_members(raw)
-                default_port.write(mirror_blob(taken, base))
-    settings = read_settings(root)
-    write_settings(root, replace(settings, on=True))
+    # Everything under the active account's claim and Claude Code's write lock, "on" included: a
+    # switch (which takes the same claim and lock) lands either before, and is refused below as a
+    # disagreement, or after, and then writes a mirror.
+    with (
+        store.hold_refresh_claim(root, active, "vibe broker on"),
+        keychain.storage_lock(home / ".claude"),
+    ):
+        if store.read_active(root) != active:
+            raise UsageError("a switch just ran", "vibe broker on")
+        raw = default_port.read()
+        if holds_refresh_token(raw):
+            assert raw is not None
+            account = store.read_account(root, active)
+            taken = credentials.parse_blob(raw)
+            store.write_account(
+                root, replace(account, credential=taken, state=AccountState.OK, message=None)
+            )
+            store.delete_stash(root, active)
+            base = credentials.parse_blob_members(raw)
+            default_port.write(mirror_blob(taken, base))
+        settings = read_settings(root)
+        write_settings(root, replace(settings, on=True))
     return run(
         root,
         client=client,
@@ -650,27 +713,41 @@ def turn_off(
     said: list[str] = []
     active = store.read_active(root)
     if active is not None and brokered(root, active):
-        with store.hold_refresh_claim(root, active, "vibe broker off"):
-            # Off first, under the claim: no refresh of this account can start after this line,
-            # and the one that might be under way holds the claim, so this waits for it.
+        with (
+            store.hold_refresh_claim(root, active, "vibe broker off"),
+            keychain.storage_lock(home / ".claude"),
+        ):
+            # Off first, under the claim and the write lock: no refresh of this account can start
+            # after this line, one under way holds the claim (this waits for it), and a pass that
+            # is about to write the default mirror asks again under the lock and stops.
             write_settings(root, replace(settings, on=False))
             account = store.read_account(root, active)
             raw = default_port.read()
-            base = credentials.parse_blob_members(raw) if raw is not None else None
-            default_port.write(credentials.credential_to_blob(account.credential, base))
-        said.append(f"gave {active}'s login back to Claude Code's default login")
+            if holds_refresh_token(raw) and not _same_lineage(raw, account.credential):
+                # A `claude /login` since: that login is the only copy of its refresh token.
+                said.append(
+                    "Claude Code's default login holds a login vibe did not write; left alone "
+                    f"({active}'s login stays in vibe: vibe switch {active} puts it there)"
+                )
+            else:
+                base = credentials.parse_blob_members(raw) if raw is not None else None
+                default_port.write(credentials.credential_to_blob(account.credential, base))
+                said.append(f"gave {active}'s login back to Claude Code's default login")
     else:
         write_settings(root, replace(settings, on=False))
     for alias in brokered_aliases(root):
         directory = mirror_dir(settings, alias, home)
         if not directory.is_dir():
             continue
-        port = port_for(directory)
-        if holds_refresh_token(_safe_read(port)):
-            said.append(f"{directory} holds a login vibe did not write; left alone")
+        if directory.resolve() in _owned_dirs(root):
             continue
-        with contextlib.suppress(VibeError):
-            if port.read() is not None:
+        port = port_for(directory)
+        with contextlib.suppress(VibeError), keychain.storage_lock(directory):
+            raw = port.read()
+            if holds_refresh_token(raw):
+                said.append(f"{directory} holds a login vibe did not write; left alone")
+                continue
+            if raw is not None:
                 port.delete()
                 said.append(f"removed the mirror of {alias} in {directory}")
     return said
@@ -720,6 +797,21 @@ def ensure_for_run(
         only=(alias,),
     )
     raw = port_for(directory).read()
+    if holds_refresh_token(raw):
+        # A login Claude Code holds there that vibe did not take over (another account's, or one
+        # made in the last minutes): a session would run as whoever that is, labelled as alias.
+        raise UsageError(
+            f"{directory} holds a Claude Code login vibe did not write, so a session there might "
+            f"not be {alias}; `vibe broker status` says whose",
+            "vibe broker status",
+        )
+    there = credentials.read_claude_identity(directory / ".claude.json").account_uuid
+    stored = store.read_account(root, alias).identity.account_uuid
+    if stored is not None and there != stored:
+        raise UsageError(
+            f"{directory / '.claude.json'} does not name the account stored as {alias!r}",
+            "vibe broker status",
+        )
     try:
         held = credentials.parse_blob(raw, mirror_ok=True) if raw is not None else None
     except StoreError:
