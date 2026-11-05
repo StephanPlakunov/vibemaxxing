@@ -1847,17 +1847,22 @@ offered tool set is partial and varies between runs, and is removed with no fall
 `slack_read_user_profile`, `slack_search_public`, `slack_search_public_and_private`,
 `slack_search_channels`, `slack_search_users`, `slack_list_channel_members`,
 `slack_list_user_channels`, `slack_get_reactions`, `slack_read_canvas`, `slack_read_file`,
-`slack_read_list`; not verified live) and Atlassian v2 (names prefixed `atlassian_`), **exactly the
-read-only tools the live server offers** (read from its `tools/list` with a real login on 3 Nov 2026: 11
+`slack_read_list`; not verified live; Slack has no write tool) and Atlassian v2 (names prefixed
+`atlassian_`), **exactly the read-only tools the live server offers, plus one write tool** (read from its `tools/list` with a real login on 3 Nov 2026: 11
 tools): `atlassianUserInfo`, `getAccessibleAtlassianResources`, `discover`, `executeRead`, `getJiraIssue`,
 `searchJiraIssuesUsingJql`, `listJiraIssueComments`, `getConfluenceContent`, `searchConfluence`, with the
 server's own argument names, JSON types and `required` (fixture `tests/fixtures/atlassian_live_tools.json`:
-names, types and two annotations only). `executeWrite` and `executeDestructive` are offered by the server and
-never allowlisted. `executeRead` takes the name of another operation, so `BridgeTool.rules` limits its `name`
+names, types and two annotations only), and `atlassian_executeWrite` → `executeWrite` (`BridgeTool.writes`;
+same arguments as `executeRead`). `executeDestructive` is offered by the server and never allowlisted. A
+write tool is listed and called only while `Bridge.can_write(upstream)` (`mcp_oauth.can_write`: the
+stored description's `scope` holds one of `Upstream.write_scopes`; no Keychain read, no request) says
+so; otherwise the call is refused naming `vibe bridge login <upstream>`, before any network. Its `name`
+must fully match `bridge.WRITE_OPERATION`: lower camel case, not `execute…`, and no
+delete/remove/archive/purge/destroy/destructive/trash/erase/wipe in any letter case. `executeRead` takes the name of another operation, so `BridgeTool.rules` limits its `name`
 argument in code to `atlassianUserInfo|(get|list|search|lookup|query|describe)[A-Z]…`; anything else is
 refused ("ask the lead") before any network, whatever the vendor's `executeRead` would accept. A test pins
-that every Atlassian tool allowlisted is `readOnlyHint` on the live fixture, that every read-only tool the
-server offers is allowlisted, and that each other name starts with a read verb and holds no write word
+that the Atlassian reads allowlisted are exactly the `readOnlyHint` tools of the live fixture, that the
+only write tool is `atlassian_executeWrite`, and that each other name starts with a read verb and holds no write word
 (there is no draft tool: `BridgeTool` has no `draft` field and `Upstream` no draft scopes). Any other name is a result with
 `isError: true` and "ask the lead", before any network. `tools/list` shows the allowlisted tools of the
 upstreams the user has a login for (the login's description file exists: no Keychain read), with **our
@@ -1874,9 +1879,12 @@ offers no registration endpoint; MCP clients must be backed by a registered Slac
 `http://127.0.0.1:<port>/callback`, `client_secret_post`; Atlassian: dynamic registration as a public
 client, resource `https://mcp.atlassian.com/v2/mcp`, issuer from its metadata. Authorization code with
 PKCE S256 (`oauth.new_verifier`), state checked by the one-shot `LoopbackReceiver`; token exchange and
-refresh as form posts. Scopes asked: read scopes only (no `--drafts`), and `_refuse_write_scope` refuses to store a token whose
-granted `scope` holds a write-like scope (`write`, `delete`, `manage`, `admin`, `chat`, `post`, `send`,
-`upload`, `create`, `edit`, `modify`), on login and on refresh. Every URL in a discovery document must be `https` on the upstream's own hosts, else nothing is
+refresh as form posts. Scopes asked: `read_scopes` plus `write_scopes` (Slack: none; Atlassian: `write:jira:agent-interface`,
+`write:confluence:agent-interface`; no `--drafts`), and `_refuse_write_scope` refuses to store a token
+whose granted `scope` holds a write-like scope (`write`, `delete`, `manage`, `admin`, `chat`, `post`,
+`send`, `upload`, `create`, `edit`, `modify`, `remove`, `archive`, `purge`, `destroy`, `destructive`,
+`trash`) other than exactly one of that upstream's `write_scopes`, on login and on refresh (a refused
+refresh keeps the stored tokens). Every URL in a discovery document must be `https` on the upstream's own hosts, else nothing is
 sent (`BRIDGE_HOSTS`, a client of its own like Cursor's). **Storage**: three Keychain items per
 upstream (`vibemaxxing-bridge-<id>-access|refresh|client-secret`, account `vibemaxxing`), written
 through `security -i` on its standard input (a value is never in argv; it is read back and compared,

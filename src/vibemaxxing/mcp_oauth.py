@@ -74,6 +74,10 @@ class Upstream:
     read_scopes: tuple[str, ...]
     # Whether to send the RFC 8707 `resource` parameter.
     send_resource: bool = True
+    # The scopes that can change something which vibe also asks for and accepts (Atlassian's
+    # non-destructive writes). Any other scope that can write (delete, manage, admin, ...) is
+    # still refused, so a login that can delete is never stored.
+    write_scopes: tuple[str, ...] = ()
 
 
 # --- the Keychain, as a port --------------------------------------------------------------------
@@ -242,6 +246,21 @@ def _finite(value: object) -> float | None:
 def has_login(root: Path, upstream: Upstream) -> bool:
     """Whether a login is on record (the description exists). No Keychain read, no request."""
     return meta_path(root, upstream).is_file()
+
+
+def can_write(root: Path, upstream: Upstream) -> bool:
+    """Whether the stored login was granted one of the write scopes this upstream accepts.
+
+    From the login's description on disk: no Keychain read, no request. A read-only login (one
+    made before writes were allowed) says no, so its write tools are neither listed nor called.
+    """
+    try:
+        parsed: object = jsonutil.loads(meta_path(root, upstream).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    scope = parsed.get("scope") if isinstance(parsed, dict) else None
+    granted = set(re.split(r"[\s,]+", scope)) if isinstance(scope, str) else set()
+    return bool(granted & set(upstream.write_scopes))
 
 
 def load(root: Path, secrets: SecretStore, upstream: Upstream) -> Tokens | None:
@@ -647,7 +666,8 @@ DEFAULT_LIFETIME_S: Final = 3600.0
 MAX_LIFETIME_S: Final = 30 * 86_400.0
 # A scope that can change something: write, delete, manage, admin, chat (Slack's chat:write), ...
 _WRITE_SCOPE: Final = re.compile(
-    r"(?:^|[:._-])(?:write|delete|manage|admin|modify|chat|post|send|upload|create|edit)(?:$|[:._-])",
+    r"(?:^|[:._-])(?:write|delete|manage|admin|modify|chat|post|send|upload|create|edit|remove|"
+    r"archive|purge|destroy|destructive|trash)(?:$|[:._-])",
     re.IGNORECASE,
 )
 
@@ -656,17 +676,25 @@ def write_scopes(scopes: Sequence[str]) -> list[str]:
     return [scope for scope in scopes if _WRITE_SCOPE.search(scope)]
 
 
-def _refuse_write_scope(granted: object, *, client_id: str) -> None:
-    """A login that can write is never stored: the token would sit in a Keychain item that any
-    process of the user (the extra session's shell included) may be able to read."""
+def _refuse_write_scope(granted: object, *, client_id: str, allowed: Sequence[str] = ()) -> None:
+    """A login that can do more than the upstream's accepted write scopes is never stored.
+
+    The token sits in a Keychain item that any process of the user (a session's shell included)
+    may be able to read, so what it can do is limited by what it was granted, not only by the
+    allowlist: reads, plus ``allowed`` (Atlassian's writes), never delete, manage or admin.
+    """
     if not isinstance(granted, str):
         return
-    found = write_scopes([part for part in re.split(r"[\s,]+", granted) if part])
+    found = [
+        scope
+        for scope in write_scopes([part for part in re.split(r"[\s,]+", granted) if part])
+        if scope not in allowed
+    ]
     if found:
         raise UsageError(
-            f"the upstream granted a scope that can write ({', '.join(found)[:80]}): the bridge "
-            "stores read-only logins only, so nothing was stored",
-            "vibe bridge login <upstream>   (and remove the write scopes from the app)",
+            f"the upstream granted a scope the bridge does not accept ({', '.join(found)[:80]}): "
+            "so nothing was stored",
+            "vibe bridge login <upstream>   (and remove those scopes from the app)",
         )
 
 
@@ -694,13 +722,14 @@ def _tokens_from(
     endpoint: str,
     resource: str | None,
     previous: Tokens | None,
+    allowed: Sequence[str] = (),
 ) -> Tokens:
     access = answer.get("access_token")
     if not isinstance(access, str) or not access:
         raise NeedsLoginError("the token answer has no access token", "vibe bridge login")
     refresh = answer.get("refresh_token")
     scope = answer.get("scope")
-    _refuse_write_scope(scope, client_id=client_id)
+    _refuse_write_scope(scope, client_id=client_id, allowed=allowed)
     return Tokens(
         access=Secret(access),
         # A refresh answer may leave the refresh token out: then the old one is still the one.
@@ -743,7 +772,7 @@ def login(
         used_id = client_id
     else:
         used_id = client_id or register_client(client, upstream, server, redirect_uri)
-    scopes = list(upstream.read_scopes)
+    scopes = [*upstream.read_scopes, *upstream.write_scopes]
     verifier, state = oauth.new_verifier(), oauth.new_state()
     url = authorize_url(
         upstream,
@@ -781,6 +810,7 @@ def login(
         endpoint=server.token_endpoint,
         resource=server.resource,
         previous=None,
+        allowed=upstream.write_scopes,
     )
     save(root, secrets, upstream, tokens)
     return tokens
@@ -868,6 +898,7 @@ def refresh_tokens(
             endpoint=tokens.token_endpoint,
             resource=tokens.resource,
             previous=tokens,
+            allowed=upstream.write_scopes,
         )
         save(root, secrets, upstream, fresh)  # before anything uses it
         return fresh

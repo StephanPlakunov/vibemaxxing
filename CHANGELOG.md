@@ -16,6 +16,13 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The bridge may do Atlassian writes that never delete.** `atlassian_executeWrite` (Atlassian's own
+  `executeWrite`: comment, edit, transition, create) is listed and callable only after a new `vibe bridge
+  login atlassian`, which also asks for `write:jira:agent-interface` and `write:confluence:agent-interface`;
+  an older login stays read-only and `vibe bridge status` says so. Never a delete: a granted `delete`,
+  `manage`, `admin` or `write:all:twg` scope is still refused (login and refresh), `executeDestructive` is
+  never allowlisted, and an operation name holding delete/remove/archive/purge/destroy/trash/erase/wipe is
+  refused in code. Slack stays read only.
 - **Shorter start lines**, prefixed `vibemaxxing:`: `auto picked main: 75% < 80%`, one line when the bridge
   is added, nothing for a run on a named account unless something may go wrong.
 

@@ -1052,6 +1052,7 @@ def cmd_bridge_serve(args: argparse.Namespace, ctx: Context) -> int:
         forward=upstreams.forward,
         logged_in=upstreams.logged_in,
         log=lambda entry: bridge.append_log(ctx.root, entry),
+        can_write=upstreams.can_write,
     )
     # The protocol owns stdout; vibe's own words go to stderr.
     bridge.serve(server, sys.stdin, sys.stdout)
@@ -1139,13 +1140,28 @@ def cmd_bridge_status(args: argparse.Namespace, ctx: Context) -> int:
                 else "access token expired (refreshes on use)"
             )
             lines.append(f"{upstream.id:<10}logged in; {when}; scopes: {tokens.scope or 'default'}")
-        lines.append(f"{'':<10}{len(allowed)} allowlisted tools, all reads")
+        writers = [
+            tool.name for tool in bridge.TOOLS if tool.upstream == upstream.id and tool.writes
+        ]
+        may_write = bool(writers) and mcp_oauth.can_write(ctx.root, upstream)
+        if not writers:
+            lines.append(f"{'':<10}{len(allowed)} allowlisted tools, all reads")
+        elif may_write:
+            lines.append(
+                f"{'':<10}{len(allowed)} allowlisted tools: reads, and writes that never delete"
+            )
+        else:
+            lines.append(
+                f"{'':<10}{len(allowed) - len(writers)} allowlisted tools, all reads; writes "
+                f"need a new login (vibe bridge login {upstream.id})"
+            )
         entries.append(
             {
                 "upstream": upstream.id,
                 "logged_in": tokens is not None,
                 "scope": tokens.scope if tokens else None,
                 "tools": len(allowed),
+                "writes": may_write,
             }
         )
     _emit(
@@ -1193,9 +1209,10 @@ def cmd_bridge_tools(args: argparse.Namespace, ctx: Context) -> int:
             )
         lines.append(f"  {tool.name:<42}{mark}")
     reachable = {t.upstream_tool for t in bridge.TOOLS if t.upstream == upstream.id}
+    unreachable = len(set(live) - reachable)
     lines.append(
-        f"{upstream.name} offers {len(live)} tools; {len(set(live) - reachable)} others are not "
-        "reachable through the bridge"
+        f"{upstream.name} offers {len(live)} tools; {unreachable} "
+        f"{'other is' if unreachable == 1 else 'others are'} not reachable through the bridge"
     )
     _emit(
         _action("bridge tools", upstream=upstream.id, offered=len(live)),

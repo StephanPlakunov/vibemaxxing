@@ -535,13 +535,20 @@ client, straight to the vendor's own remote MCP server**, as exactly one allowli
 the arguments given. **No model is in the path**: nothing sees the upstream's tool list, so there is
 nothing for a prompt injection to widen and nothing to fence with a prompt or a deny list.
 
-- **The allowlist is code** (`bridge.TOOLS`): **reads only. No draft tool, no write tool of any kind.**
-  A name not on it is refused before any network is touched, whatever the upstream offers. `tools/list`
-  shows our own fixed descriptions and argument schemas (written in this repo, no network), never the
-  vendor's text.
-- **Read-only logins only.** vibe asks for read scopes, and **refuses to store a login whose granted
-  scope can write** (`write`, `delete`, `manage`, `admin`, `chat`, ...): a token that can write must never
-  sit in a Keychain item the extra session's shell might be able to read.
+- **The allowlist is code** (`bridge.TOOLS`): **Slack reads only** (no draft, send, schedule, react or
+  canvas tool). **Atlassian: reads, and writes that never delete** (comment, edit, transition, create)
+  through one tool, `atlassian_executeWrite`, listed and callable only after a new `vibe bridge login
+  atlassian`; a login made before stays read-only. A name not on the list is refused before any network
+  is touched, whatever the upstream offers. `tools/list` shows our own fixed descriptions and argument
+  schemas (written in this repo, no network), never the vendor's text.
+- **Never a delete, three fences.** (1) The login asks for Atlassian's read scopes plus
+  `write:jira:agent-interface` and `write:confluence:agent-interface` only, and **refuses to store a
+  login whose granted scope can do more** (`delete`, `manage`, `admin`, `write:all:twg`, Slack's
+  `chat:write`, any other write), at login and at refresh. (2) Atlassian's `executeDestructive` is never
+  allowlisted. (3) `atlassian_executeWrite` refuses, in code, any operation name holding delete, remove,
+  archive, purge, destroy, trash, erase or wipe. The token sits in a Keychain item that any process of
+  yours (the extra session's shell included) might be able to read, so a write-capable Atlassian token
+  widens what a compromised process could do: writes, not deletes.
 - **Upstreams**: Slack's official MCP (`https://mcp.slack.com/mcp`) and Atlassian Rovo MCP v2
   (`https://mcp.atlassian.com/v2/mcp`). **Microsoft 365 is left out**: Microsoft's own remote MCP (Work IQ)
   needs a Global Administrator's consent, which is not your own OAuth.
@@ -562,7 +569,8 @@ nothing for a prompt injection to widen and nothing to fence with a prompt or a 
 What you run yourself, once:
 
 ```
-# Atlassian: registers a public client by itself; asks for read scopes only
+# Atlassian: registers a public client by itself; asks for read scopes and the two non-destructive
+# write scopes (run it again to turn writes on for a login made before)
 vibe bridge login atlassian
 
 # Slack has NO dynamic client registration: it needs a Slack app of your own (an internal app in
@@ -571,7 +579,8 @@ vibe bridge login atlassian
 vibe bridge login slack [--client-id ID] [--port N]
 #   redirect URL to register on the Slack app: http://127.0.0.1:8765/callback
 
-vibe bridge status        # who is logged in, token expiry, allowlist size; never a token
+vibe bridge status        # who is logged in, token expiry, allowlist size, whether it may write;
+                          # never a token
 vibe bridge tools slack   # which allowlisted tools the live upstream offers, and whether our
                           # argument names match its own (names only; none of its text)
 vibe bridge logout slack|atlassian|all
@@ -593,7 +602,7 @@ run`, for `~/.claude-extra`:
 CLAUDE_CONFIG_DIR=~/.claude-extra claude mcp add --scope user vibe-bridge -- vibe bridge serve
 ```
 
-Nothing in the bridge can write, so no Slack app needs a write scope: give it the read user scopes only.
+Nothing in the bridge writes to Slack, so the Slack app needs no write scope: give it the read user scopes only.
 Text an upstream returns (a Slack message, a Jira
 description) reaches the extra session as the tool result: data, and the same prompt-injection surface any
 connector has. It does not widen what the bridge can do.

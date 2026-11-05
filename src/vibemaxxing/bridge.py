@@ -51,9 +51,9 @@ DEFAULT_MAX_RESULT_BYTES: Final = 100_000
 HARD_MAX_RESULT_BYTES: Final = 1_000_000
 MAX_ARGUMENT_BYTES: Final = 20_000
 REFUSAL: Final = (
-    "refused: {name} is not on the bridge allowlist. The bridge reads only; sending, drafting, "
-    "scheduling, posting, reacting, creating, updating and deleting are never allowed here: "
-    "ask the lead"
+    "refused: {name} is not on the bridge allowlist. Slack is read only here (sending, drafting, "
+    "scheduling, reacting), and nothing anywhere may delete; Atlassian writes go through "
+    "atlassian_executeWrite: ask the lead"
 )
 
 SLACK: Final = Upstream(
@@ -83,6 +83,9 @@ ATLASSIAN: Final = Upstream(
         "search:jira:agent-interface", "read:confluence:agent-interface",
         "search:confluence:agent-interface",
     ),
+    # Non-destructive writes (comment, edit, transition, create). Never delete:..., manage:...,
+    # write:all:twg or any other product's writes: such a grant is refused (mcp_oauth).
+    write_scopes=("write:jira:agent-interface", "write:confluence:agent-interface"),
 )  # fmt: skip
 UPSTREAMS: Final = {upstream.id: upstream for upstream in (SLACK, ATLASSIAN)}
 
@@ -100,6 +103,8 @@ class BridgeTool:
     # (argument, regex): the argument must be a string that fully matches. For a tool that takes the
     # name of another operation, so that what it may name is limited in code, not by the vendor.
     rules: tuple[tuple[str, str], ...] = ()
+    # A write: listed and called only while the stored login was granted a write scope.
+    writes: bool = False
 
 
 _S, _I, _N, _B, _A, _O = "string", "integer", "number", "boolean", "array", "object"
@@ -118,8 +123,21 @@ READ_OPERATION: Final = (
 )
 
 
-# The allowlist: READS ONLY. There is no draft tool and no write tool of any kind; a token that can
-# write is never stored (mcp_oauth refuses a grant with a write scope). Tool names are the vendors'
+# What `executeWrite` may be asked to run: one operation name, lower camel case, that does not
+# delete, remove, archive, purge, destroy, trash, erase or wipe (in any letter case) and is not
+# one of the execute... meta tools. Atlassian sends destructive operations to executeDestructive,
+# which is never allowlisted, and a login granted delete:... is never stored; this is the third
+# fence, in code.
+WRITE_OPERATION: Final = (
+    r"(?!(?i:execute))"
+    r"(?![A-Za-z0-9]*(?i:delete|remove|archive|purge|destroy|destructive|trash|erase|wipe))"
+    r"[a-z][A-Za-z0-9]{0,80}"
+)
+
+
+# The allowlist: reads, plus exactly one write tool, Atlassian's non-destructive executeWrite (only
+# while the login was granted a write scope). Slack is reads only: no draft, send, schedule or react
+# tool. A token that can delete or manage is never stored (mcp_oauth). Tool names are the vendors'
 # own (Slack's from a connector listing, Atlassian's from its v2 documentation); the argument names
 # are the best known and are NOT verified: `vibe bridge tools <upstream>` compares them with the
 # live server (names only).
@@ -162,6 +180,14 @@ TOOLS: Final = (
         "get, list, search, lookup, query or describe, anything else is refused here.",
         (("cloudId", _S), ("name", _S), ("inputs", _O), ("responseFields", _A), ("view", _S)),
         ("name",), (("name", READ_OPERATION),),
+    ),
+    BridgeTool(
+        "atlassian_executeWrite", "atlassian", "executeWrite",
+        "Run one WRITE operation by name (found with atlassian_discover): comment, edit, "
+        "transition, create, assign, link. Nothing that deletes, removes or archives. Writes "
+        "under the user's own Atlassian account.",
+        (("cloudId", _S), ("name", _S), ("inputs", _O), ("responseFields", _A), ("view", _S)),
+        ("name",), (("name", WRITE_OPERATION),), writes=True,
     ),
     BridgeTool(
         "atlassian_getJiraIssue", "atlassian", "getJiraIssue", "Read one Jira issue.",
@@ -269,6 +295,10 @@ class Upstreams:
         self._client, self._secrets, self._root = client, secrets, root
         self._config, self._clock = config, clock
 
+    def can_write(self, upstream_id: str) -> bool:
+        """Whether the stored login may write: from its description on disk, no request."""
+        return mcp_oauth.can_write(self._root, UPSTREAMS[upstream_id])
+
     def logged_in(self, upstream_id: str) -> bool:
         """From the login's description on disk: no Keychain read, no request."""
         return mcp_oauth.has_login(self._root, UPSTREAMS[upstream_id])
@@ -372,6 +402,8 @@ class Bridge:
     logged_in: LoggedIn
     log: Callable[[Mapping[str, object]], None]
     clock: Callable[[], float] = time.time
+    # Whether an upstream's stored login may write (mcp_oauth.can_write). Without it, none may.
+    can_write: Callable[[str], bool] = lambda upstream: False
     guard: Guard = field(init=False)
     refused_logged: int = field(init=False, default=0)
 
@@ -422,11 +454,14 @@ class Bridge:
         for tool in TOOLS:
             if not self.logged_in(tool.upstream):
                 continue
+            if tool.writes and not self.can_write(tool.upstream):
+                continue
+            mode = "writes" if tool.writes else "read only"
             tools.append(
                 {
                     "name": tool.name,
                     "description": (
-                        f"[{UPSTREAMS[tool.upstream].name}, read only] {tool.description} "
+                        f"[{UPSTREAMS[tool.upstream].name}, {mode}] {tool.description} "
                         "Arguments go to the upstream unchanged."
                     ),
                     "inputSchema": {
@@ -447,12 +482,21 @@ class Bridge:
         if tool is None:
             self._log_refused(name, started)
             return REFUSAL.format(name=name[:64] or "(no name)"), True
+        if tool.writes and not self.can_write(tool.upstream):
+            self._log_refused(tool.name, started)
+            return (
+                f"refused: {tool.name} needs a {UPSTREAMS[tool.upstream].name} login that may "
+                f"write, and this one only reads (a new `vibe bridge login {tool.upstream}`): "
+                "ask the lead",
+                True,
+            )
         for argument, pattern in tool.rules:
             value = arguments.get(argument)
             if not isinstance(value, str) or not re.fullmatch(pattern, value):
                 self._log_refused(f"{tool.name}:{argument}", started)
+                allowed = "a write that never deletes" if tool.writes else "a read operation"
                 return (
-                    f"refused: {tool.name} may only be asked for a read operation; "
+                    f"refused: {tool.name} may only be asked for {allowed}; "
                     f"`{argument}` is not one. ask the lead",
                     True,
                 )

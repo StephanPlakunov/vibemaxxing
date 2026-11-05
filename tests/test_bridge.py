@@ -52,8 +52,17 @@ def upstream_with(upstream: mcp_oauth.Upstream, names: list[str], **kw: object) 
     return fake
 
 
+# What an Atlassian login made since writes were allowed is granted: reads plus the two write scopes.
+WRITE_GRANT = " ".join((*ATLASSIAN.read_scopes, *ATLASSIAN.write_scopes))
+
+
 def seed(
-    root: Path, secrets: FakeSecrets, fake: FakeUpstream, *, expires_at: float | None = NOW + 3600
+    root: Path,
+    secrets: FakeSecrets,
+    fake: FakeUpstream,
+    *,
+    expires_at: float | None = NOW + 3600,
+    scope: str = "granted",
 ) -> None:
     mcp_oauth.save(
         root,
@@ -65,7 +74,7 @@ def seed(
             expires_at=expires_at,
             client_id="client-1",
             client_secret=None,
-            scope="granted",
+            scope=scope,
             token_endpoint=f"{fake.issuer_url}/token",
             resource=fake.upstream.mcp_url,
         ),
@@ -77,7 +86,11 @@ class Rig:
     """A bridge wired to fakes: one clock, one secret store, one or two fake upstreams."""
 
     def __init__(
-        self, tmp_path: Path, *fakes: FakeUpstream, config: BridgeConfig | None = None
+        self,
+        tmp_path: Path,
+        *fakes: FakeUpstream,
+        config: BridgeConfig | None = None,
+        scope: str = "granted",
     ) -> None:
         self.root = tmp_path / ".vibemaxxing"
         self.secrets = FakeSecrets()
@@ -86,7 +99,7 @@ class Rig:
         self.config = config or BridgeConfig(timeout_s=5.0)
         self.entries: list[Mapping[str, object]] = []
         for fake in fakes:
-            seed(self.root, self.secrets, fake)
+            seed(self.root, self.secrets, fake, scope=scope)
 
     def client(self) -> _Router:
         return _Router(self.fakes)
@@ -103,7 +116,12 @@ class Rig:
     def bridge(self) -> Bridge:
         ups = self.upstreams()
         return Bridge(
-            self.config, ups.forward, ups.logged_in, self.entries.append, clock=lambda: self.now
+            self.config,
+            ups.forward,
+            ups.logged_in,
+            self.entries.append,
+            clock=lambda: self.now,
+            can_write=ups.can_write,
         )
 
 
@@ -176,7 +194,8 @@ WRITE_WORDS = re.compile(
     [
         "slack_send_message", "slack_schedule_message", "slack_add_reaction", "slack_create_canvas",
         "slack_update_canvas", "slack_create_conversation", "atlassian_createJiraIssue",
-        "createJiraIssue", "atlassian_executeWrite", "atlassian_deleteJiraIssue",
+        "createJiraIssue", "atlassian_executeDestructive", "executeDestructive",
+        "atlassian_deleteJiraIssue", "executeWrite",
         "outlook_send_mail", "m365_search_mail", "", "../x", "slack_read_channel ",
     ],
 )  # fmt: skip
@@ -572,7 +591,7 @@ def run_login(
     return tokens, secrets, opened, root
 
 
-def test_atlassian_login_registers_a_public_client_and_asks_for_read_scopes_only(
+def test_atlassian_login_registers_a_public_client_and_asks_for_reads_and_non_destructive_writes(
     tmp_path: Path, atlassian: FakeUpstream
 ) -> None:
     receiver = FakeReceiver(port=8765)
@@ -588,8 +607,9 @@ def test_atlassian_login_registers_a_public_client_and_asks_for_read_scopes_only
     assert query["state"] == receiver.states[0]
     assert query["resource"] == ATLASSIAN.mcp_url  # RFC 8707
     scopes = query["scope"].split()
-    assert scopes == list(ATLASSIAN.read_scopes)
-    assert not any(s.startswith(("write:", "delete:", "manage:")) for s in scopes)
+    assert scopes == [*ATLASSIAN.read_scopes, "write:jira:agent-interface",
+                      "write:confluence:agent-interface"]  # fmt: skip
+    assert not any(s.startswith(("delete:", "manage:", "admin")) or "all" in s for s in scopes)
     registration = next(s for s in atlassian.requests if s.url.endswith("/register"))
     assert registration.rpc()["token_endpoint_auth_method"] == "none"
     assert registration.rpc()["redirect_uris"] == ["http://127.0.0.1:8765/callback"]
@@ -831,7 +851,8 @@ def test_a_scratch_mcp_client_reads_through_vibe_bridge_serve_as_a_real_process(
     env = {
         **os.environ,
         "VIBE_ROOT": str(tmp_path / ".vibemaxxing"),
-        "PYTHONPATH": str(REPO),
+        # this checkout's own package first, not whichever one the venv has installed
+        "PYTHONPATH": os.pathsep.join((str(REPO / "src"), str(REPO))),
         "HOME": str(tmp_path),
     }
 
@@ -923,8 +944,9 @@ def test_status_login_tools_logout_through_the_cli(
     tools = capsys.readouterr().out
     assert "atlassian_getJiraIssue" in tools and "offered, arguments match" in tools
     assert "NOT offered" not in tools  # the fake offers what the real server offered
-    assert "Atlassian offers 11 tools; 2 others are not reachable through the bridge" in tools
-    assert "executeWrite" not in tools and "executeDestructive" not in tools  # never even named
+    assert "Atlassian offers 11 tools; 1 other is not reachable through the bridge" in tools
+    assert "atlassian_executeWrite" in tools
+    assert "executeDestructive" not in tools  # never even named
 
     assert rig.main("bridge", "logout", "atlassian") == 0
     assert "logged out of atlassian" in capsys.readouterr().out
@@ -1118,11 +1140,19 @@ def _json_type(kind: str | None) -> str:
     return kind or "string"
 
 
-def test_the_allowlist_is_reads_only_with_no_draft_tool_at_all() -> None:
+def test_the_allowlist_is_reads_plus_exactly_one_atlassian_write_tool_and_no_draft_tool() -> None:
     names = [tool.name for tool in TOOLS]
     assert len(names) == len(set(names))
     assert not hasattr(TOOLS[0], "draft") and not hasattr(SLACK, "draft_scopes")
+    writers = [tool for tool in TOOLS if tool.writes]
+    assert [(t.name, t.upstream, t.upstream_tool) for t in writers] == [
+        ("atlassian_executeWrite", "atlassian", "executeWrite")
+    ]
+    assert writers[0].rules == (("name", bridge.WRITE_OPERATION),)
+    assert LIVE_ATLASSIAN["executeWrite"]["destructiveHint"] is False  # the server's own hint
     for tool in TOOLS:
+        if tool.writes:
+            continue
         assert READ_NAME.match(tool.upstream_tool), tool.upstream_tool  # a read verb first
         if tool.upstream_tool == "executeRead":
             # the one tool that names another operation: limited in code to read operations
@@ -1132,12 +1162,12 @@ def test_the_allowlist_is_reads_only_with_no_draft_tool_at_all() -> None:
             assert not WRITE_WORDS.search(tool.name) and not tool.rules
         assert "draft" not in tool.description.lower()
     live_readonly = {n for n, spec in LIVE_ATLASSIAN.items() if spec["readOnlyHint"] is True}
+    reads = {t.upstream_tool for t in TOOLS if t.upstream == "atlassian" and not t.writes}
+    assert reads == live_readonly  # every read-only tool the live server offers, and only those
     mine = {t.upstream_tool for t in TOOLS if t.upstream == "atlassian"}
-    assert (
-        mine <= live_readonly
-    )  # every Atlassian tool allowlisted is read-only by the server's own hint
-    assert not mine & {"executeWrite", "executeDestructive"}
-    assert mine == live_readonly  # and every read-only tool the live server offers is allowlisted
+    assert mine == live_readonly | {"executeWrite"}
+    assert "executeDestructive" not in {t.upstream_tool for t in TOOLS}
+    assert not any(t.writes for t in TOOLS if t.upstream == "slack")  # Slack: reads only
     for tool in TOOLS:  # our argument lists are the live server's own (names, types, required)
         if tool.upstream == "atlassian":
             spec = LIVE_ATLASSIAN[tool.upstream_tool]
@@ -1154,11 +1184,20 @@ def test_the_draft_tool_is_refused_like_any_writer(tmp_path: Path, slack: FakeUp
     assert failed and "refused" in text and "drafting" in text and slack.requests == []
 
 
-def test_every_scope_vibe_asks_for_is_a_read_scope() -> None:
+def test_every_read_scope_is_a_read_scope_and_only_atlassian_asks_for_two_write_scopes() -> None:
     for upstream in (SLACK, ATLASSIAN):
         assert upstream.read_scopes
         assert mcp_oauth.write_scopes(upstream.read_scopes) == [], upstream.id
-    assert "chat:write" not in SLACK.read_scopes
+    assert "chat:write" not in SLACK.read_scopes and SLACK.write_scopes == ()
+    assert ATLASSIAN.write_scopes == (
+        "write:jira:agent-interface",
+        "write:confluence:agent-interface",
+    )
+    assert mcp_oauth.write_scopes(
+        ["delete:jira:agent-interface", "manage:jira:agent-interface", "write:all:twg",
+         "remove:x", "archive:confluence", "purge:x", "trash:x", "destructive:jira"]
+    ) == ["delete:jira:agent-interface", "manage:jira:agent-interface", "write:all:twg",
+          "remove:x", "archive:confluence", "purge:x", "trash:x", "destructive:jira"]  # fmt: skip
     assert mcp_oauth.write_scopes(
         ["chat:write", "channels:write", "write:jira:agent-interface", "manage:jira", "delete:x",
          "admin", "reactions:write", "files:write"]
@@ -1181,18 +1220,61 @@ def test_drafts_is_not_an_option_any_more(
     [
         "channels:read chat:write",
         "channels:read,users:read,reactions:write",
-        "write:jira:agent-interface read:me",
+        "write:jira:agent-interface delete:jira:agent-interface",
+        "read:jira-work write:jira:agent-interface manage:jira:agent-interface",
+        "write:confluence:agent-interface write:all:twg",
+        "write:jira:agent-interface,admin",
+        "WRITE:JIRA:AGENT-INTERFACE",  # not exactly an accepted scope: refused
+        "write:jira-work read:me",  # another product's write
     ],
 )
-def test_a_login_that_comes_back_able_to_write_is_not_stored(
+def test_a_login_that_comes_back_able_to_delete_or_manage_is_not_stored(
     tmp_path: Path, atlassian: FakeUpstream, granted: str
 ) -> None:
     atlassian.granted_scope = granted
 
-    with pytest.raises(UsageError, match="read-only logins only, so nothing was stored"):
+    with pytest.raises(UsageError, match=r"does not accept .*so nothing was stored"):
         run_login(tmp_path, atlassian)
 
     assert not (tmp_path / ".vibemaxxing" / "bridge").exists()
+
+
+def test_a_slack_login_granted_an_atlassian_write_scope_is_not_stored(
+    tmp_path: Path, slack: FakeUpstream
+) -> None:
+    slack.granted_scope = "channels:read write:jira:agent-interface"  # accepted for Atlassian only
+
+    with pytest.raises(UsageError, match="nothing was stored"):
+        run_login(tmp_path, slack, client_id="app-client-1", client_secret="APPSECRET000000001")
+
+    assert not mcp_oauth.meta_path(tmp_path / ".vibemaxxing", SLACK).exists()
+
+
+def test_an_atlassian_login_granted_the_two_write_scopes_is_stored_and_may_write(
+    tmp_path: Path, atlassian: FakeUpstream
+) -> None:
+    atlassian.granted_scope = WRITE_GRANT
+
+    tokens, _, _, root = run_login(tmp_path, atlassian)
+
+    assert tokens.scope == WRITE_GRANT
+    assert mcp_oauth.can_write(root, ATLASSIAN)
+
+
+@pytest.mark.parametrize(
+    "scope", ["granted", " ".join(ATLASSIAN.read_scopes), None, "", "write:jira-work", 5]
+)
+def test_an_old_read_only_login_may_not_write(tmp_path: Path, scope: object) -> None:
+    root = tmp_path / ".vibemaxxing"
+    assert not mcp_oauth.can_write(root, ATLASSIAN)  # no login at all
+    fake = atlassian_server()
+    seed(root, FakeSecrets(), fake)
+    meta = mcp_oauth.meta_path(root, ATLASSIAN)
+    meta.write_text(json.dumps({**json.loads(meta.read_text()), "scope": scope}))
+
+    assert not mcp_oauth.can_write(root, ATLASSIAN)
+    meta.write_text("{not json")
+    assert not mcp_oauth.can_write(root, ATLASSIAN)
 
 
 def test_a_refresh_that_comes_back_able_to_write_keeps_the_old_tokens(
@@ -1205,8 +1287,29 @@ def test_a_refresh_that_comes_back_able_to_write_keeps_the_old_tokens(
 
     text, failed = call(rig, "slack_read_channel", q="x")
 
-    assert failed and "stores read-only logins only" in text
+    assert failed and "does not accept" in text
     assert rig.secrets.items == before  # nothing was overwritten with a writing token
+
+
+@pytest.mark.parametrize(
+    "granted", [f"{WRITE_GRANT} delete:jira:agent-interface", f"{WRITE_GRANT} manage:jira:agent-interface",
+                f"{WRITE_GRANT} write:all:twg"],
+)  # fmt: skip
+def test_an_atlassian_refresh_that_comes_back_able_to_delete_keeps_the_old_tokens(
+    tmp_path: Path, atlassian: FakeUpstream, granted: str
+) -> None:
+    rig = Rig(tmp_path, atlassian, scope=WRITE_GRANT)
+    seed(rig.root, rig.secrets, atlassian, expires_at=NOW - 10, scope=WRITE_GRANT)
+    before = dict(rig.secrets.items)
+    meta_before = mcp_oauth.meta_path(rig.root, ATLASSIAN).read_text()
+    atlassian.granted_scope = granted
+
+    text, failed = call(rig, "atlassian_getJiraIssue", issueIdOrKey="ZAL-1")
+
+    assert failed and "does not accept" in text
+    assert rig.secrets.items == before  # nothing was overwritten with a token that can delete
+    assert mcp_oauth.meta_path(rig.root, ATLASSIAN).read_text() == meta_before
+    assert "delete:" not in meta_before and "manage:" not in meta_before
 
 
 # --- P2-1: nothing can crash serve() -------------------------------------------------------------------
@@ -1861,6 +1964,34 @@ def test_status_says_all_reads(tmp_path: Path, capsys: pytest.CaptureFixture[str
     assert "allowlisted tools, all reads" in capsys.readouterr().out
 
 
+def test_status_says_whether_the_atlassian_login_may_write(
+    tmp_path: Path, atlassian: FakeUpstream, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rig = CliRig(tmp_path, atlassian)
+    reads = len([t for t in TOOLS if t.upstream == "atlassian" and not t.writes])
+    every = len([t for t in TOOLS if t.upstream == "atlassian"])
+    seed(rig.root, rig.secrets, atlassian)  # a login from before writes were allowed
+
+    assert rig.main("bridge", "status") == 0
+    out = capsys.readouterr().out
+    assert (
+        f"{reads} allowlisted tools, all reads; writes need a new login "
+        "(vibe bridge login atlassian)" in out
+    )
+    assert (
+        f"{len([t for t in TOOLS if t.upstream == 'slack'])} allowlisted tools, all reads\n" in out
+    )
+
+    seed(rig.root, rig.secrets, atlassian, scope=WRITE_GRANT)
+    assert rig.main("bridge", "status", "--json") == 0
+    entries = json.loads(capsys.readouterr().out)["upstreams"]
+    assert {e["upstream"]: e["writes"] for e in entries} == {"slack": False, "atlassian": True}
+    assert rig.main("bridge", "status") == 0
+    assert (
+        f"{every} allowlisted tools: reads, and writes that never delete" in capsys.readouterr().out
+    )
+
+
 # --- Atlassian as the live server offers it (3 Nov 2026) ---------------------------------------------------
 
 
@@ -1922,33 +2053,161 @@ def test_execute_read_forwards_a_read_operation_unchanged(
     ]
 
 
-def test_the_two_write_meta_tools_cannot_be_reached_by_any_name(
-    tmp_path: Path, atlassian: FakeUpstream
+@pytest.mark.parametrize("scope", ["granted", WRITE_GRANT])
+def test_execute_destructive_cannot_be_reached_by_any_name_even_with_a_write_login(
+    tmp_path: Path, atlassian: FakeUpstream, scope: str
 ) -> None:
-    rig = Rig(tmp_path, atlassian)
+    rig = Rig(tmp_path, atlassian, scope=scope)
 
     for name in (
-        "atlassian_executeWrite",
         "atlassian_executeDestructive",
-        "executeWrite",
         "executeDestructive",
+        "executeWrite",
+        "atlassian_executedestructive",
+        "atlassian_executeDestructive ",
     ):
         text, failed = rig.bridge().call(
-            name, {"cloudId": "c1", "name": "createJiraIssue", "inputs": {}}
+            name, {"cloudId": "c1", "name": "deleteJiraIssue", "inputs": {}}
         )
         assert failed and "ask the lead" in text
     assert atlassian.requests == []
+    assert "executeDestructive" not in {c["name"] for c in atlassian.calls()}
+
+
+def test_the_write_tool_is_hidden_and_refused_with_a_read_only_login(
+    tmp_path: Path, atlassian: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, atlassian)  # a login from before writes were allowed: scope without writes
+
+    names = {t["name"] for t in rig.bridge().listing()}
+    text, failed = rig.bridge().call(
+        "atlassian_executeWrite", {"cloudId": "c1", "name": "createJiraIssue", "inputs": {}}
+    )
+
+    assert "atlassian_executeWrite" not in names and "atlassian_executeRead" in names
+    assert failed and "refused" in text and "vibe bridge login atlassian" in text
+    assert "ask the lead" in text
+    assert atlassian.requests == []  # not even a token refresh
+    assert rig.entries[-1]["outcome"] == "refused"
+
+
+def test_the_write_tool_is_listed_and_forwarded_with_a_write_login(
+    tmp_path: Path, atlassian: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, atlassian, scope=WRITE_GRANT)
+
+    listing = {t["name"]: t for t in rig.bridge().listing()}
+    text, failed = rig.bridge().call(
+        "atlassian_executeWrite",
+        {"cloudId": "c1", "name": "addCommentToJiraIssue", "inputs": {"issueIdOrKey": "ZAL-1"}},
+    )
+
+    write = listing["atlassian_executeWrite"]
+    assert str(write["description"]).startswith("[Atlassian, writes] ")
+    assert str(listing["atlassian_executeRead"]["description"]).startswith(
+        "[Atlassian, read only] "
+    )
+    assert write["inputSchema"]["required"] == ["name"]  # type: ignore[index]
+    assert not failed and json.loads(text)["ok"]
+    assert atlassian.calls() == [
+        {
+            "name": "executeWrite",
+            "arguments": {
+                "cloudId": "c1",
+                "name": "addCommentToJiraIssue",
+                "inputs": {"issueIdOrKey": "ZAL-1"},
+            },
+        }
+    ]
+
+
+def test_a_write_login_gives_slack_no_write_tool(
+    tmp_path: Path, slack: FakeUpstream, atlassian: FakeUpstream
+) -> None:
+    rig = Rig(tmp_path, slack, atlassian, scope=WRITE_GRANT)
+
+    names = {t["name"] for t in rig.bridge().listing()}
+
+    assert "atlassian_executeWrite" in names
+    slack_names = {n for n in names if n.startswith("slack_")}
+    assert slack_names and not any(WRITE_WORDS.search(n) for n in slack_names)
+    for name in ("slack_send_message", "slack_send_message_draft", "slack_schedule_message",
+                 "slack_add_reaction", "slack_create_canvas", "slack_update_canvas"):  # fmt: skip
+        text, failed = rig.bridge().call(name, {"channel_id": "C1", "message": "hi"})
+        assert failed and "ask the lead" in text
+    assert slack.requests == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "deleteJiraIssue", "deleteConfluencePage", "removeIssueLink", "removeX", "archiveConfluencePage",
+        "unarchiveConfluencePage", "purgeConfluenceTrash", "destroyX", "trashConfluencePage",
+        "moveToTrash", "bulkDELETEIssues", "jiraIssueDelete", "eraseX", "wipeX", "executeDestructive",
+        "executeRead", "executeWrite", "eXecuteWrite", "createJiraIssue; deleteJiraIssue",
+        "createJiraIssue deleteJiraIssue", "createJiraIssue\n", " createJiraIssue", "createJiraIssue ",
+        "\tcreateJiraIssue", "create-JiraIssue", "create_issue", "createJiraIssue;", "CreateJiraIssue",
+        "createJiraIssue" + "x" * 80, "", 5, None, True, ["createJiraIssue"], {"name": "createJiraIssue"},
+    ],
+)  # fmt: skip
+def test_execute_write_refuses_anything_that_deletes_and_anything_not_one_plain_name(
+    tmp_path: Path, atlassian: FakeUpstream, operation: object
+) -> None:
+    rig = Rig(tmp_path, atlassian, scope=WRITE_GRANT)
+
+    text, failed = rig.bridge().call(
+        "atlassian_executeWrite", {"cloudId": "c1", "name": operation, "inputs": {}}
+    )
+
+    assert failed and "refused" in text and "ask the lead" in text
+    assert atlassian.requests == []  # not even a token refresh
+    assert rig.entries[-1]["outcome"] == "refused"
+
+
+def test_execute_write_without_a_name_is_refused(tmp_path: Path, atlassian: FakeUpstream) -> None:
+    rig = Rig(tmp_path, atlassian, scope=WRITE_GRANT)
+
+    text, failed = rig.bridge().call("atlassian_executeWrite", {"cloudId": "c1", "inputs": {}})
+
+    assert failed and "refused" in text and atlassian.requests == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["createJiraIssue", "editJiraIssue", "transitionJiraIssue", "addCommentToJiraIssue",
+     "updateConfluencePage", "createConfluencePage", "addWorklogToJiraIssue"],
+)  # fmt: skip
+def test_execute_write_forwards_a_non_destructive_write_unchanged(
+    tmp_path: Path, atlassian: FakeUpstream, operation: str
+) -> None:
+    assert re.fullmatch(bridge.WRITE_OPERATION, operation)
+    rig = Rig(tmp_path, atlassian, scope=WRITE_GRANT)
+
+    _, failed = rig.bridge().call(
+        "atlassian_executeWrite", {"cloudId": "c1", "name": operation, "inputs": {"k": "v"}}
+    )
+
+    assert not failed
+    assert atlassian.calls() == [
+        {
+            "name": "executeWrite",
+            "arguments": {"cloudId": "c1", "name": operation, "inputs": {"k": "v"}},
+        }
+    ]
 
 
 def test_the_listing_gives_the_live_argument_names_types_and_required(
     tmp_path: Path, atlassian: FakeUpstream
 ) -> None:
-    rig = Rig(tmp_path, atlassian)
+    rig = Rig(tmp_path, atlassian, scope=WRITE_GRANT)
 
     listing = {t["name"]: t for t in rig.bridge().listing()}
 
     assert set(listing) == {t.name for t in TOOLS if t.upstream == "atlassian"}
-    assert "atlassian_executeWrite" not in listing and "atlassian_executeDestructive" not in listing
+    assert "atlassian_executeWrite" in listing and "atlassian_executeDestructive" not in listing
+    assert listing["atlassian_executeWrite"]["inputSchema"]["properties"]["inputs"] == {
+        "type": "object"
+    }
     search = listing["atlassian_searchJiraIssuesUsingJql"]["inputSchema"]
     assert search["required"] == ["cloudId", "jql"]
     assert search["properties"]["maxResults"] == {"type": "number"}  # number, as the server says
