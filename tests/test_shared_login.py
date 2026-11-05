@@ -291,3 +291,17 @@ def test_at_exactly_the_budget_main_is_out_for_routing_as_for_the_tick(
     assert world.main("run", "auto", "--needs", "slack", *args) == 0
 
     assert "auto picked cursor: main 40% = 40%" in capsys.readouterr().err
+
+
+def test_vibes_own_flags_after_the_account_are_vibes_not_a_command() -> None:
+    from vibemaxxing.cli import split_run_command
+
+    assert split_run_command(["run", "cursor", "--dry-run"]) == (["run", "cursor", "--dry-run"], [])
+    assert split_run_command(["run", "auto", "--no-needs", "--json"]) == (
+        ["run", "auto", "--no-needs", "--json"],
+        [],
+    )
+    assert split_run_command(["run", "work", "claude", "--dry-run"]) == (
+        ["run", "work"],
+        ["claude", "--dry-run"],
+    )

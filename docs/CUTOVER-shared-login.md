@@ -12,7 +12,10 @@ within about a minute, without a restart.
 - `~/.vibemaxxing/settings.json`: `routing.shared_login: true` and the policy
   `main until 99% (weekly: today's budget) -> extra until 99% -> main until 99%, then earliest reset`.
   Until step 2 below it cannot switch to extra (extra still lives in its own dir), so it stays on main.
-- Cursor's status line: `~/.cursor/statusline.sh`, registered in `~/.cursor/cli-config.json`.
+- Cursor's status line: `~/.cursor/statusline.sh`, registered in `~/.cursor/cli-config.json`
+  (`statusLine`). A `cursor-agent` that was open while it was written may drop the entry when it
+  exits; check with `grep statusLine ~/.cursor/cli-config.json`, and re-add it with no
+  `cursor-agent` running if it is gone (backup: `~/.cursor/cli-config.json.pre-statusline`).
 
 ## What you do
 

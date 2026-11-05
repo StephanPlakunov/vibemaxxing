@@ -1515,7 +1515,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-_RUN_VALUE_FLAGS: Final = ("--needs", "--brief", "--handover")
+_RUN_VALUE_FLAGS: Final = ("--needs", "--brief", "--handover", "--pass-env")
+# vibe's own `run` options, which may also follow the alias when no `--` comes after it
+# (`vibe run cursor --dry-run`): a session with no command, not a command named `--dry-run`.
+_RUN_FLAGS: Final = frozenset(
+    {
+        *_RUN_VALUE_FLAGS,
+        "--no-needs",
+        "--claude-only",
+        "--allow-force",
+        "--allow-fast",
+        "--allow-no-zdr",
+        "--no-bridge",
+        "--trust-workspace",
+        "--dry-run",
+        "--json",
+        "-h",
+        "--help",
+    }
+)
 
 
 def split_run_command(argv: Sequence[str]) -> tuple[list[str], list[str] | None]:
@@ -1537,6 +1555,9 @@ def split_run_command(argv: Sequence[str]) -> tuple[list[str], list[str] | None]
     while index < len(items) and items[index].startswith("-"):
         index += 2 if items[index] in _RUN_VALUE_FLAGS else 1
     end = min(index + 1, len(items))  # the alias, if there is one
+    while end < len(items) and items[end].split("=", 1)[0] in _RUN_FLAGS:
+        end += 2 if items[end] in _RUN_VALUE_FLAGS else 1
+    end = min(end, len(items))
     return items[:end], items[end:]
 
 
