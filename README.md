@@ -89,6 +89,27 @@ login, an account that lives in another dir. If the Keychain write fails and the
 back (vibe may refresh again); if it may be there, the mark stays and running the command again finishes the job. No
 token is printed.
 
+### Release a config-dir login (one shared login)
+
+The way back, for one shared login: vibe holds every account and auto-switch moves Claude Code's
+default login between them.
+
+```
+vibe release extra
+released extra: vibe holds its login now; ~/.claude-extra has no login any more
+```
+
+It reads the login from the dir's own Keychain item, checks that `<dir>/.claude.json` names the
+stored account, writes it into the account file without `config_dir` (from now on vibe refreshes it,
+and `vibe switch` and auto-switch may put it into the default login), then **deletes the dir's
+item**, so no session in that dir can use or renew a second copy: a login lives in one place only.
+`<dir>/.claude.json` stays as it is; a session started in that dir afterwards has no login (a
+`claude /login` there makes a separate one). It refuses an account that has no config dir, the active or live account, a lapsed
+or rejected login, a profile naming another account, and **any process running with
+`CLAUDE_CONFIG_DIR=<dir>`** (read with `ps -E`; it names the PIDs, and a list it cannot read is a
+refusal too). If the delete fails, the account file is put back as it was. No request, no token
+printed; `--json` works.
+
 **Polls and refreshes, until an account is adopted.** The tick, `vibe list`, the TUI and the web page refresh an account
 vibe owns only once its access token has really ended, never in the five minutes before (a session started with that
 token may still be using it); `vibe run`, whose child cannot renew a token, keeps the window. That is as seldom as a
@@ -106,6 +127,7 @@ vibe run <name> -- <cmd>      run one command as one account (`cursor`: translat
 vibe run auto -- claude       pick the account by the routing rules, then run
 vibe shell-init               print a zsh snippet that routes `claude` through that
 vibe remove <name>            forget an account
+vibe release <name>           move a --from-config-dir login into vibe (the dir keeps none)
 vibe alias <old> <new>        rename one
 vibe auto on|off|status       switch accounts by itself, see below
 vibe statusline               one line for Claude Code's status line, see below
@@ -155,6 +177,13 @@ It is deliberately timid:
   vibe at the live account first and carries on. It stays when that repair is refused, when
   the live account is stored without an account id, and never switches onto such an account.
 - 15 minutes between switches, and `vibe auto undo` goes back.
+- It does not switch away while the live login's access token ends within the next 10 minutes
+  (`stay: waiting: main's login renews within 10 min`), read from the Keychain and never
+  refreshed by vibe. A running session may hold the outgoing login for up to 30 s after a switch
+  (Claude Code's Keychain cache, found in Claude Code 2.1.318); renewing it then would write the
+  outgoing account back over the incoming one and spend the refresh token vibe just stored. A
+  token that ended more than 15 minutes ago is used by no session (one would have renewed it), so
+  the switch goes ahead. This also holds back leaving a spent account, by at most about 25 minutes.
 - While the live account is at 90% or more, it is asked for fresh numbers about every one to
   two minutes instead of three. That is a lot of requests against a budget measured at about
   28 to 30 an hour for one account, and has not been measured against the live endpoint; a
@@ -199,8 +228,27 @@ rows reset first.
   out of the 85% step until what limited it has reset; its 99% step is still open.
 - The policy is followed, so **a `vibe switch` to an account in the policy is undone by the
   next tick** when the policy says otherwise. Run `vibe auto off` to hold an account by hand.
+- **`"weekly_budget": true`** on a step makes its weekly limit today's budget, the one `vibe run
+  auto` routes by (`routing.weekday_budget` in `routing.timezone`; default Mon 20%, Tue 40%,
+  Wed 60%, Thu 80%, Fri-Sun 100%, Berlin), while the session row (and `block_models` rows) keep the
+  step's `until`. For one shared login:
+
+  ```json
+  {"mode": "ordered",
+   "steps": [{"account": "main", "until": 99, "weekly_budget": true},
+             {"account": "extra", "until": 99}, {"account": "main", "until": 99}],
+   "then": "earliest_reset"}
+  ```
+
+  main while its week is within today's budget and its session below 99%, then extra, then main
+  again whatever the budget. An account left over the budget alone is back at that step as soon
+  as the budget allows it (at Berlin midnight at the latest, 80% to 100% on Friday), after the
+  cooldown, not only after its weekly reset; its later steps stay open meanwhile. The flag must
+  be a boolean, not together with `weekly_cap`, and a `routing` member that is wrong then leaves
+  the file at the defaults too.
 - A policy that is wrong anywhere leaves the whole file at the defaults, so auto-switch is
-  off. `vibe auto status` shows the policy, the step it is on now and the next one:
+  off. `vibe auto status` shows the policy, the step it is on now and the next one (a budget
+  step reads `main until 99% (weekly: today's budget 80%)`):
 
 ```
 $ vibe auto status
@@ -224,9 +272,10 @@ timer every minute.
 
 **Not verified: what a switch does to a `claude` session that is already running.** Like
 `vibe switch`, it changes the credential Claude Code reads and makes no attempt to signal a
-live process, so a running session is not guaranteed to pick the new account up. And a
-session that stays on the old account and later refreshes its own token may overwrite the
-Keychain with it. Both are untested. `scripts/verify_auto_live.py` is the check for the part
+live process. Claude Code 2.1.318 re-reads that Keychain item with a 30 s cache (found in its
+code, not measured here), so a running session should follow within about 30 s; a session that
+renews the old account's token inside that window may overwrite the Keychain with it, which the
+renewal wait above makes unlikely but cannot rule out. Both are untested. `scripts/verify_auto_live.py` is the check for the part
 that can be tested by hand: it does a real switch between two throwaway accounts and asserts
 the Keychain holds the incoming credential.
 

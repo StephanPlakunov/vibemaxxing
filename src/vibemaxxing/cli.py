@@ -33,6 +33,7 @@ from vibemaxxing import (
     launch,
     mcp_oauth,
     oauth,
+    release,
     route,
     statusline,
     store,
@@ -53,7 +54,7 @@ from vibemaxxing.errors import (
 from vibemaxxing.httpclient import BRIDGE_HOSTS, CURSOR_HOSTS, HttpClient, UrllibClient
 from vibemaxxing.keychain import KeychainPort, default_port
 from vibemaxxing.models import AccountState
-from vibemaxxing.pool import Policy, dry_in
+from vibemaxxing.pool import Policy, Step, dry_in
 from vibemaxxing.redact import Secret, err, install_excepthook, out
 from vibemaxxing.web import LOOPBACK
 
@@ -77,6 +78,9 @@ class Context:
     # The store Claude Code keeps a second config dir's login in, for `vibe add
     # --from-config-dir`. Read only; a field so a test hands it a fake.
     port_for: Callable[[Path], KeychainPort] = keychain.config_dir_port
+    # The user's processes with their environment, for `vibe release`: a session running in a
+    # config dir holds that dir's login. A field so a test hands it a fake listing.
+    processes: release.ProcessPort = field(default_factory=release.PsProcesses)
     argv0: str = field(default="vibe")
     # Cursor: the agent binary, the client that may talk to Cursor's API and nothing else,
     # and where the agent keeps its login token. Fields so a test hands it fakes.
@@ -672,30 +676,31 @@ def cmd_auto_include(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
-def _render_policy(policy: Policy) -> str:
-    steps = " -> ".join(
-        f"{step.account} until {step.until}%"
-        + (
-            f" (weekly cap Mon-Sun {'/'.join(map(str, step.weekly_cap))}%)"
-            if step.weekly_cap
-            else ""
-        )
-        for step in policy.steps
-    )
+def _render_one_step(policy: Policy, step: Step, now_s: float) -> str:
+    text = f"{step.account} until {step.until}%"
+    if step.weekly_budget:
+        text += f" (weekly: today's budget {policy.budget.today(now_s)}%)"
+    elif step.weekly_cap:
+        text += f" (weekly cap Mon-Sun {'/'.join(map(str, step.weekly_cap))}%)"
+    return text
+
+
+def _render_policy(policy: Policy, now_s: float) -> str:
+    steps = " -> ".join(_render_one_step(policy, step, now_s) for step in policy.steps)
     text = f"ordered: {steps}, then earliest reset"
     if policy.block_models:
         text += f"; {', '.join(policy.block_models)} weekly rows count too"
     return text
 
 
-def _render_step(policy: Policy, index: int | None) -> str:
+def _render_step(policy: Policy, index: int | None, now_s: float) -> str:
     if index is None:
         return "none has room - earliest reset"
     step = policy.steps[index]
-    return f"{index + 1} of {len(policy.steps)}: {step.account} until {step.until}%"
+    return f"{index + 1} of {len(policy.steps)}: {_render_one_step(policy, step, now_s)}"
 
 
-def _render_status(status: auto.Status) -> str:
+def _render_status(status: auto.Status, now_s: float) -> str:
     settings = status.settings
     policy = settings.policy
     live = status.live or "unknown"
@@ -721,13 +726,13 @@ def _render_status(status: auto.Status) -> str:
     known = status.live is not None and status.live == status.active
     return (
         f"auto-switch  {'on' if settings.auto_switch else 'off'}\n"
-        f"policy       {_render_policy(policy)}\n"
+        f"policy       {_render_policy(policy, now_s)}\n"
         f"cooldown     {settings.cooldown_s}s\n"
         f"excluded     {', '.join(settings.excluded) or 'none'}\n"
         f"live         {live}\n"
-        f"step         {_render_step(policy, status.step) if known else 'unknown'}\n"
+        f"step         {_render_step(policy, status.step, now_s) if known else 'unknown'}\n"
         f"last switch  {last}\n"
-        f"next step    {_render_step(policy, status.next_step) if known else 'unknown'}\n"
+        f"next step    {_render_step(policy, status.next_step, now_s) if known else 'unknown'}\n"
     )
 
 
@@ -749,7 +754,7 @@ def cmd_auto_status(args: argparse.Namespace, ctx: Context) -> int:
             next_step=None if status.next_step is None else status.next_step + 1,
         ),
         as_json=args.json,
-        human=_render_status(status),
+        human=_render_status(status, ctx.now_s),
     )
     return 0
 
@@ -818,6 +823,24 @@ def cmd_remove(args: argparse.Namespace, ctx: Context) -> int:
         _action("remove", alias=args.alias),
         as_json=args.json,
         human=f'removed "{args.alias}"\n',
+    )
+    return 0
+
+
+def cmd_release(args: argparse.Namespace, ctx: Context) -> int:
+    """Move a config dir's login into vibe's store; the dir's own item is deleted."""
+    account, directory = release.release(
+        ctx.root,
+        args.alias,
+        port_for=ctx.port_for,
+        default_port=ctx.port,
+        processes=ctx.processes,
+        now_ms=int(ctx.now_s * 1000),
+    )
+    _emit(
+        _action("release", alias=account.alias, config_dir=str(directory)),
+        as_json=args.json,
+        human=release.released_line(account.alias, directory, Path.home()) + "\n",
     )
     return 0
 
@@ -1233,6 +1256,8 @@ Status line
 Housekeeping
   vibe alias old new          rename an account
   vibe remove work            forget an account (the login itself is not revoked)
+  vibe release work           move a --from-config-dir login into vibe, so auto-switch can
+                              use it; the dir's own login is deleted
   vibe usage --once           fetch the numbers once and print them
   vibe --version              the installed version
 
@@ -1412,6 +1437,14 @@ def build_parser() -> argparse.ArgumentParser:
     remove.add_argument("alias")
     _add_json(remove)
     remove.set_defaults(handler=cmd_remove)
+
+    give_back = subs.add_parser(
+        "release",
+        help="move a config dir's login (--from-config-dir) into vibe; the dir keeps none",
+    )
+    give_back.add_argument("alias")
+    _add_json(give_back)
+    give_back.set_defaults(handler=cmd_release)
 
     rename = subs.add_parser("alias", help="rename an account")
     rename.add_argument("old")
