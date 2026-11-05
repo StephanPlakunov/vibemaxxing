@@ -78,6 +78,10 @@ class FakeKeychain:
         self.log.append("keychain.write")
         self.blob = blob
 
+    def delete(self) -> None:
+        self.log.append("keychain.delete")
+        self.blob = None
+
 
 def make_credential(
     *,

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Final
 
 from vibemaxxing import cursor, envelope, oauth, pool, route, statusline, store, usage
+from vibemaxxing.credentials import parse_blob
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, UsageError, VibeError
 from vibemaxxing.fsutil import FILE_MODE, private_dir, write_private
@@ -58,6 +59,15 @@ OSASCRIPT_TIMEOUT_S: Final = 5.0
 # Preferred when installed (Homebrew's path): its notifications carry their own title and
 # do not show up as Script Editor's.
 TERMINAL_NOTIFIER_BIN: Final = "/opt/homebrew/bin/terminal-notifier"
+# A tick does not switch away from the live account while its access token ends within this
+# long. A running Claude Code session keeps the login it read for up to 30 s after a switch
+# (its Keychain cache, Claude Code 2.1.318) and renews a token in the minutes before it ends;
+# a renewal in that window writes the outgoing account back over the incoming one and spends
+# the refresh token vibe just stored for it. Longer than both together.
+RENEWAL_GUARD_S: Final = 10 * 60
+# ...unless the token ended longer ago than this: a session using it would have renewed it,
+# so none is, and the switch may go ahead.
+RENEWAL_IDLE_S: Final = 15 * 60
 
 
 def settings_path(root: Path) -> Path:
@@ -128,14 +138,34 @@ def _parse_policy(raw: object) -> Policy | None:
         weekly_cap = _weekly_cap(step.get("weekly_cap"))
         if weekly_cap is None:
             return None
-        parsed.append(Step(account, until, weekly_cap))
+        weekly_budget = step.get("weekly_budget", False)
+        # Both on one step would be two weekly limits, and which one was meant is a guess.
+        if not isinstance(weekly_budget, bool) or (weekly_budget and weekly_cap):
+            return None
+        parsed.append(Step(account, until, weekly_cap, weekly_budget))
     return Policy(tuple(parsed), tuple(str(model).strip() for model in models))
+
+
+def _budget(parsed: dict[str, object], root: Path) -> pool.Budget | None:
+    """Today's budget for a `weekly_budget` step: the routing's, or None when it is wrong.
+
+    The same `weekday_budget` and `timezone` `vibe run auto` routes by. A routing that is
+    wrong is not read as the defaults here either: a step would then leave an account at a
+    budget nobody chose.
+    """
+    try:
+        routing = route.parse_routing(parsed.get("routing"), settings_path(root))
+    except UsageError:
+        return None
+    return pool.Budget(routing.weekday_budget, routing.timezone)
 
 
 def _step_document(step: Step) -> dict[str, object]:
     document: dict[str, object] = {"account": step.account, "until": step.until}
     if step.weekly_cap:
         document["weekly_cap"] = list(step.weekly_cap)
+    if step.weekly_budget:
+        document["weekly_budget"] = True
     return document
 
 
@@ -166,6 +196,9 @@ def _parse_settings(root: Path) -> Settings | None:
     cooldown = _int(parsed.get("cooldown_s", DEFAULT_COOLDOWN_S))
     excluded = parsed.get("excluded", [])
     policy = _parse_policy(parsed.get("policy"))
+    if policy is not None and any(step.weekly_budget for step in policy.steps):
+        budget = _budget(parsed, root)
+        policy = None if budget is None else replace(policy, budget=budget)
     if (
         not isinstance(enabled, bool)
         or threshold is None
@@ -344,6 +377,31 @@ def _stay(reason: str) -> TickResult:
     return TickResult(f"stay: {reason}", switched=False)
 
 
+def renewal_wait(port: KeychainPort, live: str, now_s: float) -> str | None:
+    """Why a switch away from ``live`` must wait for its login's renewal; None when it need not.
+
+    Read from the port, never from the account file: Claude Code renews the live login in the
+    Keychain, and the file only catches up at the next switch. Nothing is refreshed here. A
+    port that cannot be read now (it could a moment ago) is a wait: not knowing is no licence.
+    """
+    try:
+        raw = port.read()
+        expires_s = parse_blob(raw).expires_at_ms / 1000 if raw is not None else None
+    except VibeError:
+        expires_s = None
+    if expires_s is None:
+        return f"waiting: could not read {live}'s login to see whether it is being renewed"
+    left_s = expires_s - now_s
+    if left_s > RENEWAL_GUARD_S or -left_s > RENEWAL_IDLE_S:
+        return None
+    if left_s >= 0:
+        return f"waiting: {live}'s login renews within {RENEWAL_GUARD_S // 60} min"
+    return (
+        f"waiting: {live}'s login ended {int(-left_s) // 60} min ago and a session may be "
+        "renewing it"
+    )
+
+
 def tick(
     root: Path,
     *,
@@ -403,6 +461,9 @@ def _tick(
     if decision.action == "stay" or decision.target is None:
         return _stay(decision.reason), live
     target = decision.target
+    waiting = renewal_wait(port, live, now_s)
+    if waiting is not None:
+        return _stay(waiting), live
 
     try:
         oauth.ensure_usable(root, target, client, now_ms=int(now_s * 1000))
@@ -418,6 +479,7 @@ def _tick(
 
     rows = next((v.summary.rows for v in views if v.alias == live and v.summary is not None), ())
     limit = decision.limit if decision.limit is not None else settings.threshold
+    threshold = decision.threshold if decision.threshold is not None else limit
     models = settings.policy.block_models
     line = f"switched {live} -> {target}: {decision.reason}"
     notice = f"Switched to {target}: {decision.reason}"
@@ -429,7 +491,14 @@ def _tick(
                 target,
                 now_s,
                 decision.reason,
-                pool.limited_until(rows, limit, now_s, models=models, weekly=decision.weekly),
+                pool.limited_until(
+                    rows,
+                    threshold,
+                    now_s,
+                    models=models,
+                    weekly=decision.weekly,
+                    timezone=decision.zone,
+                ),
                 limit,
             ),
         )

@@ -63,6 +63,7 @@ src/vibemaxxing/
   cursor_usage.py  F   the Cursor seat's usage and its availability rule (fork, §19)
   route.py         F   routing by need, the weekday budget, settings.json `routing` (fork, §19)
   launch.py        F   `vibe run` for Cursor and `auto`: readings, plans (fork, §19)
+  release.py       F   `vibe release`: a config dir's login back into vibe (fork, §18)
   models.py        B   AccountState, Sample      [shared, frozen]
   errors.py        B   error taxonomy, exit codes [shared, frozen]
   redact.py        B   Secret, scrub, excepthook  [shared, frozen]
@@ -502,6 +503,7 @@ SECURITY_TIMEOUT_S: Final = 10.0
 class KeychainPort(Protocol):
     def read(self) -> str | None: ...              # None when absent
     def write(self, blob: str) -> None: ...
+    def delete(self) -> None: ...                  # (fork) absent is fine; only `vibe release`
 
 class MacKeychain:                                 # service above, account = getpass.getuser()
 class FileKeychain:                                # ~/.claude/.credentials.json, 0600
@@ -513,6 +515,9 @@ def default_port() -> KeychainPort: ...            # MacKeychain on darwin, else
   exit code 44 means "absent" and returns `None`; strip exactly one trailing newline.
 - `MacKeychain.write` → `security add-generic-password -U -a <user> -s <service> -w <blob>`,
   with the blob in **argv**. One path, no fallback.
+- (fork) `MacKeychain.delete` → `security delete-generic-password -a <user> -s <service>`; exit 44
+  (absent) is success. `FileKeychain.delete` unlinks the file. Only `vibe release` calls it, and only
+  on a config dir's own item, never on the default one.
 
 ### Why argv, measured 2026-09-15
 
@@ -1281,6 +1286,7 @@ vibe auto tick [--json]
 vibe auto install [--json]               macOS only
 vibe auto uninstall [--json]             macOS only
 vibe add [alias] --from-config-dir DIR [--json]   (fork, §18)
+vibe release <alias> [--json]                     (fork, §18)
 vibe statusline                                   (fork, §18)
 ```
 
@@ -1437,7 +1443,8 @@ Order: settings (off: stay, before anything is fetched) → `store.live_alias` (
 stay) → the pointer check → `collect` with the live account `fast` when its cached answer
 is at 90% on a trigger row (§14) → `pool.decide` → `oauth.ensure_usable` → a re-check that
 the live account and `active` are still the ones decided about → `store.switch` →
-`auto.json` → the notification. It prints one line, `stay: <reason>` or
+`auto.json` → the notification. (fork) Between the decision and `ensure_usable` sits the
+renewal wait (below). It prints one line, `stay: <reason>` or
 `switched <from> -> <to>: <reason>`, and exits 0 in every case that is not a bug.
 
 - **The pointer check.** If `active` is not the live account the tick runs `store.switch`
@@ -1455,6 +1462,17 @@ the live account and `active` are still the ones decided about → `store.switch
   raises when `security` fails, is not caught here: it reaches `cli.main`'s handler, which
   prints the message and its recovery and exits non-zero, so a scheduler sees a port or
   store that is broken rather than a quiet stay. Anything else is a bug and propagates.
+- (fork) **The renewal wait.** `auto.renewal_wait` reads the live login from the port (never the
+  account file, never a refresh) and the tick stays while its access token ends within
+  `RENEWAL_GUARD_S` (600 s): `stay: waiting: <live>'s login renews within 10 min`, or `... ended
+  <n> min ago and a session may be renewing it` up to `RENEWAL_IDLE_S` (900 s) after its end. Past
+  that no session uses it (one would have renewed it) and the switch goes ahead. A port that cannot
+  be read or parsed at this point is a wait. Why: after a switch a running session may hold the
+  outgoing login for up to 30 s (Claude Code 2.1.318's Keychain cache, from its code, not measured);
+  a renewal then writes the outgoing account back over the incoming one, and `store.switch` has just
+  resynced the outgoing file from the port, so that stored refresh token is spent. The wait applies
+  to every switch away, also leaving an account at its limit; not to the pointer repair (same
+  account), `vibe switch` or `vibe auto undo`.
 - **The live account is re-checked before the write.** `collect` and a refresh can take
   seconds, and a person may have run `vibe switch` meanwhile. If `store.live_alias` or
   `active` no longer names the account the decision was about, the tick stays
@@ -1577,6 +1595,24 @@ A `vibe switch` is not recorded, so a person who switches to an account the poli
 not choose is switched back by the next tick (after the cooldown, when one applies).
 `vibe auto off` holds an account by hand.
 
+(fork) **`"weekly_budget": true`** (a boolean; not together with `weekly_cap`) makes a step's
+weekly limit `min(until, today's budget)`: `pool.Budget(weekdays, timezone)` on `Policy.budget`,
+which `auto.read_settings` fills from the `routing` member (`route.parse_routing`; `weekday_budget`
+and `timezone`, defaults `pool.DEFAULT_BUDGET` = `route.DEFAULT_BUDGET`, Europe/Berlin). A routing
+that is wrong while a step has the flag makes the whole file the defaults; without the flag routing
+is not read here. `policy_document` writes the flag back and never the budget. Only the
+`weekly_all` row uses it; the session row and `block_models` rows use `until`. Leaving the live
+account at such a step: when a row is at `until`, `Decision.limit` is `until` as always; when only
+the weekly row is over the budget, `limit` is the budget, `threshold` is `until` and `zone` the
+budget's timezone, so the tick stores `auto.json` `limit` = the budget and `until` = the next
+midnight in that zone (`limited_until(..., threshold, weekly=budget, timezone=zone)`). The fence
+then holds only at steps up to the budget: the account's later steps stay open, and the budget
+check itself keeps it out of the budget step until the budget allows it. `_earliest_reset` reads
+each account at its loosest step (highest `until`, then highest weekly limit), with that step's
+weekly limit and zone. The stay reason is `<live> is below <until>% and today's <n>% weekly budget
+(step i of n)`; leaving, `<live> at <n>% weekly, over today's <n>% weekly budget`. `vibe auto
+status` renders the step `main until 99% (weekly: today's budget 80%)`.
+
 Fast polling (§14): with a policy, the live account is `fast` while a counted row is within
 `FAST_POLL_MARGIN` (9) below one of its own step limits and not over it.
 
@@ -1635,6 +1671,26 @@ refresher, Claude Code in that dir, and vibe never POSTs a refresh for it:
   token that has ended (buffer 0); `_fresh_token` (`vibe run`) keeps `EXPIRY_BUFFER_MS`.
 - An account vibe owns still runs on `CLAUDE_CODE_OAUTH_TOKEN`; an interactive `claude` on it prints when that token
   ends and that a longer session needs a config dir of its own.
+
+### `vibe release ALIAS` — `release.py` (fork)
+
+The inverse of `--adopt-stored-login`, for one shared login. For an account with `config_dir`:
+refuse unless it has one (`UsageError`, `vibe list`), the active or live account (`UsageError`);
+then under the alias's refresh claim: re-read the account (changed meanwhile: refuse), refuse while
+any process runs with `CLAUDE_CONFIG_DIR` equal to the dir (`release.ProcessPort`, real one
+`PsProcesses`: `/bin/ps -E -o pid=,command= -U <uid>`, run without our own `CLAUDE_CONFIG_DIR`;
+`release.holders` compares the values resolved, counts a relative one as a match and skips this
+pid; the refusal names the PIDs; a list that cannot be read refuses, fail closed). Read the dir's
+item (`port_for(dir)`; none: `NeedsLoginError`), require `<dir>/.claude.json` `accountUuid` to equal
+the stored uuid (`UsageError`), refuse a lapsed login or one recorded rejected with the same refresh
+token (`NeedsLoginError`). Write the account with that credential, `config_dir` cleared, state `ok`;
+then `delete` the item and read it back. Gone (even when the delete raised): the stash is deleted and
+the command prints `released <alias>: vibe holds its login now; <dir> has no login any more`
+(`--json`: `action` `release`, `alias`, `config_dir`). Still there: the account file is written back
+exactly as it was (`StoreError`, exit 5). Not readable after the delete: the account goes back to the
+dir with the dir's credential in the file (`StoreError`), since a second refresher is the one
+outcome it must not leave. `<dir>/.claude.json` and the default login are never touched; no request.
+`cli.Context.processes` carries the port.
 
 ### `status.json` and `vibe statusline`
 

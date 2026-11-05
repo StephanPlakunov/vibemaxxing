@@ -33,6 +33,22 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **One shared login.** `vibe release ALIAS` moves a `--from-config-dir` login back into vibe: under the refresh claim
+  it reads the dir's own Keychain item, checks `<dir>/.claude.json` names the stored account, refuses a lapsed or
+  rejected login, writes the account file without `config_dir`, then deletes the dir's item (`KeychainPort.delete`,
+  `security delete-generic-password`), so one login lives in one place only; a failed delete puts the file back. It
+  refuses while any process runs with `CLAUDE_CONFIG_DIR=<dir>` (`ps -E`, PIDs named; an unreadable list refuses too).
+  `<dir>/.claude.json` is left alone. `--json` supported.
+- **A policy step with `"weekly_budget": true`** stops at today's routing budget on the weekly row
+  (`routing.weekday_budget` in `routing.timezone`, default 20/40/60/80/100/100/100 Berlin) and at `until` on the
+  others. An account left over the budget alone is recorded at the budget, so it returns as soon as the budget allows
+  (Berlin midnight at the latest, after the cooldown) and its later steps stay open. `vibe auto status` shows
+  `main until 99% (weekly: today's budget 80%)`.
+- **The tick waits while the live login is about to renew.** No switch away while the live access token (read from
+  the Keychain, never refreshed by vibe) ends within 10 minutes, unless it ended more than 15 minutes ago: a session
+  still holding the outgoing login after the switch (Claude Code's 30 s Keychain cache) would renew it and write it
+  back over the incoming one, spending the refresh token vibe just stored. `stay: waiting: <live>'s login renews
+  within 10 min`.
 - **`vibe add ALIAS --from-config-dir DIR --adopt-stored-login`** hands the login vibe has stored for ALIAS to a config
   dir without a browser: it is written into the dir's own Claude Code Keychain item and `<dir>/.claude.json`, and the
   account is marked as the dir's *before* Claude Code can refresh it (checked again under the refresh claim, so no

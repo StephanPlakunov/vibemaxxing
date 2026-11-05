@@ -5,8 +5,8 @@ Claude Code scopes the item to a hashed service name and ``NO_KEYCHAIN=1`` does
 not reliably produce a plaintext file — measured. We swap credentials, we do not
 isolate config directories, so only the fixed-name item is ever written.
 
-The one exception is a read: `vibe add --from-config-dir <dir>` takes over a login
-Claude Code keeps for a config dir the person names, from that dir's own item.
+The exceptions are a config dir's own item, which `vibe add --from-config-dir <dir>` reads,
+`--adopt-stored-login` writes, and `vibe release` reads and then deletes.
 """
 
 from __future__ import annotations
@@ -35,6 +35,10 @@ class KeychainPort(Protocol):
     def read(self) -> str | None: ...
 
     def write(self, blob: str) -> None: ...
+
+    # Only `vibe release` calls it, on a config dir's own item: the login moves into vibe's
+    # store, and a second copy left behind would be a second refresher of one lineage.
+    def delete(self) -> None: ...
 
 
 class MacKeychain:
@@ -91,6 +95,25 @@ class MacKeychain:
                 _RECOVERY,
             )
 
+    def delete(self) -> None:
+        """Remove the item; one that is not there is already what was asked for."""
+        result = self._run(
+            [
+                SECURITY_BIN,
+                "delete-generic-password",
+                "-a",
+                getpass.getuser(),
+                "-s",
+                self.service,
+            ]
+        )
+        if result.returncode not in (0, SECURITY_ABSENT_CODE):
+            raise VibeError(
+                f"the macOS Keychain refused to delete {self.service!r} "
+                f"(security exit {result.returncode})",
+                _RECOVERY,
+            )
+
     def _run(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         try:
             return subprocess.run(
@@ -142,6 +165,16 @@ class FileKeychain:
                 _RECOVERY,
             ) from None
 
+    def delete(self) -> None:
+        path = self._path()
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise VibeError(
+                f"could not delete {path}: {exc.__class__.__name__}",
+                _RECOVERY,
+            ) from None
+
 
 def default_port() -> KeychainPort:
     # Bound to a local str on purpose: mypy resolves a bare `sys.platform`
@@ -186,7 +219,10 @@ def config_dir_location(config_dir: Path) -> str:
 
 
 def config_dir_port(config_dir: Path) -> KeychainPort:
-    """The store Claude Code keeps the login for ``config_dir`` in. Only ever read."""
+    """The store Claude Code keeps the login for ``config_dir`` in.
+
+    Read by the import and the polls, written by `--adopt-stored-login`, deleted by `vibe release`.
+    """
     platform: str = sys.platform
     if platform == "win32":
         return default_port()  # raises: there is no Windows store
