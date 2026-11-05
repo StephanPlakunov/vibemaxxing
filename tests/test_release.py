@@ -492,3 +492,20 @@ def test_the_released_credential_round_trips(world: World) -> None:
     blob = credential_to_blob(store.read_account(world.root, "extra").credential)
 
     assert parse_blob(blob) == dir_credential()
+
+
+def test_only_claude_code_holds_the_dir_not_what_a_session_started() -> None:
+    from vibemaxxing.release import holders, is_claude_code
+
+    env = "CLAUDE_CONFIG_DIR=/Users/x/.claude-extra"
+    listing = "\n".join(
+        [
+            f"101 claude --mcp-config=/x.json {env}",
+            f"102 /Users/x/.local/share/claude/versions/2.1.318 --resume abc {env}",
+            f"103 /opt/homebrew/bin/python3 -I scripts/search_all.py {env}",
+            f"104 /bin/zsh -c source snapshot.sh {env}",
+            f"105 /usr/bin/python3 -m vibemaxxing bridge serve {env}",
+        ]
+    )
+    assert holders(listing, Path("/Users/x/.claude-extra"), own_pid=1) == (101, 102)
+    assert is_claude_code("claude -p hi") and not is_claude_code("python3 claude_helper.py")

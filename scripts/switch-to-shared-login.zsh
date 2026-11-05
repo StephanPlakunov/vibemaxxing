@@ -58,14 +58,14 @@ if [[ "${1:-}" == "--dry-run" ]]; then
   exit 0
 fi
 
-# 2. wait until every one of them is closed
-# --after-pid N: first wait until session N has exited (the one you restart), then close each other
-# session on extra by itself, but only once it has been idle for IDLE_S seconds (its conversation is
-# on disk by then; a busy one is never interrupted), with SIGTERM, the way closing its window would.
+# 2. close every Claude session on extra as soon as it is idle, one loop for all of them
+# Only Claude Code holds the login (a script or shell a session started merely inherits the
+# variable). An interactive session is closed with SIGTERM once it has been idle for IDLE_S seconds
+# (its conversation is on disk by then; a busy one is never interrupted); a session that starts
+# meanwhile is noted and handled the same way; a headless `claude -p` helper is left to finish.
+# --after-pid N first waits until session N has exited (the one you restart yourself).
 after=""
 [[ "${1:-}" == "--after-pid" ]] && after="${2:-}"
-# --close-idle: no session to wait for first; close every session on extra once it is idle.
-[[ "${1:-}" == "--close-idle" ]] && after="none"
 IDLE_S=30
 idle_for() {  # seconds session $1 has been idle, from its own state file; -1 if busy or unknown
   python3 -I - "$EXTRA/sessions/$1.json" <<'EOF2'
@@ -77,31 +77,48 @@ except Exception:
 print(int(time.time() - d.get("statusUpdatedAt", 0) / 1000) if d.get("status") == "idle" else -1)
 EOF2
 }
+claude_holders() {  # Claude Code processes running with CLAUDE_CONFIG_DIR=~/.claude-extra
+  ps -E -o pid=,command= -U "$(id -u)" 2>/dev/null | grep -F "CLAUDE_CONFIG_DIR=$EXTRA" \
+    | awk '{n=split($2,a,"/"); if (a[n]=="claude" || $2 ~ /\/claude\/versions\//) print $1}'
+}
+note() {  # remember session $1 for step 4, once
+  local f="$EXTRA/sessions/$1.json"
+  [[ -f "$f" ]] || return 1
+  python3 -I - "$f" "$NOTES" <<'EOF3'
+import json, sys
+d = json.load(open(sys.argv[1]))
+line = f"{d['sessionId']}\t{d['cwd']}\t{d.get('pid')}"
+known = open(sys.argv[2]).read().splitlines() if __import__("os").path.exists(sys.argv[2]) else []
+if not any(k.split("\t")[0] == d["sessionId"] for k in known):
+    open(sys.argv[2], "a").write(line + "\n")
+    print("  noted a new session:", d.get("name") or d["sessionId"])
+EOF3
+}
+touch "$HOME/.vibemaxxing/releasing-extra"  # `vibe run extra` refuses to start a session there now
+trap 'rm -f "$HOME/.vibemaxxing/releasing-extra"' EXIT
 if [[ -n "$after" ]]; then
-  if [[ "$after" != "none" ]]; then
-    say "Waiting until session $after has exited (restart it now)..."
-    while kill -0 "$after" 2>/dev/null; do sleep 2; done
-  fi
-  while IFS=$'\t' read -r sid cwd pid; do
-    [[ "$pid" == "$after" ]] && continue
-    kill -0 "$pid" 2>/dev/null || continue
-    print "  session $pid ($sid): waiting until it has been idle for ${IDLE_S}s"
-    while kill -0 "$pid" 2>/dev/null && (( $(idle_for "$pid") < IDLE_S )); do sleep 5; done
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -TERM "$pid" && print "  closed session $pid (idle; its conversation is kept)"
-      for _ in {1..20}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  say "Waiting until session $after has exited (restart it now)..."
+  while kill -0 "$after" 2>/dev/null; do sleep 2; done
+fi
+say "Closing each session on extra once it has been idle for ${IDLE_S}s (busy ones finish first)."
+while left=($(claude_holders)); (( ${#left} )); do
+  waiting=()
+  for pid in $left; do
+    if note "$pid" >/dev/null 2>&1 || [[ -f "$EXTRA/sessions/$pid.json" ]]; then
+      note "$pid"
+      if (( $(idle_for "$pid") >= IDLE_S )); then
+        kill -TERM "$pid" 2>/dev/null && print "  closed $(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1])).get("name") or "")' "$EXTRA/sessions/$pid.json" 2>/dev/null) (pid $pid; idle, conversation kept)"
+      else
+        waiting+=("$pid")
+      fi
+    else
+      waiting+=("$pid(headless)")
     fi
-  done < "$NOTES"
-fi
-left=($(holders))
-if (( ${#left} )); then
-  say "Close each of them now: type /exit in its window (the conversation is kept and reopened by this script)."
-  while left=($(holders)); (( ${#left} )); do
-    print -n "\r  still open: ${#left} process(es) (${left[*]})   "
-    sleep 3
   done
-  print
-fi
+  (( ${#waiting} )) && print -n "\r  waiting for: ${waiting[*]}            "
+  sleep 5
+done
+print
 say "All closed."
 
 # 3. move extra's login into vibemaxxing

@@ -468,6 +468,14 @@ def _config_dir_notes(svc: Services, alias: str, directory: str) -> list[str]:
     to, or one logged in as somebody else, would start a session on the wrong account.
     """
     path = Path(directory)
+    if (svc.root / f"releasing-{alias}").exists():
+        # scripts/switch-to-shared-login.zsh is moving this login out of its dir right now: a
+        # session started there would hold it up, or hold a second copy of it afterwards.
+        raise UsageError(
+            f'"{alias}" is moving to the shared login right now; start this as a shared-login '
+            "session instead",
+            "vibe run auto --no-needs -- claude",
+        )
     login = f"CLAUDE_CONFIG_DIR={path} claude"
     if svc.port_for(path).read() is None:
         raise NeedsLoginError(

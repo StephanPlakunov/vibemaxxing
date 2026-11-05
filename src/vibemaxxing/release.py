@@ -94,10 +94,12 @@ def _same_dir(value: str, directory: Path) -> bool:
 
 
 def holders(listing: str, directory: Path, *, own_pid: int) -> tuple[int, ...]:
-    """The pids in ``listing`` that run with CLAUDE_CONFIG_DIR set to ``directory``.
+    """The Claude Code processes in ``listing`` running with CLAUDE_CONFIG_DIR at ``directory``.
 
-    Paths are compared resolved (``~``, symlinks, a trailing slash). Not this process. A
-    command line that merely mentions the variable counts too: a false alarm costs a rerun.
+    Only Claude Code reads and renews the login in that dir; a background job a session started
+    (a script, a shell, a bridge) inherits the variable but never touches the login, so it does
+    not hold the release up. Paths are compared resolved (``~``, symlinks, a trailing slash). Not
+    this process.
     """
     found: list[int] = []
     for line in listing.splitlines():
@@ -105,11 +107,21 @@ def holders(listing: str, directory: Path, *, own_pid: int) -> tuple[int, ...]:
         if match is None:
             continue
         pid = int(match.group(1))
-        if pid == own_pid:
+        if pid == own_pid or not is_claude_code(match.group(2)):
             continue
         if any(_same_dir(value, directory) for value in _SETTING.findall(match.group(2))):
             found.append(pid)
     return tuple(found)
+
+
+def is_claude_code(command: str) -> bool:
+    """Whether a `ps` command line (argv, then the environment) is Claude Code itself."""
+    words = command.split()
+    head = words[:2]
+    return any(
+        Path(word).name == "claude" or "/claude/versions/" in word or "claude-code" in word
+        for word in head
+    )
 
 
 def _shown(directory: Path, home: Path) -> str:
