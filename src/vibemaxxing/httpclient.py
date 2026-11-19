@@ -18,6 +18,9 @@ ALLOWED_HOSTS: Final = frozenset({"claude.ai", "platform.claude.com", "api.anthr
 # The Cursor seat's usage, and nothing else. A second client with its own list, so the
 # Claude client can never be pointed at it and a Cursor token can never reach a Claude host.
 CURSOR_HOSTS: Final = frozenset({"api2.cursor.sh"})
+# The Codex plan's usage, and nothing else: ChatGPT's backend, where the Codex CLI itself asks.
+# Its own client, so a ChatGPT token can reach no other host and no other client reaches it.
+CODEX_HOSTS: Final = frozenset({"chatgpt.com"})
 # The bridge's upstreams (Slack's and Atlassian's own MCP servers) and their OAuth endpoints: one
 # more client with its own list, so the bridge's tokens can reach no other host.
 BRIDGE_HOSTS: Final = frozenset(

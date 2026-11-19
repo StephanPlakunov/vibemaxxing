@@ -7,6 +7,13 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Codex accounts** (`vibe add <alias> --kind codex`): the Codex CLI's ChatGPT login, read from its
+  `auth.json` (read only; vibe never refreshes or writes it), and its plan usage windows
+  (`GET chatgpt.com/backend-api/wham/usage`, the call the CLI's own `/status` makes) shown in `vibe list`,
+  `vibe list --json` (an additive `codex` array), the TUI and the web dashboard. Never a target of
+  `vibe switch`, auto-switch or `vibe run`; its own HTTP client reaches `chatgpt.com` only.
+  `docs/CONTRACT.md` section 21.
+
 - **Token broker** (`vibe broker on|off|status|mirror`): vibe is the only refresher of every Claude account it
   holds, and Claude Code reads mirrors (an access token and no refresh token, in each account's
   `~/.claude-<alias>` and in the default login for the live account). `vibe run main` / `vibe run extra` are fixed

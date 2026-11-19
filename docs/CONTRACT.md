@@ -1944,3 +1944,43 @@ secret. Not `--strict-mcp-config`; the user's own `--mcp-config` follows ours. N
 argument shapes, Slack's redirect-URL rules, Atlassian's
 acceptance of a loopback redirect and of these scopes, and the answers' exact shapes are from the
 vendors' documents and metadata only (`vibe bridge tools <upstream>` checks the names after a login).
+
+---
+
+## 21. Codex accounts (fork)
+
+A third account kind, `codex`, that vibe shows and never uses. Code: `codex.py`, `codex_usage.py`,
+`launch.read_codex` / `launch.codex_entry`, `cli._add_codex` / `cli._render_codex`, `tui.codex_content`,
+the `codexAsAccount` function of `index.html`.
+
+**Primary sources** (openai/codex at 1826d80, 19 Nov 2026): credentials, `codex-rs/login/src/auth/storage.rs`
+(`AuthDotJson`: `auth_mode`, `OPENAI_API_KEY`, `tokens.{id_token, access_token, refresh_token, account_id}`,
+file `$CODEX_HOME/auth.json`, keyring service "Codex Auth"), `codex-rs/config/src/types.rs`
+(`AuthCredentialsStoreMode`); usage, `codex-rs/backend-client/src/client/rate_limit_resets.rs`
+(`rate_limit_status_url`: `{base}/wham/usage` for the base `https://chatgpt.com/backend-api/`,
+`DEFAULT_CHATGPT_BASE_URL` in `codex-rs/model-provider/src/chatgpt_base_url.rs`),
+`codex-rs/model-provider/src/bearer_auth_provider.rs` (`Authorization: Bearer <access token>`,
+`chatgpt-account-id`), answer model `codex-rs/codex-backend-openapi-models` (`RateLimitStatusPayload`).
+OpenAI's docs for the login methods and storage: developers.openai.com/codex/auth.
+
+- **Marker**: `~/.vibemaxxing/codex/<alias>.json` `{schema, alias, kind: "codex", added_at, codex_home?}`
+  (0600). `codex_home` is `$CODEX_HOME` at `vibe add` time, absent for `~/.codex`. No credential, no
+  account file, no Keychain item. One alias namespace with Claude accounts, Cursor seats and `auto`.
+- **Login**: `auth.json` read only, 1 MB at most; JWT payloads decoded unverified for email, plan and
+  expiry, displayed only. vibe never refreshes it, never writes it. An API-key login or a file with no
+  access token has no usage. The access token is a `Secret`; its one `reveal()` is the `Authorization`
+  header in `codex_usage.fetch` (the seventh site; Cursor's is the sixth).
+- **Request**: `GET https://chatgpt.com/backend-api/wham/usage`, headers `Authorization`,
+  `ChatGPT-Account-ID`, `Accept`, vibe's own `User-Agent`. The client is `UrllibClient(CODEX_HOSTS)`
+  (`chatgpt.com` only), the Claude client cannot reach that host. Not sent once the access token's
+  `exp` is within 30 s.
+- **Cache**: the shared usage cache keyed by alias and the marker's `added_at`; payload is vibe's
+  normalised numbers, no token. Fresh for 120 s; an older answer is shown with its time up to 900 s.
+- **Envelope** (additive, only when an account exists, never in `accounts` or `pool`): `codex` is an
+  array of `{alias, kind, state ("ok"|"unknown"|"needs_login"|"api_key"), message, email, plan,
+  limit_reached, credits_balance, credits_unlimited, windows: [{label, percent, window_minutes,
+  resets_at}]}`. Labels follow the CLI (`5h`, `daily`, `weekly`, `monthly`, `annual`, else `usage` /
+  `secondary usage`; an extra metered limit is prefixed with its name).
+- **Never**: `vibe switch`, auto-switch, routing, `vibe run`, the status line and `status.json` do not
+  use a Codex account. `vibe remove` deletes the marker and its cache, never the CLI's login.
+

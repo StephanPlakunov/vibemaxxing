@@ -24,6 +24,8 @@ BLOCKED_PATHS: Final = (
     # The token broker's mirror dirs: a test that reached one would be next to a live login.
     REAL_HOME / ".claude-main",
     REAL_HOME / ".claude-extra",
+    # The Codex CLI's home: its auth.json is a live ChatGPT login.
+    REAL_HOME / ".codex",
 )
 BLOCKED_BINARIES: Final = ("security",)
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
@@ -18,6 +18,8 @@ from vibemaxxing import (
     bridge,
     broker,
     childenv,
+    codex,
+    codex_usage,
     credentials,
     cursor,
     cursor_translate,
@@ -31,7 +33,7 @@ from vibemaxxing.cursor import AgentPort
 from vibemaxxing.cursor_usage import CursorTokenPort, CursorUsage
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.errors import NeedsLoginError, NotFoundError, UsageError, VibeError
-from vibemaxxing.httpclient import HttpClient
+from vibemaxxing.httpclient import CODEX_HOSTS, HttpClient, UrllibClient
 from vibemaxxing.keychain import KeychainPort, config_dir_port
 from vibemaxxing.models import AccountState
 from vibemaxxing.poll import USAGE_FRESH_S
@@ -84,6 +86,10 @@ class Services:
     environ: Mapping[str, str]
     cwd: Path
     home: Path
+    # Codex: the client that may reach ChatGPT's usage endpoint only, and the CLI's login file
+    # (read only). Defaults so the many places that build Services for Claude and Cursor need not.
+    codex_client: HttpClient = field(default_factory=lambda: UrllibClient(CODEX_HOSTS))
+    codex_auth: codex.CodexAuthPort = field(default_factory=codex.FileAuth)
     # The Keychain item Claude Code keeps the login of a config dir in. Only ever read.
     port_for: Callable[[Path], KeychainPort] = config_dir_port
 
@@ -262,6 +268,135 @@ def cursor_entry(reading: CursorReading) -> dict[str, object]:
         else datetime.fromtimestamp(cycle, UTC).isoformat(timespec="seconds"),
         "available": reading.availability.ok,
         "available_why": reading.availability.why,
+    }
+
+
+# --- Codex ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CodexReading:
+    """One Codex account: what the CLI's login says and, when it could be read, the plan's usage."""
+
+    alias: str
+    # "ok" (numbers), "unknown" (a login but no numbers), "needs_login" (no usable login),
+    # "api_key" (the CLI uses an API key: there is no plan to read).
+    state: str
+    email: str | None
+    plan: str | None
+    usage: codex_usage.CodexUsage | None
+    # Why there are no (fresh) numbers, or "from HH:MM" for a cached answer; "" for a fresh one.
+    note: str
+    fetched_at: float | None = None
+
+
+def _clock(at_s: float) -> str:
+    return datetime.fromtimestamp(at_s).strftime("%H:%M")
+
+
+def read_codex(svc: Services, alias: str, *, fresh: bool = False) -> CodexReading:
+    """One Codex account: the CLI's login and its plan usage. Never refreshes, never writes it.
+
+    A cached answer is used for two minutes. When the access token has ended (the CLI renews it
+    when it runs; vibe never does, a second refresher would spend the CLI's refresh token) or the
+    request fails, an answer up to 15 minutes old is shown with its time, and nothing older.
+    """
+    marker = codex.read_marker(svc.root, alias)
+    login = svc.codex_auth.read(marker.codex_home)
+    if login is None:
+        return CodexReading(alias, "needs_login", None, None, None, f"run: {codex.LOGIN_CMD}")
+    if login.auth_mode == codex.AUTH_MODE_API_KEY or not login.usable:
+        why = (
+            "signed in with an API key: no plan usage to read"
+            if login.auth_mode == codex.AUTH_MODE_API_KEY
+            else f"no ChatGPT login in auth.json; run: {codex.LOGIN_CMD}"
+        )
+        state = "api_key" if login.auth_mode == codex.AUTH_MODE_API_KEY else "needs_login"
+        return CodexReading(alias, state, login.email, login.plan, None, why)
+    cached = store.read_usage_cache(svc.root, alias)
+    if cached is not None and cached.added_at != marker.added_at:
+        cached = None
+    age = None if cached is None or cached.fetched_at is None else svc.now_s - cached.fetched_at
+    held = (
+        None
+        if cached is None or cached.payload is None
+        else codex_usage.usage_from_payload(cached.payload)
+    )
+    if not fresh and held is not None and age is not None and 0 <= age < codex_usage.FRESH_S:
+        return CodexReading(
+            alias,
+            "ok",
+            login.email,
+            held.plan or login.plan,
+            held,
+            "",
+            cached.fetched_at if cached else None,
+        )
+    ended = (
+        login.expires_at is not None and login.expires_at <= svc.now_s + codex_usage.EXPIRY_SKEW_S
+    )
+    if ended:
+        at = _clock(login.expires_at or 0)
+        why = f"the Codex login's token ended {at}; run `codex` to renew it"
+        usage = None
+    else:
+        usage, why = codex_usage.fetch(svc.codex_client, login)
+    if usage is not None:
+        store.write_usage_cache(
+            svc.root,
+            alias,
+            store.UsageCache(
+                marker.added_at, svc.now_s, codex_usage.usage_to_payload(usage), None, 0, None
+            ),
+        )
+        return CodexReading(
+            alias, "ok", login.email, usage.plan or login.plan, usage, "", svc.now_s
+        )
+    if (
+        held is not None
+        and cached is not None
+        and cached.fetched_at is not None
+        and age is not None
+        and 0 <= age < codex_usage.STALE_S
+    ):
+        return CodexReading(
+            alias,
+            "ok",
+            login.email,
+            held.plan or login.plan,
+            held,
+            f"{why}; showing {_clock(cached.fetched_at)}",
+            cached.fetched_at,
+        )
+    return CodexReading(alias, "unknown", login.email, login.plan, None, why)
+
+
+def codex_entry(reading: CodexReading) -> dict[str, object]:
+    """The `codex` member of the envelope for one account; every key present, null if unknown."""
+    usage = reading.usage
+    windows: list[dict[str, object]] = []
+    for window in usage.windows if usage is not None else ():
+        windows.append(
+            {
+                "label": window.label,
+                "percent": round(window.used_percent),
+                "window_minutes": window.window_minutes,
+                "resets_at": None
+                if window.resets_at_s is None
+                else datetime.fromtimestamp(window.resets_at_s, UTC).isoformat(timespec="seconds"),
+            }
+        )
+    return {
+        "alias": reading.alias,
+        "kind": codex.KIND_CODEX,
+        "state": reading.state,
+        "message": reading.note or None,
+        "email": reading.email,
+        "plan": reading.plan,
+        "limit_reached": usage.limit_reached if usage is not None else None,
+        "credits_balance": usage.credits_balance if usage is not None else None,
+        "credits_unlimited": usage.credits_unlimited if usage is not None else None,
+        "windows": windows,
     }
 
 
@@ -499,6 +634,12 @@ def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags)
         raise UsageError("vibe run needs a command after --", "vibe run work -- claude")
     if alias == AUTO:
         return _plan_auto(svc, command, flags)
+    if codex.is_codex(svc.root, alias):
+        raise UsageError(
+            f'"{alias}" is a Codex account: vibe shows its usage and does not start Codex or '
+            "Claude Code on it",
+            "codex",
+        )
     if cursor.is_cursor(svc.root, alias):
         if flags.claude_only:
             raise UsageError(

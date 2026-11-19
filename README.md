@@ -558,6 +558,38 @@ no output: seen live); `vibe run cursor --trust-workspace` passes `--trust`, and
 on its own. In a headless run the Slack MCP answered "needs auth" even though the interactive agent
 is logged in to it, so check `--needs` runs on Cursor before relying on them.
 
+## Codex accounts
+
+Fork feature. A Codex account (the OpenAI Codex CLI, signed in with ChatGPT) is a third kind of
+account that vibe only **shows**: its plan usage appears in `vibe list`, `vibe list --json`, the
+TUI and the web dashboard next to the Claude and Cursor accounts.
+
+```
+curl -fsSL https://chatgpt.com/codex/install.sh | sh   # OpenAI's documented install on macOS and Linux
+codex login                                            # once, in the browser; Codex keeps that login
+vibe add zvoove-codex --kind codex                     # stores a marker, no credential
+vibe list                                              # the plan's 5h and weekly windows
+```
+
+vibe reads the Codex CLI's own `auth.json` (`$CODEX_HOME/auth.json`, default `~/.codex/auth.json`),
+**read only**, and asks ChatGPT's backend what the CLI's own `/status` asks:
+`GET https://chatgpt.com/backend-api/wham/usage` with the login's access token and account id. It
+shows each window the plan reports (5h, weekly, any extra metered limit), when it resets, the plan,
+and the credits balance. Rules:
+
+- **vibe never refreshes or writes the Codex login.** The CLI renews its own tokens when it runs; a
+  second refresher would spend the refresh token the CLI holds. Once the access token has ended, vibe
+  sends nothing and shows the last numbers (up to 15 minutes old) with the time and "run `codex` to
+  renew it".
+- **A Codex account is never a target** of `vibe switch`, auto-switch, routing or `vibe run`: it has
+  no Claude Code login. It is in the `codex` array of the envelope, never in `accounts` or the pool.
+- **Only the file store works.** If the CLI keeps its login in the OS keyring
+  (`cli_auth_credentials_store = "keyring"`, or `auto` where the keyring is available) there is no
+  `auth.json` to read; `vibe add` says so. An API-key login has no plan usage: the row says that.
+- The endpoint is the CLI's own and not a documented API. An answer in another shape reads as
+  "unknown", never as a number.
+- Not on the status line yet.
+
 ## The connector bridge (`vibe-bridge`)
 
 A session on the extra account has no Slack or Atlassian connector. `vibe bridge serve` is a small
