@@ -158,7 +158,7 @@ def test_a_command_that_is_not_claude_also_gets_the_scrubbed_environment(
 
 
 def test_auto_that_picks_cursor_scrubs_too(world: World) -> None:
-    auto_world(world, main_weekly=90)
+    auto_world(world, main_weekly=100)
 
     world.main("run", "auto", "--needs", "slack", "--", "claude", "-p", "hi", "--model", "haiku")
 
@@ -198,7 +198,7 @@ def test_a_stale_extra_token_never_decides_the_account(
     assert "CLAUDE_CONFIG_DIR" not in seen and "ANTHROPIC_API_KEY" not in seen
     assert seen["GH_TOKEN"] == SECRETS["GH_TOKEN"]  # Claude Code on main keeps the person's own
     err = capsys.readouterr().err
-    assert err == "vibemaxxing: auto picked main: 10% < 40%\n" and "EXTRATOKEN" not in err
+    assert err == "vibemaxxing: auto picked main\n" and "EXTRATOKEN" not in err
 
 
 def test_the_live_login_runs_without_an_override_only_when_nothing_is_inherited(

@@ -163,7 +163,7 @@ def test_a_cursor_run_never_gets_the_bridge_explicit_or_through_auto(
     log_in(world, SLACK, ATLASSIAN)
 
     world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku")
-    auto_world(world, main_weekly=90)
+    auto_world(world, main_weekly=100)
     world.main("run", "auto", "--needs", "slack", "--", "claude", "-p", "y", "--model", "haiku")
 
     err = capsys.readouterr().err

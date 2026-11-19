@@ -31,10 +31,18 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- **vibe's own pacing budget** (`weekly_budget` on a policy step, `routing.weekday_budget` and
+  `routing.timezone`, the `budget` flag of a routing step, the "75% < 80%" text of `vibe run auto`).
+  Stephan, 19 Nov: the limits are the accounts' own, 1:1 and live. vibe shows and switches only on the windows and
+  limits a provider reports for that account: Claude's session and weekly rows, an enterprise seat's spend, Cursor's
+  included and on-demand limits, Codex's windows; a day or week budget appears only when the account has one. A
+  step switches at its `until` (default 99%), as before. The old keys in settings.json are still accepted and
+  ignored (a step that had `weekly_budget: true` now switches at `until` only). Routing reads each account's
+  health (spent, unknown, dead) and no weekday.
 - **vibe's own spending and usage caps.** Cursor on-demand is held to exactly the limit Cursor reports; when
   Cursor reports none, vibe applies none (`vibe list` says "no limit reported") instead of its old $250 ceiling
   (`routing.cursor_cap_cents`), and the $10 margin (`routing.cursor_margin_cents`) is gone. A policy step's
-  `weekly_cap` (a fixed percent per weekday) is gone too; `weekly_budget` and `routing.weekday_budget` stay.
+  `weekly_cap` (a fixed percent per weekday) is gone too, and so is the weekday budget (above).
   The old keys in settings.json are still accepted and ignored.
 
 ### Changed
@@ -69,11 +77,6 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `security delete-generic-password`), so one login lives in one place only; a failed delete puts the file back. It
   refuses while any process runs with `CLAUDE_CONFIG_DIR=<dir>` (`ps -E`, PIDs named; an unreadable list refuses too).
   `<dir>/.claude.json` is left alone. `--json` supported.
-- **A policy step with `"weekly_budget": true`** stops at today's routing budget on the weekly row
-  (`routing.weekday_budget` in `routing.timezone`, default 20/40/60/80/100/100/100 Berlin) and at `until` on the
-  others. An account left over the budget alone is recorded at the budget, so it returns as soon as the budget allows
-  (Berlin midnight at the latest, after the cooldown) and its later steps stay open. `vibe auto status` shows
-  `main until 99% (weekly: today's budget 80%)`.
 - **The tick waits while the live login is about to renew.** No switch away while the live access token (read from
   the Keychain, never refreshed by vibe) ends within 10 minutes, unless it ended more than 15 minutes ago: a session
   still holding the outgoing login after the switch (Claude Code's 30 s Keychain cache) would renew it and write it

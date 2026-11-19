@@ -61,7 +61,7 @@ src/vibemaxxing/
   cursor.py        F   Cursor account marker, cursor-agent port, model resolution (fork, §19)
   cursor_translate.py F claude arguments -> cursor-agent arguments (fork, §19)
   cursor_usage.py  F   the Cursor seat's usage and its availability rule (fork, §19)
-  route.py         F   routing by need, the weekday budget, settings.json `routing` (fork, §19)
+  route.py         F   routing by need, settings.json `routing` (fork, §19)
   launch.py        F   `vibe run` for Cursor and `auto`: readings, plans (fork, §19)
   release.py       F   `vibe release`: a config dir's login back into vibe (fork, §18)
   models.py        B   AccountState, Sample      [shared, frozen]
@@ -1595,23 +1595,12 @@ A `vibe switch` is not recorded, so a person who switches to an account the poli
 not choose is switched back by the next tick (after the cooldown, when one applies).
 `vibe auto off` holds an account by hand.
 
-(fork) **`"weekly_budget": true`** (a boolean) makes a step's
-weekly limit `min(until, today's budget)`: `pool.Budget(weekdays, timezone)` on `Policy.budget`,
-which `auto.read_settings` fills from the `routing` member (`route.parse_routing`; `weekday_budget`
-and `timezone`, defaults `pool.DEFAULT_BUDGET` = `route.DEFAULT_BUDGET`, Europe/Berlin). A routing
-that is wrong while a step has the flag makes the whole file the defaults; without the flag routing
-is not read here. `policy_document` writes the flag back and never the budget. Only the
-`weekly_all` row uses it; the session row and `block_models` rows use `until`. Leaving the live
-account at such a step: when a row is at `until`, `Decision.limit` is `until` as always; when only
-the weekly row is over the budget, `limit` is the budget, `threshold` is `until` and `zone` the
-budget's timezone, so the tick stores `auto.json` `limit` = the budget and `until` = the next
-midnight in that zone (`limited_until(..., threshold, weekly=budget, timezone=zone)`). The fence
-then holds only at steps up to the budget: the account's later steps stay open, and the budget
-check itself keeps it out of the budget step until the budget allows it. `_earliest_reset` reads
-each account at its loosest step (highest `until`, then highest weekly limit), with that step's
-weekly limit and zone. The stay reason is `<live> is below <until>% and today's <n>% weekly budget
-(step i of n)`; leaving, `<live> at <n>% weekly, over today's <n>% weekly budget`. `vibe auto
-status` renders the step `main until 99% (weekly: today's budget 80%)`.
+(fork) There is no budget of vibe's own (removed 19 Nov 2026): a step switches at `until` on the rows the
+account reports (`session`, `weekly_all`, and `block_models` rows), nothing else. `weekly_budget` on a step
+(and `routing.weekday_budget`, `routing.timezone`, a routing step's `budget`) are still accepted and ignored,
+and `policy_document` never writes them. `pool.Step` is `(account, until)`; `Decision` has no `weekly`,
+`threshold` or `zone`; `blocking`, `limited_until` and `_under` take no weekly limit. A fence is computed
+at the limit the account was left at (`LastSwitch.limit`), and `vibe auto status` renders `main until 99%`.
 
 Fast polling (§14): with a policy, the live account is `fast` while a counted row is within
 `FAST_POLL_MARGIN` (9) below one of its own step limits and not over it.
@@ -1817,17 +1806,15 @@ environment untouched.
 ### Routing — `route.py`, `vibe run auto`
 
 `settings.json` member `routing` (absent: the defaults; wrong anywhere: `vibe run auto` is
-refused, never guessed; `vibe auto on|off` carries it over untouched): `timezone`
-(`Europe/Berlin`), `weekday_budget` (Mon..Sun, `[20,40,60,80,100,100,100]`: the share of main's
-weekly usage allowed by the end of the day), `default_needs` (`["slack","atlassian"]`),
+refused, never guessed; `vibe auto on|off` carries it over untouched): `default_needs` (`["slack","atlassian"]`),
 `no_degrade` (`["m365"]`), `connectors` (main: slack, atlassian, m365; cursor: slack,
 atlassian, gcal; extra: none), `order` per class (`needs`, `no_needs`: lists of
-`{"account", "budget", "degraded", "last_resort"}`), `spent_percent`
+`{"account", "degraded", "last_resort"}`; `budget` is accepted and ignored), `spent_percent`
 (99), `roles` (role -> alias for `main`, `extra`, `cursor`; steps and `connectors` are written in
 roles; a Claude role naming no stored account makes a run that would end on Cursor refuse),
-(`cursor_cap_cents`, `cursor_margin_cents` and a step's `weekly_cap` were removed on 19 Nov 2026: vibe imposes no spending or usage cap of its own, only the limits providers report; the old keys are still accepted and ignored). A Cursor step cannot
-be `last_resort`. Defaults: needs = main within budget, cursor, extra (degraded: runs without the
-connectors, with a warning), main (last resort); no needs = extra, main within budget,
+(`timezone`, `weekday_budget`, a step's `budget`, `cursor_cap_cents`, `cursor_margin_cents` and a step's `weekly_cap` were removed on 19 Nov 2026: vibe imposes no spending or usage cap of its own, only the limits providers report; the old keys are still accepted and ignored). A Cursor step cannot
+be `last_resort`. Defaults: needs = main, cursor, extra (degraded: runs without the
+connectors, with a warning), main (last resort); no needs = extra, main,
 cursor, main (last resort). Unknown usage is unavailable and printed; only the last resort
 accepts an unknown or spent reading (with a warning), and only a dead login stops it. The
 decision is made at run start and never again; the Claude account that is Claude Code's own

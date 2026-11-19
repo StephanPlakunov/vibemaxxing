@@ -37,7 +37,7 @@ from vibemaxxing.httpclient import CODEX_HOSTS, HttpClient, UrllibClient
 from vibemaxxing.keychain import KeychainPort, config_dir_port
 from vibemaxxing.models import AccountState
 from vibemaxxing.poll import USAGE_FRESH_S
-from vibemaxxing.pool import WEEKLY_ALL_KIND, blocking
+from vibemaxxing.pool import blocking
 
 AUTO: Final = "auto"
 VIBE_LINE: Final = "vibemaxxing: "
@@ -412,7 +412,6 @@ def _claude_candidate(view: AccountView, routing: route.Routing, now_s: float) -
             alias, cursor.KIND_CLAUDE, route.Health.UNKNOWN, view.message or "no numbers"
         )
     fresh = 0 <= now_s - view.updated_at < USAGE_FRESH_S
-    weekly = next((row.percent for row in rows if row.kind == WEEKLY_ALL_KIND), None)
     spent = blocking(rows, routing.spent_percent, now_s)
     if spent:
         worst = max(spent, key=lambda row: row.percent or 0)
@@ -421,8 +420,6 @@ def _claude_candidate(view: AccountView, routing: route.Routing, now_s: float) -
             cursor.KIND_CLAUDE,
             route.Health.OUT,
             f"{worst.label} at {worst.percent}%",
-            weekly,
-            fresh,
         )
     if not fresh:
         age = int((now_s - view.updated_at) // 60)
@@ -431,10 +428,8 @@ def _claude_candidate(view: AccountView, routing: route.Routing, now_s: float) -
             cursor.KIND_CLAUDE,
             route.Health.UNKNOWN,
             f"numbers are {age} min old",
-            weekly,
-            False,
         )
-    return route.Candidate(alias, cursor.KIND_CLAUDE, route.Health.OK, "has room", weekly, True)
+    return route.Candidate(alias, cursor.KIND_CLAUDE, route.Health.OK, "has room")
 
 
 def _cursor_candidate(reading: CursorReading) -> route.Candidate:
@@ -948,11 +943,6 @@ def _live_short(
     candidate = lookup(main)
     if candidate is None:
         return ""
-    budget = route.today_budget(routing, now_s)
-    if live == main:
-        return route.budget_text(candidate.weekly_percent, budget)
-    if candidate.health is route.Health.OUT:
+    if live != main and candidate.health is route.Health.OUT:
         return f"{main} spent"
-    if candidate.weekly_percent is not None and candidate.weekly_percent > budget:
-        return f"{main} {route.budget_text(candidate.weekly_percent, budget)}"
     return ""

@@ -786,15 +786,12 @@ def cmd_auto_include(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
-def _render_one_step(policy: Policy, step: Step, now_s: float) -> str:
-    text = f"{step.account} until {step.until}%"
-    if step.weekly_budget:
-        text += f" (weekly: today's budget {policy.budget.today(now_s)}%)"
-    return text
+def _render_one_step(step: Step) -> str:
+    return f"{step.account} until {step.until}%"
 
 
 def _render_policy(policy: Policy, now_s: float) -> str:
-    steps = " -> ".join(_render_one_step(policy, step, now_s) for step in policy.steps)
+    steps = " -> ".join(_render_one_step(step) for step in policy.steps)
     text = f"ordered: {steps}, then earliest reset"
     if policy.block_models:
         text += f"; {', '.join(policy.block_models)} weekly rows count too"
@@ -805,7 +802,7 @@ def _render_step(policy: Policy, index: int | None, now_s: float) -> str:
     if index is None:
         return "none has room - earliest reset"
     step = policy.steps[index]
-    return f"{index + 1} of {len(policy.steps)}: {_render_one_step(policy, step, now_s)}"
+    return f"{index + 1} of {len(policy.steps)}: {_render_one_step(step)}"
 
 
 def _render_status(status: auto.Status, now_s: float) -> str:

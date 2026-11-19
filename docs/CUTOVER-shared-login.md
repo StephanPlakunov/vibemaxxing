@@ -10,7 +10,7 @@ within about a minute, without a restart.
 - Code merged into `stephan/ordered-failover` and installed (`~/.local/bin/vibe`).
 - `~/.zshrc`: `cw` (connectors) and `cs` (solo); `claude` is plain Claude Code again.
 - `~/.vibemaxxing/settings.json`: `routing.shared_login: true` and the policy
-  `main until 99% (weekly: today's budget) -> extra until 99% -> main until 99%, then earliest reset`.
+  `main until 99% -> extra until 99% -> main until 99%, then earliest reset`.
   Until step 2 below it cannot switch to extra (extra still lives in its own dir), so it stays on main.
 - Cursor's status line: `~/.cursor/statusline.sh`, registered in `~/.cursor/cli-config.json`
   (`statusLine`). A `cursor-agent` that was open while it was written may drop the entry when it
