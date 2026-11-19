@@ -7,11 +7,14 @@ Keychain login cannot point at Cursor.
 
 The defaults are the fork owner's (settings.json ``routing`` overrides every part):
 
-* a run that **needs connectors** (Slack, Atlassian, ...): main while its weekly use is within
-  today's budget, else Cursor while it has usage left, else extra (which has no connectors:
-  the run goes without them and says so), else main whatever the budget;
-* a run that needs **none**: extra, else main within budget, else Cursor, else main whatever
-  the budget.
+* a run that **needs connectors** (Slack, Atlassian, ...): main while it has room, else Cursor
+  while it has usage left, else extra (which has no connectors: the run goes without them and
+  says so), else main as the last resort;
+* a run that needs **none**: extra, else main while it has room, else Cursor, else main as the
+  last resort.
+
+There is no budget of vibe's own: an account is used or passed over by what its provider
+reports for it.
 
 An account whose usage is unknown is unavailable, and the answer says so. The last step is
 the exception: it is the last resort, so it runs on an unknown reading, and on a spent one with
@@ -23,19 +26,14 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Final
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from vibemaxxing import store
-from vibemaxxing.cursor import KIND_CLAUDE, KIND_CURSOR
+from vibemaxxing.cursor import KIND_CURSOR
 from vibemaxxing.errors import UsageError
 
-DEFAULT_TIMEZONE: Final = "Europe/Berlin"
-# Monday..Sunday: the share of main's weekly usage that may be spent by the END of that day.
-DEFAULT_BUDGET: Final = (20, 40, 60, 80, 100, 100, 100)
 DEFAULT_NEEDS: Final = ("slack", "atlassian")
 # A run that needs one of these has nowhere to degrade to: only an account that has it will do.
 DEFAULT_NO_DEGRADE: Final = ("m365",)
@@ -67,8 +65,6 @@ class Step:
     """One rung of an order. ``account`` is a role (main, extra, cursor), else an alias."""
 
     account: str
-    # Only while main's weekly use is within today's budget (Claude accounts).
-    budget: bool = False
     # Allowed to lack the connectors the run needs, with a warning (never for no_degrade ones).
     degraded: bool = False
     # The last resort: runs even on a spent or unknown reading. Only a dead login stops it.
@@ -77,14 +73,14 @@ class Step:
 
 DEFAULT_ORDER: Final[Mapping[str, tuple[Step, ...]]] = {
     NEEDS_CLASS: (
-        Step("main", budget=True),
+        Step("main"),
         Step("cursor"),
         Step("extra", degraded=True),
         Step("main", last_resort=True),
     ),
     NO_NEEDS_CLASS: (
         Step("extra"),
-        Step("main", budget=True),
+        Step("main"),
         Step("cursor"),
         Step("main", last_resort=True),
     ),
@@ -93,8 +89,6 @@ DEFAULT_ORDER: Final[Mapping[str, tuple[Step, ...]]] = {
 
 @dataclass(frozen=True)
 class Routing:
-    timezone: str = DEFAULT_TIMEZONE
-    weekday_budget: tuple[int, ...] = DEFAULT_BUDGET
     default_needs: tuple[str, ...] = DEFAULT_NEEDS
     no_degrade: tuple[str, ...] = DEFAULT_NO_DEGRADE
     connectors: Mapping[str, tuple[str, ...]] = field(
@@ -121,10 +115,6 @@ class Candidate:
     kind: str
     health: Health
     why: str
-    # Main's weekly percent; None when unknown. Only read for a step with a budget.
-    weekly_percent: int | None = None
-    # Whether ``weekly_percent`` comes from numbers young enough to say "within budget".
-    weekly_fresh: bool = False
 
 
 @dataclass(frozen=True)
@@ -134,7 +124,7 @@ class Route:
     reason: str
     warnings: tuple[str, ...] = ()
     skipped: tuple[str, ...] = ()
-    # The reason in a few words, for the one line `vibe run auto` prints ("75% < 80%",
+    # The reason in a few words, for the one line `vibe run auto` prints ("main spent",
     # "main spent"); empty when the first choice simply had room.
     short: str = ""
 
@@ -167,13 +157,13 @@ def parse_routing(raw: object, path: Path) -> Routing:
     if not isinstance(raw, dict):
         raise _fail(path, "must be an object")
     known = {
-        "timezone",
-        "weekday_budget",
         "default_needs",
         "no_degrade",
         "connectors",
         "order",
         # Removed settings, still accepted so an old settings.json keeps working; ignored.
+        "timezone",
+        "weekday_budget",
         "cursor_margin_cents",
         "spent_percent",
         "roles",
@@ -184,17 +174,6 @@ def parse_routing(raw: object, path: Path) -> Routing:
     unknown = sorted(set(raw) - known)
     if unknown:
         raise _fail(path, f"has unknown members: {', '.join(unknown)}")
-    tz = raw.get("timezone", DEFAULT_TIMEZONE)
-    if not isinstance(tz, str):
-        raise _fail(path, "timezone must be a name such as Europe/Berlin")
-    try:
-        ZoneInfo(tz)
-    except (ZoneInfoNotFoundError, ValueError, OSError):
-        raise _fail(path, f"timezone {tz!r} is not known on this machine") from None
-    budget_raw = raw.get("weekday_budget", list(DEFAULT_BUDGET))
-    budget = [_int(item) for item in budget_raw] if isinstance(budget_raw, list) else [None]
-    if len(budget) != 7 or any(item is None or not 0 <= item <= 100 for item in budget):
-        raise _fail(path, "weekday_budget must be seven percents, Monday to Sunday")
     needs = _strings(raw.get("default_needs", list(DEFAULT_NEEDS)))
     if needs is None or any(item not in CONNECTORS for item in needs):
         raise _fail(path, f"default_needs must be a list of {', '.join(CONNECTORS)}")
@@ -236,8 +215,6 @@ def parse_routing(raw: object, path: Path) -> Routing:
     if not isinstance(shared, bool):
         raise _fail(path, "shared_login must be true or false")
     return Routing(
-        timezone=tz,
-        weekday_budget=tuple(item for item in budget if item is not None),
         default_needs=needs,
         no_degrade=no_degrade,
         connectors=connectors,
@@ -256,6 +233,7 @@ def _parse_steps(raw: object, path: Path, cls: str) -> tuple[Step, ...]:
     for item in raw:
         if not isinstance(item, dict) or not isinstance(item.get("account"), str):
             raise _fail(path, f'every step of order.{cls} needs an "account"')
+        # "budget" is a removed member (the pacing budget); accepted and ignored.
         extra = set(item) - {"account", "budget", "degraded", "last_resort"}
         flags = [item.get(key, False) for key in ("budget", "degraded", "last_resort")]
         if extra or not all(isinstance(flag, bool) for flag in flags):
@@ -263,7 +241,7 @@ def _parse_steps(raw: object, path: Path, cls: str) -> tuple[Step, ...]:
         if flags[2] and str(item["account"]) == "cursor":
             # The last resort runs on a spent or unknown reading; Cursor's would cost money.
             raise _fail(path, f"order.{cls}: a Cursor step cannot be the last resort")
-        steps.append(Step(str(item["account"]), bool(flags[0]), bool(flags[1]), bool(flags[2])))
+        steps.append(Step(str(item["account"]), bool(flags[1]), bool(flags[2])))
     return tuple(steps)
 
 
@@ -278,15 +256,6 @@ def read_routing(root: Path) -> Routing:
         raise _fail(path, "cannot be read: the file is not valid JSON") from None
     member = parsed.get("routing") if isinstance(parsed, dict) else None
     return parse_routing(member, path)
-
-
-# --- the budget ----------------------------------------------------------------------
-
-
-def today_budget(routing: Routing, now_s: float) -> int:
-    """The share of main's weekly usage allowed by the end of today, in the routing timezone."""
-    day = datetime.fromtimestamp(now_s, ZoneInfo(routing.timezone)).weekday()
-    return routing.weekday_budget[day]
 
 
 # --- the decision --------------------------------------------------------------------
@@ -320,7 +289,6 @@ def decide(
     else:
         by_alias = {candidate.alias: candidate for candidate in candidates}
         lookup = by_alias.get
-    budget = today_budget(routing, now_s)
     skipped: list[str] = []
     # The same reasons in a few words; the first one is why the pick is not the first choice.
     brief: list[str] = []
@@ -365,7 +333,7 @@ def decide(
                 "set routing.roles in ~/.vibemaxxing/settings.json to your account aliases",
             )
         if step.last_resort:
-            return _chosen(candidate, step, skipped, routing, budget, warnings, brief)
+            return _chosen(candidate, step, skipped, warnings, brief)
         if candidate.health is Health.UNKNOWN:
             skipped.append(f"{candidate.alias}: usage unknown, so not used ({candidate.why})")
             brief.append(f"{candidate.alias} usage unknown")
@@ -374,20 +342,7 @@ def decide(
             skipped.append(f"{candidate.alias}: spent ({candidate.why})")
             brief.append(f"{candidate.alias} spent")
             continue
-        if step.budget and candidate.kind == KIND_CLAUDE:
-            if candidate.weekly_percent is None or not candidate.weekly_fresh:
-                skipped.append(f"{candidate.alias}: weekly usage unknown, so the budget is unknown")
-                brief.append(f"{candidate.alias} usage unknown")
-                continue
-            # Below the budget, as the tick's budget step counts it (a row at its limit is out).
-            if candidate.weekly_percent >= budget:
-                skipped.append(
-                    f"{candidate.alias}: weekly {candidate.weekly_percent}% is at or over today's "
-                    f"{budget}% budget"
-                )
-                brief.append(f"{candidate.alias} {budget_text(candidate.weekly_percent, budget)}")
-                continue
-        return _chosen(candidate, step, skipped, routing, budget, warnings, brief)
+        return _chosen(candidate, step, skipped, warnings, brief)
     reasons = "; ".join(skipped) or "no step in the order"
     raise UsageError(f"no account can take this run ({reasons})", "vibe list")
 
@@ -396,8 +351,6 @@ def _chosen(
     candidate: Candidate,
     step: Step,
     skipped: Sequence[str],
-    routing: Routing,
-    budget: int,
     warnings: Sequence[str],
     brief: Sequence[str] = (),
 ) -> Route:
@@ -411,22 +364,8 @@ def _chosen(
             ]
         elif candidate.health is Health.UNKNOWN:
             warnings = [*warnings, f"{candidate.alias}: usage unknown ({candidate.why})"]
-    elif step.budget and candidate.kind == KIND_CLAUDE:
-        reason = (
-            f"weekly {candidate.weekly_percent}% is within today's {budget}% budget"
-            f" ({routing.timezone})"
-        )
-        short = short or budget_text(candidate.weekly_percent, budget)
     else:
         reason = candidate.why or "has room"
     if step.last_resort:
         short = "last resort" + (f", {short}" if short else "")
     return Route(candidate.alias, candidate.kind, reason, tuple(warnings), tuple(skipped), short)
-
-
-def budget_text(percent: int | None, budget: int) -> str:
-    """Main's weekly use against today's budget in a few words: ``75% < 80%``."""
-    if percent is None:
-        return f"budget {budget}%"
-    sign = "<" if percent < budget else "=" if percent == budget else ">"
-    return f"{percent}% {sign} {budget}%"

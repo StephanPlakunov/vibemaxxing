@@ -590,6 +590,7 @@ def build(
     auto: Settings | None = None,
     last_switch: LastSwitch | None = None,
     cursor: Sequence[Mapping[str, object]] = (),
+    codex: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     document: dict[str, object] = {
         "schema": ENVELOPE_SCHEMA,
@@ -608,6 +609,10 @@ def build(
         # bytes it always did. Cursor seats are not in `accounts` or the pool: they have no
         # weekly window and no Keychain login.
         document["cursor"] = [dict(entry) for entry in cursor]
+    if codex:
+        # Additive and only when a Codex account is stored; like Cursor, never in `accounts` or
+        # the pool: it has no Claude Code login and its windows are not Claude's.
+        document["codex"] = [dict(entry) for entry in codex]
     return document
 
 

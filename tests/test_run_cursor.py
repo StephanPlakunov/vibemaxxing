@@ -28,7 +28,7 @@ from vibemaxxing.credentials import Identity, credential_to_blob
 from vibemaxxing.errors import NetworkError
 
 CHAT = "8ecd5bf4-84eb-4551-a928-e0f5e14044d0"
-# Tuesday 3 Nov 2026, 12:00 Berlin: main's budget is 40%.
+# Tuesday 3 Nov 2026, 12:00 Berlin: main is the first choice.
 NOW_S = datetime(2026, 11, 3, 12, 0, tzinfo=ZoneInfo("Europe/Berlin")).timestamp()
 ADDED_AT = 1_757_930_000.0
 
@@ -365,10 +365,10 @@ def auto_world(world: World, *, main_weekly: int, extra_weekly: int | None = 5) 
         world.claude_account("extra", session=5, weekly=extra_weekly)
 
 
-def test_auto_with_needs_and_main_within_budget_runs_claude_on_main_as_its_own_login(
+def test_auto_with_needs_and_main_with_room_runs_claude_on_main_as_its_own_login(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=39)  # Tuesday's budget is 40%: below it, as the tick counts
+    auto_world(world, main_weekly=39)  # room left: main answers
 
     assert world.main("run", "auto", "--needs", "slack", "--", "claude", "-p", "hi") == 0
 
@@ -376,15 +376,15 @@ def test_auto_with_needs_and_main_within_budget_runs_claude_on_main_as_its_own_l
     assert world.claude_calls() == [{"argv": ["-p", "hi"], "has_token": False}]
     assert world.fake.calls() == []
     err = capsys.readouterr().err
-    assert err == "vibemaxxing: auto picked main: 39% < 40%\n"
+    assert err == "vibemaxxing: auto picked main\n"
     assert world.cursor_client.requests == []  # main answered; Cursor was not even asked...
     # ...although its usage was read for the routing table (queued answers untouched or used)
 
 
-def test_auto_over_budget_moves_a_needs_run_to_cursor_and_translates(
+def test_auto_main_spent_moves_a_needs_run_to_cursor_and_translates(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=41)
+    auto_world(world, main_weekly=100)
 
     code = world.main(
         "run", "auto", "--needs", "slack,atlassian", "--", "claude", "-p", "hi", "--model", "haiku"
@@ -396,13 +396,13 @@ def test_auto_over_budget_moves_a_needs_run_to_cursor_and_translates(
         ["-p", "--mode", "ask", "--model", "claude-haiku-5-5-medium", "--approve-mcps", "hi"]
     ]
     err = capsys.readouterr().err
-    assert "vibemaxxing: auto picked cursor: main 41% > 40%\n" in err
+    assert "vibemaxxing: auto picked cursor: main spent\n" in err
 
 
 def test_auto_without_a_flag_uses_the_default_class_needs_connectors(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=41)
+    auto_world(world, main_weekly=100)
 
     world.main("run", "auto", "--", "claude", "-p", "hi", "--model", "haiku")
 
@@ -417,7 +417,7 @@ def test_a_non_live_account_runs_on_its_token(
 
     assert world.main("run", "auto", "--needs", "slack", "--", "claude", "-p", "hi") == 0
 
-    assert capsys.readouterr().err == "vibemaxxing: auto picked main: 10% < 40%\n"
+    assert capsys.readouterr().err == "vibemaxxing: auto picked main\n"
     assert world.claude_calls() == [{"argv": ["-p", "hi"], "has_token": True}]
 
 
@@ -430,10 +430,10 @@ def test_auto_no_needs_prefers_extra(world: World, capsys: pytest.CaptureFixture
     assert world.claude_calls() == [{"argv": ["-p", "hi"], "has_token": True}]
 
 
-def test_auto_no_needs_extra_spent_main_over_budget_goes_to_cursor(
+def test_auto_no_needs_extra_spent_main_spent_goes_to_cursor(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=60, extra_weekly=100)
+    auto_world(world, main_weekly=100, extra_weekly=100)
 
     world.main("run", "auto", "--no-needs", "--", "claude", "-p", "hi", "--model", "opus")
 
@@ -447,24 +447,24 @@ def test_auto_no_needs_extra_spent_main_over_budget_goes_to_cursor(
 def test_auto_claude_only_never_goes_to_cursor(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=60)
+    auto_world(world, main_weekly=100)
 
     assert world.main("run", "auto", "--claude-only", "--", "claude", "-p", "hi") == 0
 
     err = capsys.readouterr().err
-    assert "auto picked extra: main 60% > 40%" in err
+    assert "auto picked extra: main spent" in err
     assert "warning: no atlassian, slack on extra" in err
     assert world.fake.calls() == []
 
 
-def test_auto_m365_goes_to_main_even_over_budget(
+def test_auto_m365_goes_to_main_as_the_last_resort(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=90)
+    auto_world(world, main_weekly=100)
 
     assert world.main("run", "auto", "--needs", "m365", "--", "claude", "-p", "hi") == 0
 
-    assert "auto picked main: last resort, main 90% > 40%" in capsys.readouterr().err
+    assert "auto picked main: last resort, main spent" in capsys.readouterr().err
     assert world.claude_calls() == [{"argv": ["-p", "hi"], "has_token": False}]
 
 
@@ -475,7 +475,7 @@ def test_auto_treats_unknown_cursor_usage_as_unavailable_and_says_so(
     world.add_cursor()
     world.cursor_client.queue_json(200, {"shape": "changed"})
     world.cursor_client.queue_json(200, {})
-    auto_world(world, main_weekly=90)
+    auto_world(world, main_weekly=100)
 
     assert (
         world.main("run", "auto", "--needs", "slack", "--dry-run", "--", "claude", "-p", "hi") == 0
@@ -483,13 +483,13 @@ def test_auto_treats_unknown_cursor_usage_as_unavailable_and_says_so(
 
     err = capsys.readouterr().err
     assert "skipped" not in err  # one line: what was picked and why, not every step
-    assert "auto picked extra: main 90% > 40%" in err and "auto picked cursor" not in err
+    assert "auto picked extra: main spent" in err and "auto picked cursor" not in err
 
 
 def test_a_move_from_a_claude_session_to_cursor_starts_fresh_with_the_brief(
     world: World, capsys: pytest.CaptureFixture[str], tmp_home: Path
 ) -> None:
-    auto_world(world, main_weekly=90)
+    auto_world(world, main_weekly=100)
     notes = tmp_home / "handover.md"
     notes.write_text("where I stopped")
 
@@ -527,7 +527,7 @@ def test_a_move_from_a_claude_session_to_cursor_starts_fresh_with_the_brief(
 def test_a_move_without_a_brief_says_it_starts_empty(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=90)
+    auto_world(world, main_weekly=100)
 
     world.main(
         "run", "auto", "--needs", "slack", "--", "claude", "--resume", "abc", "--model", "haiku"
@@ -739,25 +739,25 @@ def test_a_stale_answer_is_shown_but_never_routed_by(
 def test_moved_to_cursors_tui_one_clear_line_is_the_last_thing_printed(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=48)  # Tuesday's budget is 40%
+    auto_world(world, main_weekly=100)  # main is spent
 
     assert world.main("run", "auto", "--needs", "slack", "--", "claude", "--model", "opus") == 0
 
-    assert capsys.readouterr().err == "vibemaxxing: auto picked cursor: main 48% > 40%\n"
+    assert capsys.readouterr().err == "vibemaxxing: auto picked cursor: main spent\n"
     assert world.fake.calls() == [["--model", "claude-opus-5-5-medium"]]  # interactive: no -p
 
 
 def test_the_move_names_the_main_role_alias(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    world.claude_account("stephan", session=5, weekly=48, active=True)
+    world.claude_account("stephan", session=5, weekly=100, active=True)
     (world.root / "settings.json").write_text(
         json.dumps({"schema": 1, "routing": {"roles": {"main": "stephan"}}})
     )
 
     world.main("run", "auto", "--needs", "slack", "--", "claude", "--model", "opus")
 
-    assert capsys.readouterr().err == "vibemaxxing: auto picked cursor: stephan 48% > 40%\n"
+    assert capsys.readouterr().err == "vibemaxxing: auto picked cursor: stephan spent\n"
 
 
 def test_a_named_interactive_cursor_run_prints_nothing(

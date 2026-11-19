@@ -25,6 +25,7 @@ from vibemaxxing import (
     bridge,
     broker,
     childenv,
+    codex,
     credentials,
     cursor,
     cursor_translate,
@@ -52,7 +53,13 @@ from vibemaxxing.errors import (
     UsageError,
     VibeError,
 )
-from vibemaxxing.httpclient import BRIDGE_HOSTS, CURSOR_HOSTS, HttpClient, UrllibClient
+from vibemaxxing.httpclient import (
+    BRIDGE_HOSTS,
+    CODEX_HOSTS,
+    CURSOR_HOSTS,
+    HttpClient,
+    UrllibClient,
+)
 from vibemaxxing.keychain import KeychainPort, default_port
 from vibemaxxing.models import AccountState
 from vibemaxxing.pool import Policy, Step, dry_in
@@ -88,6 +95,10 @@ class Context:
     agent: AgentPort = field(default_factory=CliAgent)
     cursor_client: HttpClient = field(default_factory=lambda: UrllibClient(CURSOR_HOSTS))
     cursor_token: CursorTokenPort = field(default_factory=AgentTokenStore)
+    # Codex: the client that may reach ChatGPT's usage endpoint only, and the Codex CLI's login
+    # file (read only). Fields so a test hands it fakes.
+    codex_client: HttpClient = field(default_factory=lambda: UrllibClient(CODEX_HOSTS))
+    codex_auth: codex.CodexAuthPort = field(default_factory=codex.FileAuth)
     # The bridge: the client that may reach only the upstreams' hosts, the Keychain for its tokens
     # (created on first use), a hidden prompt, and the one-shot listener for the browser redirect.
     bridge_client: HttpClient = field(default_factory=lambda: UrllibClient(BRIDGE_HOSTS))
@@ -103,6 +114,8 @@ class Context:
             agent=self.agent,
             cursor_client=self.cursor_client,
             cursor_token=self.cursor_token,
+            codex_client=self.codex_client,
+            codex_auth=self.codex_auth,
             now_s=self.now_s,
             environ=os.environ,
             cwd=Path.cwd(),
@@ -119,6 +132,25 @@ class Context:
         if now_s is not None:
             svc = replace(svc, now_s=now_s)
         return [launch.read_cursor(svc, alias) for alias in aliases]
+
+    def codex_readings(self, *, now_s: float | None = None) -> list[launch.CodexReading]:
+        """Every Codex account with its plan usage; [] without one. Reads files, never a process."""
+        aliases = codex.list_codex_aliases(self.root)
+        if not aliases:
+            return []
+        svc = self.services()
+        if now_s is not None:
+            svc = replace(svc, now_s=now_s)
+        readings: list[launch.CodexReading] = []
+        for alias in aliases:
+            try:
+                readings.append(launch.read_codex(svc, alias))
+            except VibeError as exc:
+                # A damaged marker must not stop `vibe list`; the row says what is wrong.
+                readings.append(
+                    launch.CodexReading(alias, "unknown", None, None, None, exc.message)
+                )
+        return readings
 
     def refresh_cursor_cache(self, *, min_age_s: float = 180.0) -> None:
         """Re-read each Cursor seat's usage into the cache once it is older than ``min_age_s``.
@@ -205,7 +237,12 @@ def _slug(text: str) -> str:
 
 def _taken(root: Path) -> set[str]:
     """Every alias in use: Claude accounts and Cursor ones share one namespace."""
-    return {*store.list_aliases(root), *cursor.list_cursor_aliases(root), *cursor.RESERVED_ALIASES}
+    return {
+        *store.list_aliases(root),
+        *cursor.list_cursor_aliases(root),
+        *codex.list_codex_aliases(root),
+        *cursor.RESERVED_ALIASES,
+    }
 
 
 def _free_alias(root: Path, wanted: str) -> str:
@@ -409,7 +446,11 @@ def _import(ctx: Context, wanted: str | None, given: Path, as_json: bool) -> int
 
 def _require_unused(root: Path, alias: str) -> None:
     """A Claude login may not take a Cursor account's alias, nor a reserved word."""
-    if alias in cursor.RESERVED_ALIASES or cursor.is_cursor(root, alias):
+    if (
+        alias in cursor.RESERVED_ALIASES
+        or cursor.is_cursor(root, alias)
+        or codex.is_codex(root, alias)
+    ):
         raise UsageError(f'"{alias}" is already used (or reserved)', "vibe list")
 
 
@@ -421,7 +462,7 @@ def _add_cursor(ctx: Context, alias: str | None, as_json: bool) -> int:
             f'"{wanted}" is not a usable alias: lower-case letters, digits, dot, dash, underscore',
             "vibe add cursor --kind cursor",
         )
-    if wanted in cursor.RESERVED_ALIASES or wanted in store.list_aliases(ctx.root):
+    if wanted in _taken(ctx.root):
         raise UsageError(f'"{wanted}" is already used (or reserved)', "vibe list")
     ctx.agent.binary()  # not installed: refused before anything is written
     status = ctx.agent.status()
@@ -438,6 +479,49 @@ def _add_cursor(ctx: Context, alias: str | None, as_json: bool) -> int:
         )
     _emit(
         _action("add", alias=wanted, kind=cursor.KIND_CURSOR, logged_in=status.logged_in),
+        as_json=as_json,
+        human=human,
+    )
+    return 0
+
+
+def _add_codex(ctx: Context, alias: str | None, as_json: bool) -> int:
+    """Register a Codex account: the Codex CLI's login, which vibe reads and never writes."""
+    wanted = alias if alias is not None else "codex"
+    if not store.valid_alias(wanted):
+        raise UsageError(
+            f'"{wanted}" is not a usable alias: lower-case letters, digits, dot, dash, underscore',
+            "vibe add codex --kind codex",
+        )
+    if wanted in _taken(ctx.root):
+        raise UsageError(f'"{wanted}" is already used (or reserved)', "vibe list")
+    # $CODEX_HOME at this moment is the home the account is bound to; none means ~/.codex.
+    given = os.environ.get("CODEX_HOME")
+    home = Path(given).expanduser() if given else None
+    login = ctx.codex_auth.read(home)
+    codex.write_marker(ctx.root, wanted, added_at=ctx.now_s, codex_home=home)
+    if login is None:
+        human = (
+            f'added Codex account "{wanted}", but there is no Codex login to read: '
+            f"run: {codex.LOGIN_CMD} ({codex.STORE_HINT})\n"
+        )
+    elif login.auth_mode == codex.AUTH_MODE_API_KEY:
+        human = (
+            f'added Codex account "{wanted}" (an API-key login: it has no plan usage to show; '
+            f"run: {codex.LOGIN_CMD} to sign in with ChatGPT)\n"
+        )
+    else:
+        who = f"logged in as {login.email or 'an unknown user'}"
+        if login.plan:
+            who += f", plan {login.plan}"
+        human = f'added Codex account "{wanted}" ({who})\n'
+    _emit(
+        _action(
+            "add",
+            alias=wanted,
+            kind=codex.KIND_CODEX,
+            logged_in=login is not None and login.usable,
+        ),
         as_json=as_json,
         human=human,
     )
@@ -482,6 +566,13 @@ def cmd_add(args: argparse.Namespace, ctx: Context) -> int:
                 "vibe add --help",
             )
         return _add_cursor(ctx, args.alias, args.json)
+    if args.kind == codex.KIND_CODEX:
+        if args.from_config_dir is not None or args.adopt_stored_login:
+            raise UsageError(
+                "--from-config-dir and --adopt-stored-login are for Claude accounts",
+                "vibe add --help",
+            )
+        return _add_codex(ctx, args.alias, args.json)
     if args.adopt_stored_login:
         return _adopt_stored(ctx, args.alias, args.from_config_dir, args.json)
     if args.from_config_dir is not None:
@@ -532,15 +623,48 @@ def _render_cursor(reading: launch.CursorReading) -> list[str]:
     return lines
 
 
+def _render_codex(reading: launch.CodexReading) -> list[str]:
+    """One Codex account: who, the plan, and each usage window the plan reports."""
+    who = reading.email or "—"
+    plan = f" · {reading.plan}" if reading.plan else ""
+    lines = [f"  {reading.alias}  {who}  Codex{plan}"]
+    if reading.state in ("needs_login", "api_key"):
+        lines.append(f"    {reading.note}")
+        return lines
+    usage = reading.usage
+    if usage is None:
+        lines.append(f"    usage: unknown ({reading.note})")
+        return lines
+    if reading.note:
+        lines.append(f"    {reading.note}")
+    for window in usage.windows:
+        reset = ""
+        if window.resets_at_s is not None:
+            end = datetime.fromtimestamp(window.resets_at_s).strftime("%a %d %b %H:%M")
+            reset = f"  resets {end}"
+        lines.append(f"    {window.label:<24}{round(window.used_percent):>5}%{reset}")
+    if not usage.windows:
+        lines.append("    no limits reported")
+    if usage.limit_reached:
+        lines.append("    limit reached")
+    if usage.credits_unlimited:
+        lines.append("    credits: unlimited")
+    elif usage.credits_balance is not None:
+        lines.append(f"    credits: {usage.credits_balance}")
+    return lines
+
+
 def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
     # Cursor first: the status file `_collect_and_record` writes should hold these numbers.
     readings = ctx.cursor_readings()
+    codex_seen = ctx.codex_readings()
     views, dry = _collect_and_record(ctx)
     human = _render_accounts(views, now_s=ctx.now_s, dry=dry)
     for problem in broker.problems(ctx.root):
         human += f"broker problem: {problem}\n"
-    if readings:
+    if readings or codex_seen:
         shown = [line for reading in readings for line in (*_render_cursor(reading), "")]
+        shown += [line for reading in codex_seen for line in (*_render_codex(reading), "")]
         if views:
             head, _, tail = human.rpartition("\n\npool")
             human = head + "\n\n" + "\n".join(shown) + "\npool" + tail
@@ -554,6 +678,7 @@ def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
             auto=auto.read_settings(ctx.root),
             last_switch=auto.read_last(ctx.root),
             cursor=[launch.cursor_entry(reading) for reading in readings],
+            codex=[launch.codex_entry(reading) for reading in codex_seen],
         ),
         as_json=args.json,
         human=human,
@@ -599,6 +724,11 @@ def cmd_switch(args: argparse.Namespace, ctx: Context) -> int:
         raise UsageError(
             f'"{args.alias}" is a Cursor account: it has no Claude Code login to switch to',
             f"vibe run {args.alias} -- claude",
+        )
+    if codex.is_codex(ctx.root, args.alias):
+        raise UsageError(
+            f'"{args.alias}" is a Codex account: it has no Claude Code login to switch to',
+            "vibe list",
         )
     oauth.ensure_usable(ctx.root, args.alias, ctx.client, now_ms=int(ctx.now_s * 1000))
     store.switch(ctx.root, args.alias, ctx.port, now_s=ctx.now_s)
@@ -656,15 +786,12 @@ def cmd_auto_include(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
-def _render_one_step(policy: Policy, step: Step, now_s: float) -> str:
-    text = f"{step.account} until {step.until}%"
-    if step.weekly_budget:
-        text += f" (weekly: today's budget {policy.budget.today(now_s)}%)"
-    return text
+def _render_one_step(step: Step) -> str:
+    return f"{step.account} until {step.until}%"
 
 
 def _render_policy(policy: Policy, now_s: float) -> str:
-    steps = " -> ".join(_render_one_step(policy, step, now_s) for step in policy.steps)
+    steps = " -> ".join(_render_one_step(step) for step in policy.steps)
     text = f"ordered: {steps}, then earliest reset"
     if policy.block_models:
         text += f"; {', '.join(policy.block_models)} weekly rows count too"
@@ -675,7 +802,7 @@ def _render_step(policy: Policy, index: int | None, now_s: float) -> str:
     if index is None:
         return "none has room - earliest reset"
     step = policy.steps[index]
-    return f"{index + 1} of {len(policy.steps)}: {_render_one_step(policy, step, now_s)}"
+    return f"{index + 1} of {len(policy.steps)}: {_render_one_step(step)}"
 
 
 def _render_status(status: auto.Status, now_s: float) -> str:
@@ -808,6 +935,8 @@ def cmd_statusline(args: argparse.Namespace, ctx: Context) -> int:
 def cmd_remove(args: argparse.Namespace, ctx: Context) -> int:
     if cursor.is_cursor(ctx.root, args.alias):
         cursor.delete_marker(ctx.root, args.alias)  # the Cursor login itself is cursor-agent's
+    elif codex.is_codex(ctx.root, args.alias):
+        codex.delete_marker(ctx.root, args.alias)  # the Codex login itself is the CLI's
     else:
         if broker.is_on(ctx.root) and store.read_active(ctx.root) == args.alias:
             # With the broker on, vibe's store holds the only refresh token of the live login;
@@ -993,6 +1122,11 @@ def cmd_alias(args: argparse.Namespace, ctx: Context) -> int:
         if args.new in store.list_aliases(ctx.root):
             raise UsageError(f'there is already an account named "{args.new}"', "vibe list")
         cursor.rename_marker(ctx.root, args.old, args.new)
+    elif codex.is_codex(ctx.root, args.old):
+        _require_unused(ctx.root, args.new)
+        if args.new in store.list_aliases(ctx.root):
+            raise UsageError(f'there is already an account named "{args.new}"', "vibe list")
+        codex.rename_marker(ctx.root, args.old, args.new)
     else:
         _require_unused(ctx.root, args.new)
         store.rename_account(ctx.root, args.old, args.new)
@@ -1418,6 +1552,8 @@ Every day
   vibe shell-init             print the zsh snippet that defines `cw` and `cs`
   vibe add cursor --kind cursor
                               a Cursor seat (log in with `cursor-agent login` first)
+  vibe add codex --kind codex
+                              a Codex account's plan usage (log in with `codex login` first)
   vibe usage web              the same dashboard in a browser, http://127.0.0.1:8787
 
 Connector bridge (for a session on the extra account)
@@ -1518,9 +1654,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add.add_argument(
         "--kind",
-        choices=cursor.KINDS,
+        choices=(*cursor.KINDS, codex.KIND_CODEX),
         default=cursor.KIND_CLAUDE,
-        help="claude (default) or cursor: a Cursor seat, logged in with `cursor-agent login`",
+        help=(
+            "claude (default), cursor (a Cursor seat, logged in with `cursor-agent login`) or "
+            "codex (the Codex CLI's login, `codex login`: its plan usage is shown, never switched)"
+        ),
     )
     _add_json(add)
     add.set_defaults(handler=cmd_add)

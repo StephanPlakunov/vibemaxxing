@@ -61,7 +61,7 @@ src/vibemaxxing/
   cursor.py        F   Cursor account marker, cursor-agent port, model resolution (fork, §19)
   cursor_translate.py F claude arguments -> cursor-agent arguments (fork, §19)
   cursor_usage.py  F   the Cursor seat's usage and its availability rule (fork, §19)
-  route.py         F   routing by need, the weekday budget, settings.json `routing` (fork, §19)
+  route.py         F   routing by need, settings.json `routing` (fork, §19)
   launch.py        F   `vibe run` for Cursor and `auto`: readings, plans (fork, §19)
   release.py       F   `vibe release`: a config dir's login back into vibe (fork, §18)
   models.py        B   AccountState, Sample      [shared, frozen]
@@ -1595,23 +1595,12 @@ A `vibe switch` is not recorded, so a person who switches to an account the poli
 not choose is switched back by the next tick (after the cooldown, when one applies).
 `vibe auto off` holds an account by hand.
 
-(fork) **`"weekly_budget": true`** (a boolean) makes a step's
-weekly limit `min(until, today's budget)`: `pool.Budget(weekdays, timezone)` on `Policy.budget`,
-which `auto.read_settings` fills from the `routing` member (`route.parse_routing`; `weekday_budget`
-and `timezone`, defaults `pool.DEFAULT_BUDGET` = `route.DEFAULT_BUDGET`, Europe/Berlin). A routing
-that is wrong while a step has the flag makes the whole file the defaults; without the flag routing
-is not read here. `policy_document` writes the flag back and never the budget. Only the
-`weekly_all` row uses it; the session row and `block_models` rows use `until`. Leaving the live
-account at such a step: when a row is at `until`, `Decision.limit` is `until` as always; when only
-the weekly row is over the budget, `limit` is the budget, `threshold` is `until` and `zone` the
-budget's timezone, so the tick stores `auto.json` `limit` = the budget and `until` = the next
-midnight in that zone (`limited_until(..., threshold, weekly=budget, timezone=zone)`). The fence
-then holds only at steps up to the budget: the account's later steps stay open, and the budget
-check itself keeps it out of the budget step until the budget allows it. `_earliest_reset` reads
-each account at its loosest step (highest `until`, then highest weekly limit), with that step's
-weekly limit and zone. The stay reason is `<live> is below <until>% and today's <n>% weekly budget
-(step i of n)`; leaving, `<live> at <n>% weekly, over today's <n>% weekly budget`. `vibe auto
-status` renders the step `main until 99% (weekly: today's budget 80%)`.
+(fork) There is no budget of vibe's own (removed 19 Nov 2026): a step switches at `until` on the rows the
+account reports (`session`, `weekly_all`, and `block_models` rows), nothing else. `weekly_budget` on a step
+(and `routing.weekday_budget`, `routing.timezone`, a routing step's `budget`) are still accepted and ignored,
+and `policy_document` never writes them. `pool.Step` is `(account, until)`; `Decision` has no `weekly`,
+`threshold` or `zone`; `blocking`, `limited_until` and `_under` take no weekly limit. A fence is computed
+at the limit the account was left at (`LastSwitch.limit`), and `vibe auto status` renders `main until 99%`.
 
 Fast polling (§14): with a policy, the live account is `fast` while a counted row is within
 `FAST_POLL_MARGIN` (9) below one of its own step limits and not over it.
@@ -1817,17 +1806,15 @@ environment untouched.
 ### Routing — `route.py`, `vibe run auto`
 
 `settings.json` member `routing` (absent: the defaults; wrong anywhere: `vibe run auto` is
-refused, never guessed; `vibe auto on|off` carries it over untouched): `timezone`
-(`Europe/Berlin`), `weekday_budget` (Mon..Sun, `[20,40,60,80,100,100,100]`: the share of main's
-weekly usage allowed by the end of the day), `default_needs` (`["slack","atlassian"]`),
+refused, never guessed; `vibe auto on|off` carries it over untouched): `default_needs` (`["slack","atlassian"]`),
 `no_degrade` (`["m365"]`), `connectors` (main: slack, atlassian, m365; cursor: slack,
 atlassian, gcal; extra: none), `order` per class (`needs`, `no_needs`: lists of
-`{"account", "budget", "degraded", "last_resort"}`), `spent_percent`
+`{"account", "degraded", "last_resort"}`; `budget` is accepted and ignored), `spent_percent`
 (99), `roles` (role -> alias for `main`, `extra`, `cursor`; steps and `connectors` are written in
 roles; a Claude role naming no stored account makes a run that would end on Cursor refuse),
-(`cursor_cap_cents`, `cursor_margin_cents` and a step's `weekly_cap` were removed on 19 Nov 2026: vibe imposes no spending or usage cap of its own, only the limits providers report; the old keys are still accepted and ignored). A Cursor step cannot
-be `last_resort`. Defaults: needs = main within budget, cursor, extra (degraded: runs without the
-connectors, with a warning), main (last resort); no needs = extra, main within budget,
+(`timezone`, `weekday_budget`, a step's `budget`, `cursor_cap_cents`, `cursor_margin_cents` and a step's `weekly_cap` were removed on 19 Nov 2026: vibe imposes no spending or usage cap of its own, only the limits providers report; the old keys are still accepted and ignored). A Cursor step cannot
+be `last_resort`. Defaults: needs = main, cursor, extra (degraded: runs without the
+connectors, with a warning), main (last resort); no needs = extra, main,
 cursor, main (last resort). Unknown usage is unavailable and printed; only the last resort
 accepts an unknown or spent reading (with a warning), and only a dead login stops it. The
 decision is made at run start and never again; the Claude account that is Claude Code's own
@@ -1944,3 +1931,43 @@ secret. Not `--strict-mcp-config`; the user's own `--mcp-config` follows ours. N
 argument shapes, Slack's redirect-URL rules, Atlassian's
 acceptance of a loopback redirect and of these scopes, and the answers' exact shapes are from the
 vendors' documents and metadata only (`vibe bridge tools <upstream>` checks the names after a login).
+
+---
+
+## 21. Codex accounts (fork)
+
+A third account kind, `codex`, that vibe shows and never uses. Code: `codex.py`, `codex_usage.py`,
+`launch.read_codex` / `launch.codex_entry`, `cli._add_codex` / `cli._render_codex`, `tui.codex_content`,
+the `codexAsAccount` function of `index.html`.
+
+**Primary sources** (openai/codex at 1826d80, 19 Nov 2026): credentials, `codex-rs/login/src/auth/storage.rs`
+(`AuthDotJson`: `auth_mode`, `OPENAI_API_KEY`, `tokens.{id_token, access_token, refresh_token, account_id}`,
+file `$CODEX_HOME/auth.json`, keyring service "Codex Auth"), `codex-rs/config/src/types.rs`
+(`AuthCredentialsStoreMode`); usage, `codex-rs/backend-client/src/client/rate_limit_resets.rs`
+(`rate_limit_status_url`: `{base}/wham/usage` for the base `https://chatgpt.com/backend-api/`,
+`DEFAULT_CHATGPT_BASE_URL` in `codex-rs/model-provider/src/chatgpt_base_url.rs`),
+`codex-rs/model-provider/src/bearer_auth_provider.rs` (`Authorization: Bearer <access token>`,
+`chatgpt-account-id`), answer model `codex-rs/codex-backend-openapi-models` (`RateLimitStatusPayload`).
+OpenAI's docs for the login methods and storage: developers.openai.com/codex/auth.
+
+- **Marker**: `~/.vibemaxxing/codex/<alias>.json` `{schema, alias, kind: "codex", added_at, codex_home?}`
+  (0600). `codex_home` is `$CODEX_HOME` at `vibe add` time, absent for `~/.codex`. No credential, no
+  account file, no Keychain item. One alias namespace with Claude accounts, Cursor seats and `auto`.
+- **Login**: `auth.json` read only, 1 MB at most; JWT payloads decoded unverified for email, plan and
+  expiry, displayed only. vibe never refreshes it, never writes it. An API-key login or a file with no
+  access token has no usage. The access token is a `Secret`; its one `reveal()` is the `Authorization`
+  header in `codex_usage.fetch` (the seventh site; Cursor's is the sixth).
+- **Request**: `GET https://chatgpt.com/backend-api/wham/usage`, headers `Authorization`,
+  `ChatGPT-Account-ID`, `Accept`, vibe's own `User-Agent`. The client is `UrllibClient(CODEX_HOSTS)`
+  (`chatgpt.com` only), the Claude client cannot reach that host. Not sent once the access token's
+  `exp` is within 30 s.
+- **Cache**: the shared usage cache keyed by alias and the marker's `added_at`; payload is vibe's
+  normalised numbers, no token. Fresh for 120 s; an older answer is shown with its time up to 900 s.
+- **Envelope** (additive, only when an account exists, never in `accounts` or `pool`): `codex` is an
+  array of `{alias, kind, state ("ok"|"unknown"|"needs_login"|"api_key"), message, email, plan,
+  limit_reached, credits_balance, credits_unlimited, windows: [{label, percent, window_minutes,
+  resets_at}]}`. Labels follow the CLI (`5h`, `daily`, `weekly`, `monthly`, `annual`, else `usage` /
+  `secondary usage`; an extra metered limit is prefixed with its name).
+- **Never**: `vibe switch`, auto-switch, routing, `vibe run`, the status line and `status.json` do not
+  use a Codex account. `vibe remove` deletes the marker and its cache, never the CLI's login.
+

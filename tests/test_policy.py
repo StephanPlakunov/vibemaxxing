@@ -576,7 +576,19 @@ def test_a_removed_weekly_cap_in_an_old_settings_file_is_ignored(tmp_home: Path)
     _write(root, {"schema": 1, "auto_switch": True, "policy": document})
 
     assert auto.read_settings(root) == plain  # no weekday limit of vibe's own
-    assert plain.policy.steps[0].weekly_budget is False
+    assert not hasattr(plain.policy.steps[0], "weekly_budget")
+
+
+def test_a_removed_weekly_budget_in_an_old_settings_file_is_ignored(tmp_home: Path) -> None:
+    root = tmp_home / ".vibemaxxing"
+    document = json.loads(json.dumps(BRIEF))
+    _write(root, {"schema": 1, "auto_switch": True, "policy": document})
+    plain = auto.read_settings(root)
+    document["steps"][0]["weekly_budget"] = True
+    _write(root, {"schema": 1, "auto_switch": True, "policy": document})
+
+    assert auto.read_settings(root) == plain  # the step switches on `until`, nothing else
+    assert auto.policy_document(plain.policy) == BRIEF
 
 
 @pytest.mark.usefixtures("berlin")
@@ -585,7 +597,7 @@ def test_a_session_over_85_is_fenced_until_it_resets_not_midnight() -> None:
     rows = reading("main", 90, 30, now=now).rows
     assert rows is not None
 
-    assert limited_until(rows, 85, now, weekly=40) == now + 3 * HOUR
+    assert limited_until(rows, 85, now) == now + 3 * HOUR
 
 
 def test_a_stay_is_logged_every_five_minutes_not_every_minute(tmp_home: Path) -> None:

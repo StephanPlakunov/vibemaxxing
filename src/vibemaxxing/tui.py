@@ -162,6 +162,56 @@ def cursor_content(reading: launch.CursorReading, *, now_s: float) -> Content:
     return Content("\n").join(lines)
 
 
+def codex_content(reading: launch.CodexReading, *, now_s: float) -> Content:
+    """A Codex account like an account: who, the plan, one bar per usage window and its reset."""
+    plan = f" · {reading.plan}" if reading.plan else ""
+    lines: list[Content] = [
+        Content.assemble(
+            ("  ", _CALM),
+            (scrub(reading.alias), "bold"),
+            (f"  {scrub(reading.email or '—')}  Codex{scrub(plan)}", "dim"),
+        )
+    ]
+    usage = reading.usage
+    if usage is None:
+        text = (
+            reading.note
+            if reading.state in ("needs_login", "api_key")
+            else (f"usage: unknown ({reading.note})")
+        )
+        lines.append(Content.styled(f"  {scrub(text)}", _ELEVATED))
+        return Content("\n").join(lines)
+    if reading.note:
+        lines.append(Content.styled(f"  {scrub(reading.note)}", _ELEVATED))
+    for window in usage.windows:
+        percent = round(window.used_percent)
+        reset = ""
+        if window.resets_at_s is not None:
+            reset = _relative(
+                datetime.fromtimestamp(window.resets_at_s, UTC).isoformat(timespec="seconds"),
+                now_s,
+            )
+        lines.append(
+            Content.styled(
+                f"  {scrub(window.label):<{LABEL_WIDTH}}{_bar(percent)} {percent:>3}%  {reset}",
+                _ELEVATED if usage.limit_reached or percent >= 100 else _CALM,
+            )
+        )
+    if not usage.windows:
+        lines.append(Content.styled("  no limits reported", "dim"))
+    return Content("\n").join(lines)
+
+
+def _codex_shape(reading: launch.CodexReading) -> tuple[str, bool, tuple[str, ...] | None]:
+    usage = reading.usage
+    # A note, no usage or no windows adds a line, which is a different panel height.
+    return (
+        reading.alias,
+        bool(reading.note) or usage is None,
+        None if usage is None else tuple(w.label for w in usage.windows),
+    )
+
+
 def _cursor_shape(reading: launch.CursorReading) -> tuple[str, bool, tuple[str, ...] | None]:
     usage = reading.usage
     rows: list[str] = []
@@ -309,6 +359,9 @@ class Dashboard(App[None]):
         # Cursor seats: cached for two minutes inside read_cursor, so a one-minute refresh makes
         # a request at most every other cycle. Before the publish, so status.json has them.
         readings = await loop.run_in_executor(self._pool, partial(ctx.cursor_readings, now_s=now_s))
+        codex_seen = await loop.run_in_executor(
+            self._pool, partial(ctx.codex_readings, now_s=now_s)
+        )
         # It reads the Keychain to say who is live, so off the event loop as well.
         await loop.run_in_executor(
             self._pool, partial(auto.publish, ctx.root, port=ctx.port, now_s=now_s)
@@ -321,13 +374,15 @@ class Dashboard(App[None]):
             if views and all(view.summary is not None for view in views):
                 history.record(self._conn, at_s=now_s, pool=weeks)
             forecast = dry_in(history.samples(self._conn, since_s=now_s - _WINDOW_S))
-        rebuilt = await self._reshape(views, readings)
+        rebuilt = await self._reshape(views, readings, codex_seen)
         # A panel's height follows its shape, so a cycle that only changes
         # values — a bar, a percent, a reset time — needs no layout pass.
         for view in views:
             self.panels[view.alias].update(account_content(view, now_s=now_s), layout=rebuilt)
         for reading in readings:
             self.panels[reading.alias].update(cursor_content(reading, now_s=now_s), layout=rebuilt)
+        for seen in codex_seen:
+            self.panels[seen.alias].update(codex_content(seen, now_s=now_s), layout=rebuilt)
         self.query_one("#footer", Static).update(
             footer_content(
                 weeks=weeks,
@@ -339,15 +394,26 @@ class Dashboard(App[None]):
         )
 
     async def _reshape(
-        self, views: Sequence[AccountView], readings: Sequence[launch.CursorReading]
+        self,
+        views: Sequence[AccountView],
+        readings: Sequence[launch.CursorReading],
+        codex_seen: Sequence[launch.CodexReading] = (),
     ) -> bool:
-        shapes = [_shape(view) for view in views] + [_cursor_shape(r) for r in readings]
+        shapes = (
+            [_shape(view) for view in views]
+            + [_cursor_shape(r) for r in readings]
+            + [_codex_shape(r) for r in codex_seen]
+        )
         if shapes == self._shapes:
             return False
         self._shapes = shapes
         for panel in self.panels.values():
             await panel.remove()
-        aliases = [view.alias for view in views] + [r.alias for r in readings]
+        aliases = (
+            [view.alias for view in views]
+            + [r.alias for r in readings]
+            + [r.alias for r in codex_seen]
+        )
         self.panels = {alias: Static(classes="account") for alias in aliases}
         self.query_one("#empty", Static).display = not aliases
         await self.query_one("#accounts", VerticalScroll).mount_all(self.panels.values())

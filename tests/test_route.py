@@ -1,4 +1,4 @@
-"""Routing by need: every branch of both orders, the weekday budget and its day boundaries."""
+"""Routing by need: every branch of both orders. Routing reads only what each account reports."""
 
 from __future__ import annotations
 
@@ -24,12 +24,12 @@ def berlin(*args: int) -> float:
     return datetime(*args, tzinfo=BERLIN).timestamp()  # type: ignore[arg-type]
 
 
-def main_(weekly: int | None = 30, health: Health = Health.OK) -> Candidate:
-    return Candidate("main", "claude", health, "x", weekly, weekly is not None)
+def main_(health: Health = Health.OK) -> Candidate:
+    return Candidate("main", "claude", health, "x")
 
 
 def extra(health: Health = Health.OK) -> Candidate:
-    return Candidate("extra", "claude", health, "extra's numbers", 10, True)
+    return Candidate("extra", "claude", health, "extra's numbers")
 
 
 def cursor_(health: Health = Health.OK) -> Candidate:
@@ -53,42 +53,25 @@ def pick(
     )
 
 
-# --- a run that needs connectors: main (budget) -> cursor -> extra -> main --------------
+# --- a run that needs connectors: main -> cursor -> extra -> main --------------
 
 
-def test_needs_main_within_budget_goes_to_main() -> None:
-    chosen = pick([main_(39), cursor_(), extra()])  # below Tuesday's 40%, as the tick counts
-
-    assert (chosen.alias, chosen.warnings) == ("main", ())
-    assert "within today's 40% budget" in chosen.reason
-
-
-def test_needs_main_over_budget_goes_to_cursor() -> None:
-    chosen = pick([main_(40), cursor_(), extra()])  # at the budget is out
-
-    assert chosen.alias == "cursor"
-    assert any(
-        "main: weekly 40% is at or over today's 40% budget" in line for line in chosen.skipped
-    )
+def test_needs_main_with_room_goes_to_main_on_any_day() -> None:
+    # No pacing budget: only what main itself reports decides, so every weekday is the same.
+    for day in (berlin(2026, 11, 2, 0, 0), NOON_TUE, berlin(2026, 11, 8, 23, 59)):
+        chosen = pick([main_(), cursor_(), extra()], now_s=day)
+        assert (chosen.alias, chosen.warnings, chosen.reason) == ("main", (), "x")
 
 
 def test_needs_cursor_spent_goes_to_extra_without_connectors_and_warns() -> None:
-    chosen = pick([main_(41), cursor_(Health.OUT), extra()])
+    chosen = pick([main_(Health.OUT), cursor_(Health.OUT), extra()])
 
     assert chosen.alias == "extra"
     assert chosen.warnings == ("extra has no atlassian, slack: this session runs without it",)
 
 
-def test_needs_extra_spent_too_goes_to_main_regardless_of_budget() -> None:
-    chosen = pick([main_(41), cursor_(Health.OUT), extra(Health.OUT)])
-
-    assert chosen.alias == "main"
-    assert chosen.reason.startswith("last resort")
-    assert chosen.warnings == ()
-
-
 def test_needs_main_spent_for_now_skips_to_cursor() -> None:
-    chosen = pick([main_(10, Health.OUT), cursor_(), extra()])
+    chosen = pick([main_(Health.OUT), cursor_(), extra()])
 
     assert chosen.alias == "cursor"
     assert any(line.startswith("main: spent") for line in chosen.skipped)
@@ -101,55 +84,46 @@ def test_needs_unknown_usage_is_unavailable_and_says_so() -> None:
     assert chosen.alias == "cursor"
     assert any("main: usage unknown, so not used" in line for line in chosen.skipped)
     unknown_cursor = Candidate("cursor", "cursor", Health.UNKNOWN, "usage unknown (HTTP 500)")
-    chosen = pick([main_(90), unknown_cursor, extra()])
+    chosen = pick([main_(Health.OUT), unknown_cursor, extra()])
     assert chosen.alias == "extra"
     assert any(
         "cursor: usage unknown, so not used (usage unknown (HTTP 500))" in x for x in chosen.skipped
     )
 
 
-def test_main_with_unknown_weekly_has_an_unknown_budget() -> None:
-    chosen = pick([Candidate("main", "claude", Health.OK, "x", None, False), cursor_(), extra()])
-
-    assert chosen.alias == "cursor"
-    assert any("weekly usage unknown, so the budget is unknown" in line for line in chosen.skipped)
-    stale = Candidate("main", "claude", Health.OK, "x", 10, False)
-    assert pick([stale, cursor_(), extra()]).alias == "cursor"
-
-
 def test_a_logged_out_cursor_is_skipped() -> None:
     dead = Candidate("cursor", "cursor", Health.DEAD, "not logged in: cursor-agent login")
 
-    chosen = pick([main_(90), dead, extra()])
+    chosen = pick([main_(Health.OUT), dead, extra()])
 
     assert chosen.alias == "extra"
     assert any("cursor: not logged in" in line for line in chosen.skipped)
 
 
 def test_needs_m365_can_only_go_to_main() -> None:
-    chosen = pick([main_(90), cursor_(), extra()], needs=("m365",))
+    chosen = pick([main_(Health.OUT), cursor_(), extra()], needs=("m365",))
 
     assert chosen.alias == "main"  # cursor lacks m365; extra may not degrade past it
     assert chosen.reason.startswith("last resort")
     assert any("cursor: has no m365" in line for line in chosen.skipped)
     assert any("extra: has no m365" in line for line in chosen.skipped)
-    assert pick([main_(10), cursor_(), extra()], needs=("m365",)).alias == "main"
+    assert pick([main_(), cursor_(), extra()], needs=("m365",)).alias == "main"
     # m365 together with slack: still main only
-    assert pick([main_(90), cursor_(), extra()], needs=("slack", "m365")).alias == "main"
+    assert pick([main_(Health.OUT), cursor_(), extra()], needs=("slack", "m365")).alias == "main"
 
 
 def test_needs_gcal_is_cursors_and_not_mains() -> None:
-    chosen = pick([main_(10), cursor_(), extra()], needs=("gcal",))
+    chosen = pick([main_(), cursor_(), extra()], needs=("gcal",))
 
     assert chosen.alias == "cursor"  # main has no gcal connector
 
 
 def test_claude_only_never_picks_cursor() -> None:
-    chosen = pick([main_(90), cursor_(), extra()], claude_only=True)
+    chosen = pick([main_(Health.OUT), cursor_(), extra()], claude_only=True)
 
     assert chosen.alias == "extra"
     assert any("cursor: the program is Claude-only" in line for line in chosen.skipped)
-    assert pick([main_(10), cursor_(), extra()], claude_only=True).alias == "main"
+    assert pick([main_(), cursor_(), extra()], claude_only=True).alias == "main"
 
 
 def test_the_last_resort_runs_on_unknown_or_spent_main_with_a_warning() -> None:
@@ -158,7 +132,7 @@ def test_the_last_resort_runs_on_unknown_or_spent_main_with_a_warning() -> None:
     assert chosen.alias == "main"
     assert chosen.warnings == ("main: usage unknown (no numbers)",)
 
-    spent = main_(100, Health.OUT)
+    spent = main_(Health.OUT)
     chosen = pick([spent, cursor_(Health.OUT), extra(Health.OUT)])
     assert chosen.alias == "main" and "this may be refused" in chosen.warnings[0]
 
@@ -173,116 +147,70 @@ def test_a_dead_main_login_stops_even_the_last_resort() -> None:
     assert "main: the login for main has lapsed" in caught.value.message
 
 
-# --- a run that needs nothing: extra -> main (budget) -> cursor -> main -----------------
+# --- a run that needs nothing: extra -> main -> cursor -> main -----------------
 
 
 def test_no_needs_extra_first() -> None:
-    assert pick([main_(10), cursor_(), extra()], needs=()).alias == "extra"
+    assert pick([main_(), cursor_(), extra()], needs=()).alias == "extra"
 
 
-def test_no_needs_extra_spent_main_within_budget() -> None:
-    chosen = pick([main_(39), cursor_(), extra(Health.OUT)], needs=())
+def test_no_needs_extra_spent_main_with_room() -> None:
+    chosen = pick([main_(), cursor_(), extra(Health.OUT)], needs=())
 
     assert chosen.alias == "main"
 
 
-def test_no_needs_extra_spent_main_over_budget_goes_to_cursor() -> None:
-    chosen = pick([main_(41), cursor_(), extra(Health.OUT)], needs=())
+def test_no_needs_extra_spent_main_spent_goes_to_cursor() -> None:
+    chosen = pick([main_(Health.OUT), cursor_(), extra(Health.OUT)], needs=())
 
     assert chosen.alias == "cursor"
 
 
-def test_no_needs_cursor_spent_too_goes_to_main_regardless() -> None:
-    chosen = pick([main_(95), cursor_(Health.OUT), extra(Health.OUT)], needs=())
+def test_no_needs_everything_spent_goes_to_main_as_the_last_resort() -> None:
+    chosen = pick([main_(Health.OUT), cursor_(Health.OUT), extra(Health.OUT)], needs=())
 
     assert chosen.alias == "main" and chosen.reason.startswith("last resort")
 
 
 def test_no_needs_unknown_extra_is_skipped() -> None:
-    chosen = pick([main_(10), cursor_(), extra(Health.UNKNOWN)], needs=())
+    chosen = pick([main_(), cursor_(), extra(Health.UNKNOWN)], needs=())
 
     assert chosen.alias == "main"
     assert any("extra: usage unknown" in line for line in chosen.skipped)
 
 
 def test_no_needs_claude_only_skips_cursor() -> None:
-    chosen = pick([main_(95), cursor_(), extra(Health.OUT)], needs=(), claude_only=True)
+    chosen = pick([main_(Health.OUT), cursor_(), extra(Health.OUT)], needs=(), claude_only=True)
 
     assert chosen.alias == "main" and chosen.reason.startswith("last resort")
 
 
 def test_an_alias_the_order_names_but_nobody_has_is_skipped_by_name() -> None:
-    chosen = pick([main_(10)], needs=())
+    chosen = pick([main_()], needs=())
 
     assert chosen.alias == "main"
     assert "extra: no such account" in chosen.skipped
 
 
-# --- the weekday budget and its day boundaries ----------------------------------------------
+# --- the removed pacing budget ---------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("when", "budget"),
-    [
-        (berlin(2026, 11, 2, 0, 0), 20),  # Monday 00:00
-        (berlin(2026, 11, 2, 23, 59), 20),  # Monday 23:59 still Monday's 20
-        (berlin(2026, 11, 3, 0, 0), 40),  # Tuesday 00:00: the next share opens
-        (berlin(2026, 11, 3, 23, 59), 40),
-        (berlin(2026, 11, 4, 0, 0), 60),
-        (berlin(2026, 11, 5, 12, 0), 80),
-        (berlin(2026, 11, 6, 12, 0), 100),
-        (berlin(2026, 11, 7, 12, 0), 100),  # Saturday
-        (berlin(2026, 11, 8, 23, 59), 100),  # Sunday
-        (berlin(2026, 11, 9, 0, 0), 20),  # the new week
-    ],
-)
-def test_the_budget_follows_the_berlin_day(when: float, budget: int) -> None:
-    assert route.today_budget(Routing(), when) == budget
+def test_the_removed_budget_settings_are_still_read_and_change_nothing(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        {
+            "routing": {
+                "timezone": "UTC",
+                "weekday_budget": [1, 2, 3, 4, 5, 6, 7],
+                "order": {"needs": [{"account": "main", "budget": True}, {"account": "extra"}]},
+            }
+        },
+    )
 
+    routing = route.read_routing(tmp_path)
 
-def test_the_day_is_berlins_not_utc() -> None:
-    # 23:30 UTC on Monday is 00:30 Tuesday in Berlin (CET, +1).
-    utc_monday_late = datetime(2026, 11, 2, 23, 30, tzinfo=ZoneInfo("UTC")).timestamp()
-
-    assert route.today_budget(Routing(), utc_monday_late) == 40
-    # And a Berlin summer evening: 23:30 CEST Monday is 21:30 UTC Monday.
-    assert route.today_budget(Routing(), berlin(2026, 7, 6, 23, 30)) == 20  # Monday
-
-
-def test_a_day_boundary_flips_the_routing() -> None:
-    cands = [main_(30), cursor_(), extra()]
-
-    late_monday = berlin(2026, 11, 2, 23, 59)
-    early_tuesday = berlin(2026, 11, 3, 0, 0)
-
-    assert pick(cands, now_s=late_monday).alias == "cursor"  # 30% > Monday's 20%
-    assert pick(cands, now_s=early_tuesday).alias == "main"  # 30% <= Tuesday's 40%
-
-
-def test_dst_changes_do_not_shift_the_day() -> None:
-    weekdays = Routing(weekday_budget=(10, 20, 30, 40, 50, 60, 70))
-    # Spring forward: Sunday 29 Mar 2026, 02:00 CET -> 03:00 CEST.
-    assert route.today_budget(weekdays, berlin(2026, 3, 28, 23, 59)) == 60  # Saturday
-    assert route.today_budget(weekdays, berlin(2026, 3, 29, 0, 0)) == 70  # Sunday
-    assert route.today_budget(weekdays, berlin(2026, 3, 29, 3, 30)) == 70  # after the jump
-    assert route.today_budget(weekdays, berlin(2026, 3, 29, 23, 59)) == 70
-    assert route.today_budget(weekdays, berlin(2026, 3, 30, 0, 0)) == 10  # Monday
-    # Fall back: Sunday 25 Oct 2026, 03:00 CEST -> 02:00 CET (02:30 happens twice).
-    first = datetime(2026, 10, 25, 2, 30, tzinfo=BERLIN, fold=0).timestamp()
-    second = datetime(2026, 10, 25, 2, 30, tzinfo=BERLIN, fold=1).timestamp()
-    assert second - first == 3600
-    assert route.today_budget(weekdays, first) == route.today_budget(weekdays, second) == 70
-    assert route.today_budget(weekdays, berlin(2026, 10, 25, 23, 59)) == 70
-    assert route.today_budget(weekdays, berlin(2026, 10, 26, 0, 0)) == 10  # Monday, 23h later
-
-
-def test_the_budget_list_and_timezone_are_configurable() -> None:
-    custom = Routing(timezone="America/New_York", weekday_budget=(5, 5, 5, 5, 5, 5, 5))
-
-    assert route.today_budget(custom, NOON_TUE) == 5
-    new_york_late = datetime(2026, 11, 3, 3, 0, tzinfo=ZoneInfo("UTC")).timestamp()  # Mon 22:00 NY
-    mixed = Routing(timezone="America/New_York", weekday_budget=(11, 22, 33, 44, 55, 66, 77))
-    assert route.today_budget(mixed, new_york_late) == 11
+    assert routing.order["needs"] == (route.Step("main"), route.Step("extra"))
+    assert not hasattr(routing, "weekday_budget") and not hasattr(route, "today_budget")
 
 
 # --- needs ---------------------------------------------------------------------------
@@ -319,13 +247,11 @@ def test_routing_is_configurable_per_part(tmp_path: Path) -> None:
         tmp_path,
         {
             "routing": {
-                "timezone": "UTC",
-                "weekday_budget": [10, 20, 30, 40, 50, 60, 70],
                 "default_needs": ["gcal"],
                 "connectors": {"main": ["slack"], "work": ["slack", "gcal"]},
                 "order": {
                     "needs": [{"account": "work"}, {"account": "main", "last_resort": True}],
-                    "no_needs": [{"account": "main", "budget": True, "degraded": True}],
+                    "no_needs": [{"account": "main", "degraded": True}],
                 },
                 "spent_percent": 95,
             }
@@ -334,14 +260,13 @@ def test_routing_is_configurable_per_part(tmp_path: Path) -> None:
 
     routing = route.read_routing(tmp_path)
 
-    assert routing.timezone == "UTC" and routing.weekday_budget == (10, 20, 30, 40, 50, 60, 70)
     assert routing.default_needs == ("gcal",)
     assert routing.connectors["work"] == ("slack", "gcal") and routing.connectors["main"] == (
         "slack",
     )
     assert routing.connectors["cursor"] == ("slack", "atlassian", "gcal")  # untouched default
     assert routing.order["needs"] == (route.Step("work"), route.Step("main", last_resort=True))
-    assert routing.order["no_needs"] == (route.Step("main", budget=True, degraded=True),)
+    assert routing.order["no_needs"] == (route.Step("main", degraded=True),)
     assert routing.spent_percent == 95
 
 
@@ -349,11 +274,6 @@ def test_routing_is_configurable_per_part(tmp_path: Path) -> None:
     "bad",
     [
         "text",
-        {"timezone": "Mars/Base"},
-        {"timezone": 3},
-        {"weekday_budget": [1, 2, 3]},
-        {"weekday_budget": [20, 40, 60, 80, 100, 100, 101]},
-        {"weekday_budget": [20, 40, 60, 80, 100, 100, True]},
         {"default_needs": ["teams"]},
         {"default_needs": "slack"},
         {"connectors": {"main": ["teams"]}},
@@ -382,41 +302,39 @@ def test_a_file_that_is_not_json_is_refused(tmp_path: Path) -> None:
 
 
 def test_toggling_auto_switch_keeps_the_routing(tmp_path: Path) -> None:
-    write(tmp_path, {"routing": {"weekday_budget": [1, 2, 3, 4, 5, 6, 7]}})
+    write(tmp_path, {"routing": {"default_needs": ["gcal"]}})
 
     auto.write_settings(tmp_path, Settings(auto_switch=True))
 
     assert json.loads((tmp_path / "settings.json").read_text())["routing"] == {
-        "weekday_budget": [1, 2, 3, 4, 5, 6, 7]
+        "default_needs": ["gcal"]
     }
     assert auto.read_settings(tmp_path).auto_switch is True  # auto-switch ignores the member
-    assert route.read_routing(tmp_path).weekday_budget == (1, 2, 3, 4, 5, 6, 7)
+    assert route.read_routing(tmp_path).default_needs == ("gcal",)
 
 
 # --- roles: routing never depends on the literal names main / extra / cursor ---------------------
 
 
-def cand(
-    alias: str, kind: str = "claude", health: Health = Health.OK, weekly: int | None = 10
-) -> Candidate:
-    return Candidate(alias, kind, health, "x", weekly, weekly is not None)
+def cand(alias: str, kind: str = "claude", health: Health = Health.OK) -> Candidate:
+    return Candidate(alias, kind, health, "x")
 
 
 ROLES = Routing(roles={"main": "stephan", "extra": "shared", "cursor": "zvoove"})
 
 
 def test_roles_map_the_order_onto_whatever_the_accounts_are_called() -> None:
-    cands = [cand("stephan", weekly=10), cand("shared", weekly=5), cand("zvoove", "cursor")]
+    cands = [cand("stephan"), cand("shared"), cand("zvoove", "cursor")]
 
     assert pick(cands, needs=(), routing=ROLES).alias == "shared"  # the extra role first
-    assert pick(cands, needs=NEEDS, routing=ROLES).alias == "stephan"  # main within budget
-    over = [cand("stephan", weekly=90), cand("shared", weekly=5), cand("zvoove", "cursor")]
+    assert pick(cands, needs=NEEDS, routing=ROLES).alias == "stephan"  # main first
+    over = [cand("stephan", health=Health.OUT), cand("shared"), cand("zvoove", "cursor")]
     chosen = pick(over, needs=NEEDS, routing=ROLES)
     assert chosen.alias == "zvoove" and chosen.kind == "cursor"
 
 
 def test_connectors_follow_the_role_not_the_alias() -> None:
-    cands = [cand("stephan", weekly=90), cand("shared"), cand("zvoove", "cursor")]
+    cands = [cand("stephan", health=Health.OUT), cand("shared"), cand("zvoove", "cursor")]
 
     # m365 belongs to the main role: the alias "stephan" has it, "zvoove" (cursor role) does not
     assert pick(cands, needs=("m365",), routing=ROLES).alias == "stephan"
@@ -457,15 +375,15 @@ def test_a_missing_extra_role_is_skipped_but_cursor_is_still_refused_while_it_is
     chosen = pick(cands, needs=(), routing=no_extra)
     assert chosen.alias == "stephan"
     assert any("extra (alias 'nobody'): no such account" in line for line in chosen.skipped)
-    # main over budget, so the order would reach Cursor: refused, because a Claude role is missing
-    over = [cand("stephan", weekly=95), cand("zvoove", "cursor")]
+    # main spent, so the order would reach Cursor: refused, because a Claude role is missing
+    over = [cand("stephan", health=Health.OUT), cand("zvoove", "cursor")]
     with pytest.raises(UsageError, match="extra -> 'nobody'"):
         pick(over, needs=(), routing=no_extra)
 
 
 def test_a_missing_cursor_role_just_skips_the_step() -> None:
     no_cursor = Routing(roles={"main": "stephan", "extra": "shared", "cursor": "nothing"})
-    cands = [cand("stephan", weekly=95), cand("shared", health=Health.OUT)]
+    cands = [cand("stephan", health=Health.OUT), cand("shared", health=Health.OUT)]
 
     chosen = pick(cands, needs=NEEDS, routing=no_cursor)
 

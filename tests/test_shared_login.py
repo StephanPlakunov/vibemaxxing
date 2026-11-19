@@ -55,7 +55,7 @@ def test_shared_login_is_off_unless_set_and_must_be_a_boolean(tmp_path: Path) ->
 def test_a_connector_run_goes_on_the_shared_login_and_says_one_line(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=10)  # Tuesday: budget 40%
+    auto_world(world, main_weekly=10)
     shared(world)
 
     assert world.main("run", "auto", "--", "claude", "-p", "hi") == 0
@@ -64,7 +64,7 @@ def test_a_connector_run_goes_on_the_shared_login_and_says_one_line(
     assert call["has_token"] is False and call["has_config_dir"] is False  # Claude Code's own login
     env = call["env"]
     assert isinstance(env, dict) and env["VIBE_SESSION"] == "live"
-    assert capsys.readouterr().err == "vibemaxxing: auto picked main: 10% < 40%\n"
+    assert capsys.readouterr().err == "vibemaxxing: auto picked main\n"
 
 
 def test_a_solo_run_also_follows_the_shared_login_not_the_no_needs_order(
@@ -77,20 +77,20 @@ def test_a_solo_run_also_follows_the_shared_login_not_the_no_needs_order(
 
     call = only_call(world)
     assert call["has_token"] is False and call["has_config_dir"] is False
-    assert capsys.readouterr().err == "vibemaxxing: auto picked main: 10% < 40%\n"
+    assert capsys.readouterr().err == "vibemaxxing: auto picked main\n"
 
 
 def test_on_extra_the_line_says_why_main_is_not_the_shared_login(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    world.claude_account("main", session=5, weekly=60)
+    world.claude_account("main", session=5, weekly=100)
     world.claude_account("extra", session=5, weekly=5, active=True)  # the tick moved it
     shared(world)
 
     assert world.main("run", "auto", "--no-needs", "--", "claude", "-p", "hi") == 0
 
     assert only_call(world)["has_token"] is False
-    assert capsys.readouterr().err == "vibemaxxing: auto picked extra: main 60% > 40%\n"
+    assert capsys.readouterr().err == "vibemaxxing: auto picked extra: main spent\n"
 
 
 def test_the_bridge_comes_along_when_any_account_the_session_may_move_to_lacks_it(
@@ -105,7 +105,7 @@ def test_the_bridge_comes_along_when_any_account_the_session_may_move_to_lacks_i
     argv = only_call(world)["argv"]
     assert isinstance(argv, list) and config_flag(argv) is not None  # main has it; extra does not
     assert capsys.readouterr().err == (
-        "vibemaxxing: auto picked main: 10% < 40%\n"
+        "vibemaxxing: auto picked main\n"
         "vibemaxxing: added vibe-bridge (atlassian) to this run: --no-bridge turns it off\n"
     )
 
@@ -113,7 +113,7 @@ def test_the_bridge_comes_along_when_any_account_the_session_may_move_to_lacks_i
 def test_a_connector_run_on_extra_warns_once_about_what_it_will_not_have(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    world.claude_account("main", session=5, weekly=60)
+    world.claude_account("main", session=5, weekly=100)
     world.claude_account("extra", session=5, weekly=5, active=True)
     log_in(world, ATLASSIAN)
     shared(world, order={"needs": [{"account": "extra", "degraded": True}]})
@@ -283,15 +283,15 @@ def test_a_run_without_a_command_starts_a_session(
     assert only_call(world)["argv"] == []  # plain `claude` on the shared login
 
 
-def test_at_exactly_the_budget_main_is_out_for_routing_as_for_the_tick(
+def test_at_the_spent_percent_main_is_out_for_routing_as_for_the_tick(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    auto_world(world, main_weekly=40)  # Tuesday: budget 40%
+    auto_world(world, main_weekly=99)
 
     args = ("--", "claude", "-p", "hi", "--model", "sonnet")
     assert world.main("run", "auto", "--needs", "slack", *args) == 0
 
-    assert "auto picked cursor: main 40% = 40%" in capsys.readouterr().err
+    assert "auto picked cursor: main spent" in capsys.readouterr().err
 
 
 def test_vibes_own_flags_after_the_account_are_vibes_not_a_command() -> None:

@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import broker, cursor, envelope, oauth, pool, route, statusline, store, usage
+from vibemaxxing import broker, cursor, envelope, oauth, pool, statusline, store, usage
 from vibemaxxing.credentials import holds_refresh_token, parse_blob
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, UsageError, VibeError
@@ -123,32 +123,15 @@ def _parse_policy(raw: object) -> Policy | None:
             return None
         if until is None or not 1 <= until <= MAX_THRESHOLD:
             return None
-        weekly_budget = step.get("weekly_budget", False)
-        if not isinstance(weekly_budget, bool):
+        # "weekly_budget" is a removed member (vibe's own pacing budget); accepted and ignored.
+        if not isinstance(step.get("weekly_budget", False), bool):
             return None
-        parsed.append(Step(account, until, weekly_budget))
+        parsed.append(Step(account, until))
     return Policy(tuple(parsed), tuple(str(model).strip() for model in models))
 
 
-def _budget(parsed: dict[str, object], root: Path) -> pool.Budget | None:
-    """Today's budget for a `weekly_budget` step: the routing's, or None when it is wrong.
-
-    The same `weekday_budget` and `timezone` `vibe run auto` routes by. A routing that is
-    wrong is not read as the defaults here either: a step would then leave an account at a
-    budget nobody chose.
-    """
-    try:
-        routing = route.parse_routing(parsed.get("routing"), settings_path(root))
-    except UsageError:
-        return None
-    return pool.Budget(routing.weekday_budget, routing.timezone)
-
-
 def _step_document(step: Step) -> dict[str, object]:
-    document: dict[str, object] = {"account": step.account, "until": step.until}
-    if step.weekly_budget:
-        document["weekly_budget"] = True
-    return document
+    return {"account": step.account, "until": step.until}
 
 
 def policy_document(policy: Policy) -> dict[str, object] | None:
@@ -178,9 +161,6 @@ def _parse_settings(root: Path) -> Settings | None:
     cooldown = _int(parsed.get("cooldown_s", DEFAULT_COOLDOWN_S))
     excluded = parsed.get("excluded", [])
     policy = _parse_policy(parsed.get("policy"))
-    if policy is not None and any(step.weekly_budget for step in policy.steps):
-        budget = _budget(parsed, root)
-        policy = None if budget is None else replace(policy, budget=budget)
     if (
         not isinstance(enabled, bool)
         or threshold is None
@@ -489,7 +469,6 @@ def _tick(
 
     rows = next((v.summary.rows for v in views if v.alias == live and v.summary is not None), ())
     limit = decision.limit if decision.limit is not None else settings.threshold
-    threshold = decision.threshold if decision.threshold is not None else limit
     models = settings.policy.block_models
     line = f"switched {live} -> {target}: {decision.reason}"
     notice = f"Switched to {target}: {decision.reason}"
@@ -503,11 +482,9 @@ def _tick(
                 decision.reason,
                 pool.limited_until(
                     rows,
-                    threshold,
+                    limit,
                     now_s,
                     models=models,
-                    weekly=decision.weekly,
-                    timezone=decision.zone,
                 ),
                 limit,
             ),

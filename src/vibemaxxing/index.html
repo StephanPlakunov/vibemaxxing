@@ -340,6 +340,28 @@
              plan: 'Cursor' + (seat.team ? ' \u00b7 ' + seat.team : ''), rows: rows, breakdown: [] };
   }
 
+  // A Codex account is one more ledger entry too: one bar per usage window the plan reports (5h,
+  // weekly), each with its reset. It is not in the pool or the week chart.
+  function codexAsAccount(entry) {
+    var rows = [];
+    var message = entry.message || null;
+    if (entry.state === 'needs_login' || entry.state === 'api_key') {
+      message = entry.message || 'not logged in \u2014 run: codex login';
+    } else if (entry.state !== 'ok') {
+      message = 'usage: unknown' + (entry.message ? ' (' + entry.message + ')' : '');
+    } else {
+      (entry.windows || []).forEach(function (w) {
+        rows.push({ label: w.label, percent: w.percent,
+                    severity: entry.limit_reached || w.percent >= 100 ? 'warn' : 'normal',
+                    resets_at: w.resets_at });
+      });
+      if (entry.limit_reached) message = (message ? message + ' \u00b7 ' : '') + 'limit reached';
+    }
+    return { alias: entry.alias, active: false, state: entry.state, message: message,
+             email: entry.email, display_name: null, organization: null,
+             plan: 'Codex' + (entry.plan ? ' \u00b7 ' + entry.plan : ''), rows: rows, breakdown: [] };
+  }
+
   function buildAccount(account) {
     var item = el('li', 'account');
     var identity = el('div');
@@ -556,7 +578,8 @@
 
   function render(envelope) {
     // Claude accounts, then any Cursor seat (envelope.cursor exists only when one is stored).
-    var shown = envelope.accounts.concat((envelope.cursor || []).map(cursorAsAccount));
+    var shown = envelope.accounts.concat((envelope.cursor || []).map(cursorAsAccount),
+                                         (envelope.codex || []).map(codexAsAccount));
     // Rebuild only when the shape changes; otherwise every value is repainted
     // into the nodes that already exist, so a page left open for days neither
     // grows nor flickers.

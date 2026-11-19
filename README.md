@@ -261,27 +261,11 @@ rows reset first.
   out of the 85% step until what limited it has reset; its 99% step is still open.
 - The policy is followed, so **a `vibe switch` to an account in the policy is undone by the
   next tick** when the policy says otherwise. Run `vibe auto off` to hold an account by hand.
-- **`"weekly_budget": true`** on a step makes its weekly limit today's budget, the one `vibe run
-  auto` routes by (`routing.weekday_budget` in `routing.timezone`; default Mon 20%, Tue 40%,
-  Wed 60%, Thu 80%, Fri-Sun 100%, Berlin), while the session row (and `block_models` rows) keep the
-  step's `until`. For one shared login:
-
-  ```json
-  {"mode": "ordered",
-   "steps": [{"account": "main", "until": 99, "weekly_budget": true},
-             {"account": "extra", "until": 99}, {"account": "main", "until": 99}],
-   "then": "earliest_reset"}
-  ```
-
-  main while its week is within today's budget and its session below 99%, then extra, then main
-  again whatever the budget. An account left over the budget alone is back at that step as soon
-  as the budget allows it (at Berlin midnight at the latest, 80% to 100% on Friday), after the
-  cooldown, not only after its weekly reset; its later steps stay open meanwhile. The flag must
-  be a boolean, and a `routing` member that is wrong then leaves
-  the file at the defaults too.
+- vibe has **no pacing budget of its own**: a step switches at its `until` on the rows the account
+  itself reports (session, weekly, and the `block_models` rows), and nowhere else. A `weekly_budget`
+  member from an older settings.json is accepted and ignored.
 - A policy that is wrong anywhere leaves the whole file at the defaults, so auto-switch is
-  off. `vibe auto status` shows the policy, the step it is on now and the next one (a budget
-  step reads `main until 99% (weekly: today's budget 80%)`):
+  off. `vibe auto status` shows the policy, the step it is on now and the next one:
 
 ```
 $ vibe auto status
@@ -478,13 +462,13 @@ has not been verified beyond one read-only call on one seat.**
 account when the run starts and never again for that run (a running session keeps its login).
 Defaults, all configurable under `routing` in `~/.vibemaxxing/settings.json`:
 
-- **needs connectors**: `main` while its weekly usage is within today's budget, else `cursor`
-  while it has usage left, else `extra` (no connectors: the run goes without and says so), else
-  `main` whatever the budget.
-- **needs none**: `extra`, else `main` within budget, else `cursor`, else `main` whatever the
-  budget.
-- **Budget**: the share of main's weekly usage allowed by the end of each day, Berlin time:
-  Mon 20%, Tue 40%, Wed 60%, Thu 80%, Fri-Sun 100%.
+- **needs connectors**: `main` while it has room (its session and weekly rows below the spent
+  percent, 99%), else `cursor` while it has usage left, else `extra` (no connectors: the run goes
+  without and says so), else `main` as the last resort.
+- **needs none**: `extra`, else `main` while it has room, else `cursor`, else `main` as the last
+  resort.
+- **No budget of vibe's own**: no weekday share, no timezone. An account is used or passed over only
+  by what its provider reports for it, live.
 - **Cursor has usage left** while its included usage and bonus last, and then its personal
   on-demand limit, exactly as Cursor reports it (it follows an admin raising it). vibe sets no limit, margin or
   ceiling of its own: when Cursor reports none, the seat shows "no limit reported" and is not held back. vibe uses
@@ -493,9 +477,8 @@ Defaults, all configurable under `routing` in `~/.vibemaxxing/settings.json`:
   counts as spent after that, until the cycle resets.
 - `--needs m365` can only go to main. `--claude-only` never picks Cursor.
 - An account with unknown usage is unavailable, and vibe prints why it was skipped.
-- `vibe run auto` prints one line, `vibemaxxing: auto picked main: 75% < 80%` (main's weekly use
-  against today's budget) or `vibemaxxing: auto picked cursor: main 82% > 80%` (why the first choice
-  was passed over), plus one line when it adds the bridge and one per real warning. A run on an
+- `vibe run auto` prints one line, `vibemaxxing: auto picked main` or `vibemaxxing: auto picked cursor: main spent` (why the first
+  choice was passed over), plus one line when it adds the bridge and one per real warning. A run on an
   account you name prints nothing unless something may go wrong. A Claude session
   id cannot be resumed on Cursor, nor the reverse: it starts a fresh run with `--brief "<task>"`
   and `--handover <file>` instead, and says so.
@@ -506,11 +489,10 @@ the same names). A Claude role that names no stored account makes the run refuse
 through to Cursor. A Cursor step cannot be the last resort.
 
 ```json
-{"routing": {"weekday_budget": [20, 40, 60, 80, 100, 100, 100], "timezone": "Europe/Berlin",
-             "default_needs": ["slack", "atlassian"],
+{"routing": {"default_needs": ["slack", "atlassian"],
              "connectors": {"main": ["slack", "atlassian", "m365"],
                             "cursor": ["slack", "atlassian", "gcal"], "extra": []},
-             "order": {"needs": [{"account": "main", "budget": true}, {"account": "cursor"},
+             "order": {"needs": [{"account": "main"}, {"account": "cursor"},
                                  {"account": "extra", "degraded": true},
                                  {"account": "main", "last_resort": true}]}}}
 ```
@@ -557,6 +539,38 @@ declared `--needs`. Headless `cursor-agent -p` also stops at a workspace nobody 
 no output: seen live); `vibe run cursor --trust-workspace` passes `--trust`, and vibe never adds it
 on its own. In a headless run the Slack MCP answered "needs auth" even though the interactive agent
 is logged in to it, so check `--needs` runs on Cursor before relying on them.
+
+## Codex accounts
+
+Fork feature. A Codex account (the OpenAI Codex CLI, signed in with ChatGPT) is a third kind of
+account that vibe only **shows**: its plan usage appears in `vibe list`, `vibe list --json`, the
+TUI and the web dashboard next to the Claude and Cursor accounts.
+
+```
+curl -fsSL https://chatgpt.com/codex/install.sh | sh   # OpenAI's documented install on macOS and Linux
+codex login                                            # once, in the browser; Codex keeps that login
+vibe add zvoove-codex --kind codex                     # stores a marker, no credential
+vibe list                                              # the plan's 5h and weekly windows
+```
+
+vibe reads the Codex CLI's own `auth.json` (`$CODEX_HOME/auth.json`, default `~/.codex/auth.json`),
+**read only**, and asks ChatGPT's backend what the CLI's own `/status` asks:
+`GET https://chatgpt.com/backend-api/wham/usage` with the login's access token and account id. It
+shows each window the plan reports (5h, weekly, any extra metered limit), when it resets, the plan,
+and the credits balance. Rules:
+
+- **vibe never refreshes or writes the Codex login.** The CLI renews its own tokens when it runs; a
+  second refresher would spend the refresh token the CLI holds. Once the access token has ended, vibe
+  sends nothing and shows the last numbers (up to 15 minutes old) with the time and "run `codex` to
+  renew it".
+- **A Codex account is never a target** of `vibe switch`, auto-switch, routing or `vibe run`: it has
+  no Claude Code login. It is in the `codex` array of the envelope, never in `accounts` or the pool.
+- **Only the file store works.** If the CLI keeps its login in the OS keyring
+  (`cli_auth_credentials_store = "keyring"`, or `auto` where the keyring is available) there is no
+  `auth.json` to read; `vibe add` says so. An API-key login has no plan usage: the row says that.
+- The endpoint is the CLI's own and not a documented API. An answer in another shape reads as
+  "unknown", never as a number.
+- Not on the status line yet.
 
 ## The connector bridge (`vibe-bridge`)
 
