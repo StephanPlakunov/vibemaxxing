@@ -7,6 +7,13 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Codex: the limit a plan reports, in its own unit.** A usage-based business workspace
+  (`self_serve_business_usage_based`) has no rate windows, only a workspace spend limit
+  (`spend_control.individual_limit`); vibe showed it as "no limits reported". `vibe list` now says
+  `Credits used 0 of 5,100 (resets 1 Dec)` (the unit and numbers as the answer gives them), the TUI and
+  dashboard show one bar for it, `--json` carries `spend`, and the status line shows
+  `zvoove-codex: 0/5100 cr` (Codex accounts are now in `status.json` and the status line, read only).
+
 - **Codex accounts** (`vibe add <alias> --kind codex`): the Codex CLI's ChatGPT login, read from its
   `auth.json` (read only; vibe never refreshes or writes it), and its plan usage windows
   (`GET chatgpt.com/backend-api/wham/usage`, the call the CLI's own `/status` makes) shown in `vibe list`,

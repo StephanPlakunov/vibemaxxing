@@ -49,6 +49,42 @@ class Window:
 
 
 @dataclass(frozen=True)
+class Spend:
+    """A spend limit the plan reports (``spend_control.individual_limit``), in the unit it names.
+
+    A usage-based workspace has no rate windows, only this: ``unit`` is what the answer says
+    ("credit"), ``used`` and ``limit`` are in that unit, nothing is converted or assumed.
+    """
+
+    unit: str
+    used: float
+    limit: float
+    used_percent: float | None
+    resets_at_s: float | None
+
+
+def number_text(value: float) -> str:
+    """``5100`` as ``5,100``, ``0.5`` as ``0.5``; no trailing zeros."""
+    if value == int(value):
+        return f"{int(value):,}"
+    return f"{value:,.2f}".rstrip("0").rstrip(".")
+
+
+def spend_title(spend: Spend) -> str:
+    """``Credits used 0 of 5,100``: the unit as the answer names it, capitalised and plural."""
+    unit = spend.unit.strip().capitalize()
+    plural = unit if unit.endswith("s") else f"{unit}s"
+    return f"{plural} used {number_text(spend.used)} of {number_text(spend.limit)}"
+
+
+def spend_percent(spend: Spend) -> float:
+    """The percent the answer reports; else used / limit."""
+    if spend.used_percent is not None:
+        return spend.used_percent
+    return 0.0 if spend.limit <= 0 else spend.used / spend.limit * 100
+
+
+@dataclass(frozen=True)
 class CodexUsage:
     """What a Codex plan has left. Empty ``windows`` means the answer named none."""
 
@@ -58,6 +94,7 @@ class CodexUsage:
     limit_reached: bool | None = None
     credits_balance: str | None = None
     credits_unlimited: bool | None = None
+    spend: Spend | None = None
 
 
 def _number(value: object) -> float | None:
@@ -65,6 +102,33 @@ def _number(value: object) -> float | None:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def _quantity(value: object) -> float | None:
+    """A number the answer sends as a number or as a string (``"5100"``, ``"0.0"``)."""
+    if isinstance(value, str):
+        try:
+            return _number(float(value))
+        except ValueError:
+            return None
+    return _number(value)
+
+
+def _spend_of(control: Mapping[str, object] | None) -> Spend | None:
+    limit = _member(control, "individual_limit") if control is not None else None
+    if limit is None:
+        return None
+    unit, cap, used = limit.get("unit"), _quantity(limit.get("limit")), _quantity(limit.get("used"))
+    if not isinstance(unit, str) or not unit.strip() or cap is None or used is None:
+        return None
+    reset = _number(limit.get("reset_at"))
+    return Spend(
+        unit=unit.strip(),
+        used=used,
+        limit=cap,
+        used_percent=_number(limit.get("used_percent")),
+        resets_at_s=None if reset is None or reset <= 0 else reset,
+    )
 
 
 def _member(raw: object, key: str) -> Mapping[str, object] | None:
@@ -135,8 +199,12 @@ def parse_usage(answer: Mapping[str, object]) -> CodexUsage | None:
             name = item.get("limit_name")
             prefix = f"{name} " if isinstance(name, str) and name else ""
             windows.extend(_windows_of(_member(item, "rate_limit"), prefix=prefix))
+    control = _member(answer, "spend_control")
+    spend = _spend_of(control)
     allowed = limits.get("allowed") if limits is not None else None
     reached = limits.get("limit_reached") if limits is not None else None
+    if reached is None and control is not None:
+        reached = control.get("reached")
     balance = credits.get("balance") if credits is not None else None
     unlimited = credits.get("unlimited") if credits is not None else None
     return CodexUsage(
@@ -146,6 +214,7 @@ def parse_usage(answer: Mapping[str, object]) -> CodexUsage | None:
         limit_reached=reached if isinstance(reached, bool) else None,
         credits_balance=balance if isinstance(balance, str) else None,
         credits_unlimited=unlimited if isinstance(unlimited, bool) else None,
+        spend=spend,
     )
 
 
@@ -166,6 +235,15 @@ def usage_to_payload(usage: CodexUsage) -> dict[str, object]:
         "limit_reached": usage.limit_reached,
         "credits_balance": usage.credits_balance,
         "credits_unlimited": usage.credits_unlimited,
+        "spend": None
+        if usage.spend is None
+        else {
+            "unit": usage.spend.unit,
+            "used": usage.spend.used,
+            "limit": usage.spend.limit,
+            "used_percent": usage.spend.used_percent,
+            "resets_at_s": usage.spend.resets_at_s,
+        },
     }
 
 
@@ -185,6 +263,13 @@ def usage_from_payload(payload: Mapping[str, object]) -> CodexUsage:
         payload.get("limit_reached"),
     )
     balance, unlimited = payload.get("credits_balance"), payload.get("credits_unlimited")
+    held = payload.get("spend")
+    spend = None
+    if isinstance(held, Mapping):
+        unit, cap, used = held.get("unit"), _number(held.get("limit")), _number(held.get("used"))
+        if isinstance(unit, str) and cap is not None and used is not None:
+            reset = _number(held.get("resets_at_s"))
+            spend = Spend(unit, used, cap, _number(held.get("used_percent")), reset)
     return CodexUsage(
         plan=plan if isinstance(plan, str) else None,
         windows=tuple(windows),
@@ -192,6 +277,7 @@ def usage_from_payload(payload: Mapping[str, object]) -> CodexUsage:
         limit_reached=reached if isinstance(reached, bool) else None,
         credits_balance=balance if isinstance(balance, str) else None,
         credits_unlimited=unlimited if isinstance(unlimited, bool) else None,
+        spend=spend,
     )
 
 

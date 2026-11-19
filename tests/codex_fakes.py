@@ -123,3 +123,29 @@ def usage_answer(
         "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
         "additional_rate_limits": None,
     }
+
+
+def spend_answer(*, used: str = "0.0", used_percent: int = 0) -> dict[str, object]:
+    """The `/wham/usage` answer of a usage-based business workspace (zvoove-codex, 19 Nov 2026):
+    no rate windows, only a workspace spend cap in credits. Ids removed; the rest as received."""
+    return {
+        "plan_type": "self_serve_business_usage_based",
+        "rate_limit": None,
+        "code_review_rate_limit": None,
+        "additional_rate_limits": None,
+        "credits": {"has_credits": True, "unlimited": False, "balance": None},
+        "spend_control": {
+            "reached": False,
+            "individual_limit": {
+                "source": "workspace_spend_controls",
+                "unit": "credit",
+                "limit": "5100",
+                "used": used,
+                "remaining": "5100.0",
+                "used_percent": used_percent,
+                "remaining_percent": 100 - used_percent,
+                "reset_after_seconds": 985_767,
+                "reset_at": 1_796_083_200,
+            },
+        },
+    }
