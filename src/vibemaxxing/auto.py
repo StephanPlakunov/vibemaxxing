@@ -23,7 +23,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import broker, cursor, envelope, oauth, pool, statusline, store, usage
+from vibemaxxing import (
+    broker,
+    codex,
+    codex_usage,
+    cursor,
+    envelope,
+    oauth,
+    pool,
+    statusline,
+    store,
+    usage,
+)
 from vibemaxxing.credentials import holds_refresh_token, parse_blob
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, UsageError, VibeError
@@ -581,6 +592,41 @@ def _status_cursor(root: Path) -> list[dict[str, object]]:
     return [cursor.status_entry(root, alias) for alias in aliases]
 
 
+def _status_codex(root: Path) -> list[dict[str, object]]:
+    """Each Codex account's last numbers, from the usage cache (never a request)."""
+    entries: list[dict[str, object]] = []
+    for alias in codex.list_codex_aliases(root):
+        entry: dict[str, object] = {
+            "alias": alias,
+            "kind": codex.KIND_CODEX,
+            "fetched_at": None,
+            "windows": [],
+            "spend": None,
+        }
+        entries.append(entry)
+        try:
+            added_at = codex.read_added_at(root, alias)
+        except VibeError:
+            continue
+        cached = store.read_usage_cache(root, alias)
+        if cached is None or cached.added_at != added_at or cached.payload is None:
+            continue
+        held = codex_usage.usage_from_payload(cached.payload)
+        entry["fetched_at"] = cached.fetched_at
+        entry["windows"] = [
+            {"label": w.label, "percent": round(w.used_percent)} for w in held.windows
+        ]
+        if held.spend is not None:
+            entry["spend"] = {
+                "unit": held.spend.unit,
+                "used": held.spend.used,
+                "limit": held.spend.limit,
+                "percent": codex_usage.spend_percent(held.spend),
+                "resets_at_s": held.spend.resets_at_s,
+            }
+    return entries
+
+
 def publish_status(root: Path, *, live: str | None, now_s: float) -> None:
     """Write status.json for `vibe statusline`: who is live, every account's rows, the policy.
 
@@ -597,6 +643,7 @@ def publish_status(root: Path, *, live: str | None, now_s: float) -> None:
         "active": store.read_active(root),
         "accounts": [_status_account(root, alias) for alias in store.list_aliases(root)],
         "cursor": _status_cursor(root),
+        "codex": _status_codex(root),
         "policy": policy_document(settings.policy),
         "last_switch": None
         if last is None

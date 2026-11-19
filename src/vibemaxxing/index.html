@@ -355,6 +355,11 @@
                     severity: entry.limit_reached || w.percent >= 100 ? 'warn' : 'normal',
                     resets_at: w.resets_at });
       });
+      if (entry.spend) {
+        rows.push({ label: entry.spend.label, percent: entry.spend.percent,
+                    severity: entry.limit_reached || entry.spend.percent >= 100 ? 'warn' : 'normal',
+                    resets_at: entry.spend.resets_at });
+      }
       if (entry.limit_reached) message = (message ? message + ' \u00b7 ' : '') + 'limit reached';
     }
     return { alias: entry.alias, active: false, state: entry.state, message: message,

@@ -371,6 +371,20 @@ def read_codex(svc: Services, alias: str, *, fresh: bool = False) -> CodexReadin
     return CodexReading(alias, "unknown", login.email, login.plan, None, why)
 
 
+def _spend_entry(spend: codex_usage.Spend) -> dict[str, object]:
+    """A spend limit the plan reports, in the unit it names (never converted)."""
+    return {
+        "label": codex_usage.spend_title(spend),
+        "unit": spend.unit,
+        "used": spend.used,
+        "limit": spend.limit,
+        "percent": round(codex_usage.spend_percent(spend)),
+        "resets_at": None
+        if spend.resets_at_s is None
+        else datetime.fromtimestamp(spend.resets_at_s, UTC).isoformat(timespec="seconds"),
+    }
+
+
 def codex_entry(reading: CodexReading) -> dict[str, object]:
     """The `codex` member of the envelope for one account; every key present, null if unknown."""
     usage = reading.usage
@@ -397,6 +411,7 @@ def codex_entry(reading: CodexReading) -> dict[str, object]:
         "credits_balance": usage.credits_balance if usage is not None else None,
         "credits_unlimited": usage.credits_unlimited if usage is not None else None,
         "windows": windows,
+        "spend": None if usage is None or usage.spend is None else _spend_entry(usage.spend),
     }
 
 

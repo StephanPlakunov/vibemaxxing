@@ -1966,8 +1966,12 @@ OpenAI's docs for the login methods and storage: developers.openai.com/codex/aut
 - **Envelope** (additive, only when an account exists, never in `accounts` or `pool`): `codex` is an
   array of `{alias, kind, state ("ok"|"unknown"|"needs_login"|"api_key"), message, email, plan,
   limit_reached, credits_balance, credits_unlimited, windows: [{label, percent, window_minutes,
-  resets_at}]}`. Labels follow the CLI (`5h`, `daily`, `weekly`, `monthly`, `annual`, else `usage` /
+  resets_at}], spend: null | {label, unit, used, limit, percent, resets_at}}`. `spend` is the answer's
+  `spend_control.individual_limit` (a usage-based workspace has no rate windows, only this), in the unit
+  the answer names (`credit`), nothing converted or assumed: `Credits used 0 of 5,100`. Labels follow the CLI (`5h`, `daily`, `weekly`, `monthly`, `annual`, else `usage` /
   `secondary usage`; an extra metered limit is prefixed with its name).
-- **Never**: `vibe switch`, auto-switch, routing, `vibe run`, the status line and `status.json` do not
-  use a Codex account. `vibe remove` deletes the marker and its cache, never the CLI's login.
+- **Status line**: `status.json` has a `codex` array (cached numbers only, never a request); the line
+  shows `zvoove-codex: 0/5100 cr` for a spend limit (`?` when the numbers are old) or the windows
+  (`5h 12% weekly 34%`).
+- **Never**: `vibe switch`, auto-switch, routing and `vibe run` do not use a Codex account. `vibe remove` deletes the marker and its cache, never the CLI's login.
 

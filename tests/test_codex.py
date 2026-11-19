@@ -22,6 +22,7 @@ from tests.codex_fakes import (
     api_key_document,
     auth_document,
     login,
+    spend_answer,
     usage_answer,
     write_auth,
 )
@@ -523,6 +524,7 @@ def test_list_json_has_a_codex_member_only_when_an_account_exists(
         "limit_reached": True,
         "credits_balance": "0",
         "credits_unlimited": False,
+        "spend": None,
         "windows": [
             {
                 "label": "5h",
@@ -721,3 +723,123 @@ def test_a_claude_only_envelope_renders_as_before(tmp_path: Path) -> None:
     texts, _, rest = run_page(tmp_path, envelope)
 
     assert len(json.loads(texts)) == 1 and rest.startswith("true updated")
+
+
+# --- a usage-based workspace: a spend limit in credits, no windows ---------------------------
+
+
+def test_the_credit_limit_is_read_in_its_own_unit() -> None:
+    usage = codex_usage.parse_usage(spend_answer(used="12.5", used_percent=0))
+
+    assert (
+        usage is not None
+        and usage.windows == ()
+        and usage.plan == "self_serve_business_usage_based"
+    )
+    spend = usage.spend
+    assert spend is not None
+    assert (spend.unit, spend.used, spend.limit, spend.resets_at_s) == (
+        "credit",
+        12.5,
+        5100.0,
+        1_796_083_200.0,
+    )
+    assert codex_usage.spend_title(spend) == "Credits used 12.5 of 5,100"
+    assert usage.limit_reached is False
+    # The cache round trip keeps it.
+    assert codex_usage.usage_from_payload(codex_usage.usage_to_payload(usage)) == usage
+
+
+def test_another_unit_is_shown_as_the_answer_names_it() -> None:
+    answer = spend_answer()
+    answer["spend_control"]["individual_limit"]["unit"] = "token"  # type: ignore[index]
+
+    usage = codex_usage.parse_usage(answer)
+
+    assert usage is not None and usage.spend is not None
+    assert codex_usage.spend_title(usage.spend) == "Tokens used 0 of 5,100"
+
+
+def test_a_spend_limit_that_is_not_a_number_is_no_limit() -> None:
+    answer = spend_answer()
+    answer["spend_control"]["individual_limit"]["limit"] = "lots"  # type: ignore[index]
+
+    usage = codex_usage.parse_usage(answer)
+
+    assert usage is not None and usage.spend is None
+
+
+def test_list_shows_the_credit_limit_not_no_limits_reported(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rig.add()
+    capsys.readouterr()
+    rig.codex_client.queue_json(200, spend_answer())
+
+    assert rig.main("list") == 0
+
+    out = capsys.readouterr().out
+    assert "Credits used 0 of 5,100 (resets 1 Dec)" in out
+    assert "no limits reported" not in out
+
+
+def test_list_json_carries_the_spend_limit(rig: Rig, capsys: pytest.CaptureFixture[str]) -> None:
+    rig.add()
+    capsys.readouterr()
+    rig.codex_client.queue_json(200, spend_answer(used="510.0", used_percent=10))
+
+    assert rig.main("list", "--json") == 0
+
+    (entry,) = json.loads(capsys.readouterr().out)["codex"]
+    assert entry["windows"] == []
+    assert entry["spend"] == {
+        "label": "Credits used 510 of 5,100",
+        "unit": "credit",
+        "used": 510.0,
+        "limit": 5100.0,
+        "percent": 10,
+        "resets_at": "2026-12-01T00:00:00+00:00",
+    }
+
+
+def test_the_codex_panel_shows_the_credit_limit_as_one_bar() -> None:
+    usage = codex_usage.parse_usage(spend_answer(used="510.0", used_percent=10))
+
+    text = tui.codex_content(reading(usage=usage), now_s=1_795_000_000.0).plain
+
+    assert "Credits used 510 of 5,100 █" in text and " 10%" in text and "in 13d" in text
+    assert "no limits reported" not in text
+
+
+def test_the_status_line_says_the_credit_limit_and_marks_old_numbers(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vibemaxxing import auto, statusline
+
+    rig.add()
+    capsys.readouterr()
+    rig.codex_client.queue_json(200, spend_answer())
+    assert rig.main("list") == 0
+
+    auto.publish_status(rig.root, live=None, now_s=rig.now_s)
+    document = statusline.read(rig.root)
+
+    assert "zvoove-codex: 0/5100 cr" in statusline.render(document, now_s=rig.now_s)
+    assert "zvoove-codex: 0/5100 cr?" in statusline.render(document, now_s=rig.now_s + 3600)
+
+
+def test_the_status_line_shows_windows_for_a_plan_that_has_them(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vibemaxxing import auto, statusline
+
+    rig.add()
+    capsys.readouterr()
+    rig.codex_client.queue_json(200, usage_answer())
+    assert rig.main("list") == 0
+
+    auto.publish_status(rig.root, live=None, now_s=rig.now_s)
+
+    assert "zvoove-codex: 5h 12% weekly 34%" in statusline.render(
+        statusline.read(rig.root), now_s=rig.now_s
+    )

@@ -27,7 +27,7 @@ from textual.containers import VerticalScroll
 from textual.content import Content
 from textual.widgets import Static
 
-from vibemaxxing import auto, cursor, envelope, history, launch, store
+from vibemaxxing import auto, codex_usage, cursor, envelope, history, launch, store
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.poll import DASHBOARD_INTERVAL_S
 from vibemaxxing.pool import LastSwitch, Settings, dry_in
@@ -197,7 +197,24 @@ def codex_content(reading: launch.CodexReading, *, now_s: float) -> Content:
                 _ELEVATED if usage.limit_reached or percent >= 100 else _CALM,
             )
         )
-    if not usage.windows:
+    spend = usage.spend
+    if spend is not None:
+        percent = round(codex_usage.spend_percent(spend))
+        title = scrub(codex_usage.spend_title(spend))
+        reset = ""
+        if spend.resets_at_s is not None:
+            reset = _relative(
+                datetime.fromtimestamp(spend.resets_at_s, UTC).isoformat(timespec="seconds"),
+                now_s,
+            )
+        lines.append(
+            Content.styled(
+                f"  {title:<{max(LABEL_WIDTH, len(title) + 1)}}"
+                f"{_bar(percent)} {percent:>3}%  {reset}",
+                _ELEVATED if usage.limit_reached or percent >= 100 else _CALM,
+            )
+        )
+    if not usage.windows and spend is None:
         lines.append(Content.styled("  no limits reported", "dim"))
     return Content("\n").join(lines)
 
@@ -208,7 +225,12 @@ def _codex_shape(reading: launch.CodexReading) -> tuple[str, bool, tuple[str, ..
     return (
         reading.alias,
         bool(reading.note) or usage is None,
-        None if usage is None else tuple(w.label for w in usage.windows),
+        None
+        if usage is None
+        else (
+            *(w.label for w in usage.windows),
+            *(() if usage.spend is None else ("spend",)),
+        ),
     )
 
 

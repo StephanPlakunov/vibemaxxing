@@ -26,6 +26,7 @@ from vibemaxxing import (
     broker,
     childenv,
     codex,
+    codex_usage,
     credentials,
     cursor,
     cursor_translate,
@@ -643,7 +644,14 @@ def _render_codex(reading: launch.CodexReading) -> list[str]:
             end = datetime.fromtimestamp(window.resets_at_s).strftime("%a %d %b %H:%M")
             reset = f"  resets {end}"
         lines.append(f"    {window.label:<24}{round(window.used_percent):>5}%{reset}")
-    if not usage.windows:
+    if usage.spend is not None:
+        spend = usage.spend
+        end = ""
+        if spend.resets_at_s is not None:
+            day = datetime.fromtimestamp(spend.resets_at_s)
+            end = f" (resets {day.day} {day:%b})"
+        lines.append(f"    {codex_usage.spend_title(spend)}{end}")
+    if not usage.windows and usage.spend is None:
         lines.append("    no limits reported")
     if usage.limit_reached:
         lines.append("    limit reached")

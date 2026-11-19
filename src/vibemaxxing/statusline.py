@@ -192,6 +192,42 @@ def _cursor(entry: Mapping[str, object], now_s: float) -> str | None:
     return f"{alias}: {' '.join(cells)}{stale}"
 
 
+def _plain(value: float) -> str:
+    return str(int(value)) if value == int(value) else f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _codex(entry: Mapping[str, object], now_s: float) -> str | None:
+    """One Codex account from the cached numbers: ``zvoove-codex: 0/5100 cr`` (the limit the plan
+    reports, in the unit it names), or its windows (``5h 12% weekly 34%``). ``?`` when old."""
+    alias = _text(entry.get("alias"))
+    if alias is None:
+        return None
+    fetched = _number(entry.get("fetched_at"))
+    if fetched is None:
+        return f"{alias}: ?"
+    stale = "" if 0 <= now_s - fetched <= STALE_S else "?"
+    cells: list[str] = []
+    spend = entry.get("spend")
+    if isinstance(spend, dict):
+        used, limit, unit = (
+            _number(spend.get("used")),
+            _number(spend.get("limit")),
+            _text(spend.get("unit")),
+        )
+        if used is not None and limit is not None and unit is not None:
+            short = "cr" if unit.casefold() == "credit" else unit
+            cells.append(f"{_plain(used)}/{_plain(limit)} {short}")
+    windows = entry.get("windows")
+    for window in windows if isinstance(windows, list) else []:
+        if isinstance(window, dict):
+            label, percent = _text(window.get("label")), _number(window.get("percent"))
+            if label is not None and percent is not None:
+                cells.append(f"{label} {round(percent)}%")
+    if not cells:
+        return f"{alias}: -{stale or '?'}"
+    return f"{alias}: {' '.join(cells)}{stale}"
+
+
 def _broker_mirrors(root: Path) -> dict[str, str] | None:
     """The token broker's mirror dirs named in settings.json; None while the broker is off.
 
@@ -299,6 +335,12 @@ def render(
     for seat in seats if isinstance(seats, list) else []:
         if isinstance(seat, dict):
             text = _cursor(seat, now_s)
+            if text is not None:
+                parts.append(text)
+    codex = document.get("codex")
+    for account in codex if isinstance(codex, list) else []:
+        if isinstance(account, dict):
+            text = _codex(account, now_s)
             if text is not None:
                 parts.append(text)
     return " · ".join(parts) or NO_STATUS
