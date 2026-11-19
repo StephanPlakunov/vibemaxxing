@@ -22,6 +22,14 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN`), not the account a new session would get;
   `vibe statusline --session cursor` for Cursor's own status line.
 
+### Removed
+
+- **vibe's own spending and usage caps.** Cursor on-demand is held to exactly the limit Cursor reports; when
+  Cursor reports none, vibe applies none (`vibe list` says "no limit reported") instead of its old $250 ceiling
+  (`routing.cursor_cap_cents`), and the $10 margin (`routing.cursor_margin_cents`) is gone. A policy step's
+  `weekly_cap` (a fixed percent per weekday) is gone too; `weekly_budget` and `routing.weekday_budget` stay.
+  The old keys in settings.json are still accepted and ignored.
+
 ### Changed
 
 - **The bridge may do Atlassian writes that never delete.** `atlassian_executeWrite` (Atlassian's own
@@ -106,7 +114,7 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
   config dir are never inherited, Cursor and the bridge's nested run also lose secret-looking
   variables (`--pass-env` to pass one). Routing uses roles (`routing.roles`) and refuses a run that
   would reach Cursor only because main/extra are misnamed. Headless Cursor runs default to
-  `--mode ask` and say what they may do; Cursor's cap is held to vibe's $250 ceiling with fresh
+  `--mode ask` and say what they may do; (superseded: see Removed) with fresh
   readings; an interactive move to Cursor prints one clear line first. The bridge pins setting
   sources (`user`: measured, `project` alone hides the connectors) and permission mode, refuses a
   user settings file with an MCP allow rule, and fails on a denial. It is disabled

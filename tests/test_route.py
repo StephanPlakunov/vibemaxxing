@@ -327,7 +327,6 @@ def test_routing_is_configurable_per_part(tmp_path: Path) -> None:
                     "needs": [{"account": "work"}, {"account": "main", "last_resort": True}],
                     "no_needs": [{"account": "main", "budget": True, "degraded": True}],
                 },
-                "cursor_margin_cents": 500,
                 "spent_percent": 95,
             }
         },
@@ -343,7 +342,7 @@ def test_routing_is_configurable_per_part(tmp_path: Path) -> None:
     assert routing.connectors["cursor"] == ("slack", "atlassian", "gcal")  # untouched default
     assert routing.order["needs"] == (route.Step("work"), route.Step("main", last_resort=True))
     assert routing.order["no_needs"] == (route.Step("main", budget=True, degraded=True),)
-    assert (routing.cursor_margin_cents, routing.spent_percent) == (500, 95)
+    assert routing.spent_percent == 95
 
 
 @pytest.mark.parametrize(
@@ -364,7 +363,6 @@ def test_routing_is_configurable_per_part(tmp_path: Path) -> None:
         {"order": {"needs": [{"budget": True}]}},
         {"order": {"needs": [{"account": "main", "colour": "red"}]}},
         {"order": {"needs": [{"account": "main", "budget": "yes"}]}},
-        {"cursor_margin_cents": -1},
         {"spent_percent": 10},
         {"surprise": 1},
     ],
@@ -482,13 +480,22 @@ def test_roles_are_validated(tmp_path: Path) -> None:
         {"roles": {"main": 3}},
         {"roles": {"main": "Bad Alias"}},
         {"roles": {"main": "same", "extra": "same"}},
-        {"cursor_cap_cents": -1},
         {"order": {"needs": [{"account": "cursor", "last_resort": True}]}},
     ):
         write(tmp_path, {"routing": bad})
         with pytest.raises(UsageError, match="routing"):
             route.read_routing(tmp_path)
-    write(tmp_path, {"routing": {"roles": {"main": "stephan"}, "cursor_cap_cents": 20_000}})
+    # The removed cap and margin settings are still read, and change nothing.
+    write(
+        tmp_path,
+        {
+            "routing": {
+                "roles": {"main": "stephan"},
+                "cursor_cap_cents": 20_000,
+                "cursor_margin_cents": 5,
+            }
+        },
+    )
     routing = route.read_routing(tmp_path)
     assert routing.roles == {"main": "stephan", "extra": "extra", "cursor": "cursor"}
-    assert routing.cursor_cap_cents == 20_000
+    assert not hasattr(routing, "cursor_cap_cents")

@@ -36,8 +36,8 @@ KEYCHAIN_ACCOUNT: Final = "cursor-user"
 SECURITY_BIN: Final = "/usr/bin/security"
 SECURITY_TIMEOUT_S: Final = 10.0
 SECURITY_ABSENT_CODE: Final = 44
-# The seat's personal on-demand cap is spent to within this much, in cents.
-DEFAULT_MARGIN_CENTS: Final = 1000
+# Within this much of the reported limit a cached answer is trusted for NEAR_CAP_FRESH_S only.
+NEAR_CAP_CENTS: Final = 5000
 # A cached answer older than this is not used to route (cents move while sessions run).
 FRESH_S: Final = 120.0
 # Close to the cap a cached answer is trusted for this long only: dollars move while it runs.
@@ -226,31 +226,19 @@ class Availability:
     why: str
 
 
-HARD_CAP_CENTS: Final = 25_000
+def effective_cap(usage: CursorUsage | None) -> int | None:
+    """The on-demand limit Cursor reports; None when it names none (vibe adds no limit)."""
+    return None if usage is None else usage.on_demand_limit_cents
 
 
-def effective_cap(usage: CursorUsage | None, ceiling_cents: int = HARD_CAP_CENTS) -> int | None:
-    """The cap in force: what Cursor reports, else vibe's ``ceiling_cents``; None without usage."""
-    if usage is None:
-        return None
-    reported = usage.on_demand_limit_cents
-    return ceiling_cents if reported is None else reported
-
-
-def availability(
-    usage: CursorUsage | None,
-    *,
-    margin_cents: int,
-    reason: str = "",
-    ceiling_cents: int = HARD_CAP_CENTS,
-) -> Availability:
-    """Cursor is used until it is used up, on-demand included, to within ``margin_cents``.
+def availability(usage: CursorUsage | None, *, reason: str = "") -> Availability:
+    """Cursor is used until it is used up, on-demand included, to the limit Cursor reports.
 
     While on-demand spend is zero the seat is still on included usage plus Cursor's bonus,
     which is not visible as a number: it ends the moment on-demand starts counting. Then the
-    cap decides, and the cap is the on-demand limit Cursor reports (it follows an admin raising
-    it, nothing is set here). Only an answer that names no limit is held to vibe's own ceiling
-    (``ceiling_cents``, $250). A cap of 0 means on-demand is off.
+    limit decides, and it is the on-demand limit Cursor reports (it follows an admin raising
+    it, nothing is set here). An answer that names no limit gets none from vibe either. A limit
+    of 0 means on-demand is off.
     """
     if usage is None:
         return Availability(None, reason or "usage unknown")
@@ -259,23 +247,23 @@ def availability(
         return Availability(None, "usage unknown (no on-demand figure in the answer)")
     if used <= 0:
         return Availability(True, "included usage and bonus left, on-demand untouched")
-    cap = effective_cap(usage, ceiling_cents)
-    assert cap is not None
+    cap = usage.on_demand_limit_cents
+    if cap is None:
+        return Availability(True, f"on-demand ${used / 100:.2f} used, no limit reported")
     if cap <= 0:
         return Availability(False, "included usage is used up and on-demand is off")
     left = cap - used
-    if left > margin_cents:
+    if left > 0:
         return Availability(True, f"on-demand ${left / 100:.2f} of ${cap / 100:.2f} left")
-    return Availability(False, f"on-demand used to within ${margin_cents / 100:.2f} of its cap")
+    return Availability(False, "on-demand used up to the limit Cursor reports")
 
 
-def near_cap(usage: CursorUsage | None, *, margin_cents: int, ceiling_cents: int) -> bool:
-    """Whether a reading is close enough to the cap that only a very fresh one may route."""
+def near_cap(usage: CursorUsage | None) -> bool:
+    """Whether a reading is close to the reported limit, so only a very fresh one may route."""
     if usage is None or usage.on_demand_used_cents is None or usage.on_demand_used_cents <= 0:
         return False
-    cap = effective_cap(usage, ceiling_cents)
-    assert cap is not None
-    return cap - usage.on_demand_used_cents <= margin_cents * 5
+    cap = usage.on_demand_limit_cents
+    return cap is not None and cap - usage.on_demand_used_cents <= NEAR_CAP_CENTS
 
 
 def usage_to_payload(usage: CursorUsage) -> dict[str, object]:

@@ -115,23 +115,10 @@ class Context:
         aliases = cursor.list_cursor_aliases(self.root)
         if not aliases:
             return []
-        try:
-            routing = route.read_routing(self.root)
-        except UsageError:
-            # A wrong routing stops `vibe run auto`; it must not stop `vibe list`.
-            routing = route.Routing()
         svc = self.services()
         if now_s is not None:
             svc = replace(svc, now_s=now_s)
-        return [
-            launch.read_cursor(
-                svc,
-                alias,
-                margin_cents=routing.cursor_margin_cents,
-                ceiling_cents=routing.cursor_cap_cents,
-            )
-            for alias in aliases
-        ]
+        return [launch.read_cursor(svc, alias) for alias in aliases]
 
     def refresh_cursor_cache(self, *, min_age_s: float = 180.0) -> None:
         """Re-read each Cursor seat's usage into the cache once it is older than ``min_age_s``.
@@ -143,10 +130,6 @@ class Context:
         aliases = cursor.list_cursor_aliases(self.root)
         if not aliases:
             return
-        try:
-            routing = route.read_routing(self.root)
-        except UsageError:
-            routing = route.Routing()
         svc = self.services()
         for alias in aliases:
             cached = store.read_usage_cache(self.root, alias)
@@ -157,13 +140,7 @@ class Context:
             ):
                 continue
             try:
-                launch.read_cursor(
-                    svc,
-                    alias,
-                    margin_cents=routing.cursor_margin_cents,
-                    ceiling_cents=routing.cursor_cap_cents,
-                    fresh=True,
-                )
+                launch.read_cursor(svc, alias, fresh=True)
             except (VibeError, OSError):
                 continue
 
@@ -547,7 +524,7 @@ def _render_cursor(reading: launch.CursorReading) -> list[str]:
         lines.append(f"    {'Included + bonus':<24}{usage.included_percent:>6.1f}%")
     used, cap = usage.on_demand_used_cents, usage.on_demand_limit_cents
     if used is not None:
-        of = f" of {_money(cap)}" if cap else " (off)" if cap == 0 else ""
+        of = f" of {_money(cap)}" if cap else " (off)" if cap == 0 else " (no limit reported)"
         lines.append(f"    {'On-demand':<24}{_money(used)}{of}")
     if usage.cycle_end_s is not None:
         end = datetime.fromtimestamp(usage.cycle_end_s).strftime("%a %d %b %H:%M")
@@ -683,8 +660,6 @@ def _render_one_step(policy: Policy, step: Step, now_s: float) -> str:
     text = f"{step.account} until {step.until}%"
     if step.weekly_budget:
         text += f" (weekly: today's budget {policy.budget.today(now_s)}%)"
-    elif step.weekly_cap:
-        text += f" (weekly cap Mon-Sun {'/'.join(map(str, step.weekly_cap))}%)"
     return text
 
 

@@ -662,12 +662,12 @@ def test_a_headless_run_is_read_only_by_default(
     assert "--mode" not in world.fake.calls()[-1]
 
 
-def test_on_demand_at_the_cap_refuses_a_named_cursor_run_and_starts_nothing(
+def test_on_demand_at_the_reported_limit_refuses_a_named_cursor_run_and_starts_nothing(
     tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     world = World(tmp_home, monkeypatch)
     world.add_cursor()
-    world.cursor_usage(on_demand_used=24_500, on_demand_limit=25_000)  # within $10 of the cap
+    world.cursor_usage(on_demand_used=25_000, on_demand_limit=25_000)  # at the limit Cursor reports
 
     assert world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku") == 2
 
@@ -708,14 +708,14 @@ def test_a_cached_answer_near_the_cap_is_only_trusted_for_thirty_seconds(
     world.cursor_usage(on_demand_used=21_000, on_demand_limit=25_000)  # $40 left: near the cap
     ctx = world.ctx()
     svc = ctx.services()
-    launch.read_cursor(svc, "cursor", margin_cents=1000)
+    launch.read_cursor(svc, "cursor")
     assert len(world.cursor_client.requests) == 2
 
-    launch.read_cursor(replace(svc, now_s=NOW_S + 20), "cursor", margin_cents=1000)
+    launch.read_cursor(replace(svc, now_s=NOW_S + 20), "cursor")
     assert len(world.cursor_client.requests) == 2  # 20 s old: used
 
-    world.cursor_usage(on_demand_used=24_800, on_demand_limit=25_000)
-    reading = launch.read_cursor(replace(svc, now_s=NOW_S + 60), "cursor", margin_cents=1000)
+    world.cursor_usage(on_demand_used=25_000, on_demand_limit=25_000)
+    reading = launch.read_cursor(replace(svc, now_s=NOW_S + 60), "cursor")
     assert len(world.cursor_client.requests) == 4  # 60 s old and close to the cap: fetched again
     assert reading.availability.ok is False
 
@@ -727,10 +727,10 @@ def test_a_stale_answer_is_shown_but_never_routed_by(
     world.add_cursor()
     world.cursor_usage()
     svc = world.ctx().services()
-    launch.read_cursor(svc, "cursor", margin_cents=1000)
+    launch.read_cursor(svc, "cursor")
 
     world.cursor_client.queue(NetworkError("offline", "x"))
-    reading = launch.read_cursor(replace(svc, now_s=NOW_S + 300), "cursor", margin_cents=1000)
+    reading = launch.read_cursor(replace(svc, now_s=NOW_S + 300), "cursor")
 
     assert reading.usage is not None and "showing" in reading.note  # still displayed
     assert reading.availability.ok is None and "too old to use" in reading.availability.why

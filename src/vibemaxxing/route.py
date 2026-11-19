@@ -104,10 +104,6 @@ class Routing:
     # role -> alias. The order and the connectors are written in roles, so renaming an account
     # means changing this one member, not the order.
     roles: Mapping[str, str] = field(default_factory=lambda: {role: role for role in ROLES})
-    # The most Cursor on-demand spend vibe will ever allow, in cents, whatever Cursor reports.
-    cursor_cap_cents: int = 25_000
-    # Cursor on-demand is spent to within this many cents of the personal cap.
-    cursor_margin_cents: int = 1000
     # The percent at which a Claude account counts as spent (session or weekly).
     spent_percent: int = 99
     # The `bridge` member, validated by vibe-bridge (bridge.py) where it is used.
@@ -177,6 +173,7 @@ def parse_routing(raw: object, path: Path) -> Routing:
         "no_degrade",
         "connectors",
         "order",
+        # Removed settings, still accepted so an old settings.json keeps working; ignored.
         "cursor_margin_cents",
         "spent_percent",
         "roles",
@@ -232,13 +229,7 @@ def parse_routing(raw: object, path: Path) -> Routing:
             raise _fail(path, f"order must have only {NEEDS_CLASS} and {NO_NEEDS_CLASS}")
         for cls, steps in given_order.items():
             order[str(cls)] = _parse_steps(steps, path, str(cls))
-    cap = _int(raw.get("cursor_cap_cents", 25_000))
-    if cap is None or cap < 0:
-        raise _fail(path, "cursor_cap_cents must be a number of cents, 0 or more")
-    margin = _int(raw.get("cursor_margin_cents", 1000))
     spent = _int(raw.get("spent_percent", 99))
-    if margin is None or margin < 0:
-        raise _fail(path, "cursor_margin_cents must be a number of cents, 0 or more")
     if spent is None or not 50 <= spent <= 100:
         raise _fail(path, "spent_percent must be between 50 and 100")
     shared = raw.get("shared_login", False)
@@ -252,8 +243,6 @@ def parse_routing(raw: object, path: Path) -> Routing:
         connectors=connectors,
         order=order,
         roles=roles,
-        cursor_cap_cents=cap,
-        cursor_margin_cents=margin,
         spent_percent=spent,
         bridge=raw.get("bridge"),
         shared_login=shared,

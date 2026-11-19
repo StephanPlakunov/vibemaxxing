@@ -277,7 +277,7 @@ rows reset first.
   again whatever the budget. An account left over the budget alone is back at that step as soon
   as the budget allows it (at Berlin midnight at the latest, 80% to 100% on Friday), after the
   cooldown, not only after its weekly reset; its later steps stay open meanwhile. The flag must
-  be a boolean, not together with `weekly_cap`, and a `routing` member that is wrong then leaves
+  be a boolean, and a `routing` member that is wrong then leaves
   the file at the defaults too.
 - A policy that is wrong anywhere leaves the whole file at the defaults, so auto-switch is
   off. `vibe auto status` shows the policy, the step it is on now and the next one (a budget
@@ -440,7 +440,7 @@ login cannot point at Cursor).
 
 The seat appears wherever the Claude accounts do. `vibe` (the TUI) and the web dashboard
 (`vibe usage web`) show it as one more entry: included allowance plus bonus, on-demand against the
-cap, when the cycle resets, and whether routing may use it (it is not in the pool or the week chart).
+limit Cursor reports (no limit shown when it reports none), when the cycle resets, and whether routing may use it (it is not in the pool or the week chart).
 `vibe statusline` appends a compact segment, e.g. `cursor: 0.1% $0/$250`; `?` means no numbers, numbers
 older than 15 minutes, or a finished cycle, and `spent (resets Wed 00:00)` means routing counts the
 seat as used up. The status line and the TUI never make a request or read a Keychain on a redraw: the
@@ -486,10 +486,10 @@ Defaults, all configurable under `routing` in `~/.vibemaxxing/settings.json`:
 - **Budget**: the share of main's weekly usage allowed by the end of each day, Berlin time:
   Mon 20%, Tue 40%, Wed 60%, Thu 80%, Fri-Sun 100%.
 - **Cursor has usage left** while its included usage and bonus last, and then its personal
-  on-demand cap (minus a margin, default $10). The cap is the limit Cursor reports, so it follows an admin raising it; vibe's own $250
-  ceiling (`routing.cursor_cap_cents`) applies only when Cursor reports none. vibe uses an answer at most two minutes old
-  (30 seconds close to the cap; an older one is shown, never routed by), and refuses even
-  `vibe run cursor` at the limit. **On-demand is billed to the company.** It
+  on-demand limit, exactly as Cursor reports it (it follows an admin raising it). vibe sets no limit, margin or
+  ceiling of its own: when Cursor reports none, the seat shows "no limit reported" and is not held back. vibe uses
+  an answer at most two minutes old (30 seconds close to the limit; an older one is shown, never routed by), and
+  refuses even `vibe run cursor` at the limit. **On-demand is billed to the company.** It
   counts as spent after that, until the cycle resets.
 - `--needs m365` can only go to main. `--claude-only` never picks Cursor.
 - An account with unknown usage is unavailable, and vibe prints why it was skipped.
@@ -512,8 +512,7 @@ through to Cursor. A Cursor step cannot be the last resort.
                             "cursor": ["slack", "atlassian", "gcal"], "extra": []},
              "order": {"needs": [{"account": "main", "budget": true}, {"account": "cursor"},
                                  {"account": "extra", "degraded": true},
-                                 {"account": "main", "last_resort": true}]},
-             "cursor_margin_cents": 1000}}
+                                 {"account": "main", "last_resort": true}]}}}
 ```
 
 `vibe shell-init` prints (and never writes) a zsh snippet with two commands, and leaves `claude`

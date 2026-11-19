@@ -188,14 +188,14 @@ def test_list_writes_the_seat_into_status_json_with_its_fresh_numbers(
     assert statusline.render(rig.status(), now_s=NOW_S).endswith("cursor: 42% $12.5/$250")
 
 
-def test_status_json_holds_the_cap_cursor_reports_not_vibes_ceiling(
+def test_status_json_holds_the_limit_cursor_reports(
     rig: Rig, capsys: pytest.CaptureFixture[str]
 ) -> None:
     rig.queue(on_demand_used=100, on_demand_limit=75_000)  # Cursor says $750
     assert cli.main(["list"], context=rig.ctx()) == 0
     capsys.readouterr()
 
-    entry = cursor.status_entry(rig.root, "cursor", margin_cents=1000, ceiling_cents=25_000)
+    entry = cursor.status_entry(rig.root, "cursor")
 
     assert entry["on_demand_cap_cents"] == 75_000
     assert statusline.render(rig.status(), now_s=NOW_S).endswith("$1/$750")
@@ -216,7 +216,7 @@ def test_a_cache_of_another_login_is_not_this_seats_numbers(rig: Rig) -> None:
         store.UsageCache(1.0, NOW_S, {"included_percent": 99.0}, None, 0, None),  # other added_at
     )
 
-    entry = cursor.status_entry(rig.root, "cursor", margin_cents=1000, ceiling_cents=25_000)
+    entry = cursor.status_entry(rig.root, "cursor")
 
     assert entry["included_percent"] is None
 
@@ -301,7 +301,7 @@ def reading(**kw: object) -> launch.CursorReading:
         "team": "Zvoove",
         "usage": usage,
         "note": "",
-        "availability": availability(usage, margin_cents=1000),
+        "availability": availability(usage),
     }
     return launch.CursorReading(**{**base, **kw})  # type: ignore[arg-type]
 
@@ -320,7 +320,7 @@ def test_the_cursor_panel_for_unknown_logged_out_and_spent() -> None:
         reading(
             usage=None,
             note="usage unknown (HTTP 500)",
-            availability=availability(None, margin_cents=1),
+            availability=availability(None),
         ),
         now_s=NOW_S,
     ).plain
@@ -330,9 +330,9 @@ def test_the_cursor_panel_for_unknown_logged_out_and_spent() -> None:
     out = tui.cursor_content(reading(logged_in=False, usage=None), now_s=NOW_S).plain
     assert "not logged in — run: cursor-agent login" in out
 
-    spent_usage = CursorUsage(100.0, 24_500, 25_000, CYCLE_END_S)
+    spent_usage = CursorUsage(100.0, 25_000, 25_000, CYCLE_END_S)
     spent = tui.cursor_content(
-        reading(usage=spent_usage, availability=availability(spent_usage, margin_cents=1000)),
+        reading(usage=spent_usage, availability=availability(spent_usage)),
         now_s=NOW_S,
     )
     assert "routing:" not in spent.plain
@@ -348,7 +348,7 @@ def test_the_panel_scrubs_what_the_note_might_carry() -> None:
         reading(
             usage=None,
             note="boom CURSORTOKEN0000000000",
-            availability=availability(None, margin_cents=1),
+            availability=availability(None),
         ),
         now_s=NOW_S,
     ).plain

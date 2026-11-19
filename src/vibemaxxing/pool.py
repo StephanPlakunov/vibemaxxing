@@ -84,9 +84,6 @@ class Step:
 
     account: str
     until: int
-    # Monday..Sunday: the weekly percent this step also stops at on that weekday (local time),
-    # so a week is spent evenly. Empty: only ``until`` counts.
-    weekly_cap: tuple[int, ...] = ()
     # The weekly percent this step also stops at is today's budget (Policy.budget, the one
     # `vibe run auto` routes by), so the switch and the routing spend the week the same way.
     weekly_budget: bool = False
@@ -108,15 +105,13 @@ class Budget:
 
 
 def weekly_limit(step: Step, now_s: float, budget: Budget | None = None) -> int | None:
-    """The weekly percent ``step`` stops at today: ``until``, or today's cap or budget if lower.
+    """The weekly percent ``step`` stops at today: ``until``, or today's budget if lower.
 
     ``budget`` is the policy's (Policy.budget); None means the routing defaults.
     """
     if step.weekly_budget:
         return min(step.until, (budget if budget is not None else Budget()).today(now_s))
-    if not step.weekly_cap:
-        return None
-    return min(step.until, step.weekly_cap[datetime.fromtimestamp(now_s).weekday()])
+    return None
 
 
 def weekly_zone(step: Step, budget: Budget | None = None) -> str | None:
@@ -202,7 +197,7 @@ class Decision:
     reason: str
     # The limit the live account was over when it is left; what LastSwitch.limit records.
     limit: int | None = None
-    # The weekly limit in force for that step today (see weekly_limit); None without a cap.
+    # The weekly limit in force for that step today (see weekly_limit); None without a budget.
     weekly: int | None = None
     # The limit the fence's reset time is computed at (limited_until's ``threshold``), when it
     # is not ``limit``: an account left over today's budget alone is recorded at the budget.
@@ -616,8 +611,6 @@ def _leave(
     worst = max(blocking(rows, top.until, now_s, models=models, weekly=cap), key=_percent)
     reason = f"{live} at {_spent(worst)}"
     if not top.weekly_budget:
-        if cap is not None and worst.kind == WEEKLY_ALL_KIND and _percent(worst) < top.until:
-            reason += f", over today's {cap}% weekly cap"
         return Decision("switch", target, reason, top.until, cap)
     if blocking(rows, top.until, now_s, models=models):
         # A row at the step's own limit holds it back until that row resets; the budget adds
