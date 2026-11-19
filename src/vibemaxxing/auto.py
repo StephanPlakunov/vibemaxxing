@@ -10,6 +10,7 @@ know or an account that is dead.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -22,20 +23,24 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from vibemaxxing import envelope, oauth, pool, store, usage
+from vibemaxxing import broker, cursor, envelope, oauth, pool, route, statusline, store, usage
+from vibemaxxing.credentials import holds_refresh_token, parse_blob
 from vibemaxxing.envelope import AccountView
-from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, UsageError
-from vibemaxxing.fsutil import private_dir, write_private
+from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, UsageError, VibeError
+from vibemaxxing.fsutil import FILE_MODE, private_dir, write_private
 from vibemaxxing.httpclient import HttpClient
-from vibemaxxing.keychain import KeychainPort
+from vibemaxxing.keychain import KeychainPort, config_dir_port
 from vibemaxxing.pool import (
     DEFAULT_COOLDOWN_S,
     DEFAULT_THRESHOLD,
+    EARLIEST_RESET,
     MAX_THRESHOLD,
     MIN_THRESHOLD,
     LastSwitch,
+    Policy,
     Reading,
     Settings,
+    Step,
 )
 
 SCHEMA_VERSION: Final = 1
@@ -44,8 +49,25 @@ TICK_INTERVAL_S: Final = 60
 # The live account is polled at the 60 s floor, not the 3 minute cadence, once a trigger
 # row is this full: finding out late that it is spent costs the work in flight.
 FAST_POLL_PERCENT: Final = 90
+# The same distance below each limit of an ordered policy: 76% for a step until 85%.
+FAST_POLL_MARGIN: Final = DEFAULT_THRESHOLD - FAST_POLL_PERCENT
+# ticks.jsonl gets a line every this many seconds, and one for every switch.
+LOG_EVERY_S: Final = 300
+ORDERED: Final = "ordered"
 OSASCRIPT_BIN: Final = "/usr/bin/osascript"
 OSASCRIPT_TIMEOUT_S: Final = 5.0
+# Preferred when installed (Homebrew's path): its notifications carry their own title and
+# do not show up as Script Editor's.
+TERMINAL_NOTIFIER_BIN: Final = "/opt/homebrew/bin/terminal-notifier"
+# A tick does not switch away from the live account while its access token ends within this
+# long. A running Claude Code session keeps the login it read for up to 30 s after a switch
+# (its Keychain cache, Claude Code 2.1.318) and renews a token in the minutes before it ends;
+# a renewal in that window writes the outgoing account back over the incoming one and spends
+# the refresh token vibe just stored for it. Longer than both together.
+RENEWAL_GUARD_S: Final = 10 * 60
+# ...unless the token ended longer ago than this: a session using it would have renewed it,
+# so none is, and the switch may go ahead.
+RENEWAL_IDLE_S: Final = 15 * 60
 
 
 def settings_path(root: Path) -> Path:
@@ -79,6 +101,88 @@ def _time(value: object) -> float | None:
     return seconds
 
 
+def _weekly_cap(raw: object) -> tuple[int, ...] | None:
+    """A step's `weekly_cap`: absent is none, else seven percents for Monday..Sunday."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or len(raw) != 7:
+        return None
+    caps = [_int(cap) for cap in raw]
+    if any(cap is None or not 1 <= cap <= MAX_THRESHOLD for cap in caps):
+        return None
+    return tuple(cap for cap in caps if cap is not None)
+
+
+def _parse_policy(raw: object) -> Policy | None:
+    """The `policy` member: absent is the default rule, and None means it is wrong anywhere."""
+    if raw is None:
+        return Policy()
+    if not isinstance(raw, dict) or raw.get("mode") != ORDERED:
+        return None
+    steps, models = raw.get("steps"), raw.get("block_models", [])
+    if raw.get("then", EARLIEST_RESET) != EARLIEST_RESET:
+        return None
+    if not isinstance(steps, list) or not steps:
+        return None
+    if not isinstance(models, list) or not all(isinstance(m, str) and m.strip() for m in models):
+        return None
+    parsed: list[Step] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            return None
+        account, until = step.get("account"), _int(step.get("until"))
+        if not isinstance(account, str) or not store.valid_alias(account):
+            return None
+        if until is None or not 1 <= until <= MAX_THRESHOLD:
+            return None
+        weekly_cap = _weekly_cap(step.get("weekly_cap"))
+        if weekly_cap is None:
+            return None
+        weekly_budget = step.get("weekly_budget", False)
+        # Both on one step would be two weekly limits, and which one was meant is a guess.
+        if not isinstance(weekly_budget, bool) or (weekly_budget and weekly_cap):
+            return None
+        parsed.append(Step(account, until, weekly_cap, weekly_budget))
+    return Policy(tuple(parsed), tuple(str(model).strip() for model in models))
+
+
+def _budget(parsed: dict[str, object], root: Path) -> pool.Budget | None:
+    """Today's budget for a `weekly_budget` step: the routing's, or None when it is wrong.
+
+    The same `weekday_budget` and `timezone` `vibe run auto` routes by. A routing that is
+    wrong is not read as the defaults here either: a step would then leave an account at a
+    budget nobody chose.
+    """
+    try:
+        routing = route.parse_routing(parsed.get("routing"), settings_path(root))
+    except UsageError:
+        return None
+    return pool.Budget(routing.weekday_budget, routing.timezone)
+
+
+def _step_document(step: Step) -> dict[str, object]:
+    document: dict[str, object] = {"account": step.account, "until": step.until}
+    if step.weekly_cap:
+        document["weekly_cap"] = list(step.weekly_cap)
+    if step.weekly_budget:
+        document["weekly_budget"] = True
+    return document
+
+
+def policy_document(policy: Policy) -> dict[str, object] | None:
+    """The policy as settings.json spells it; None for the default rule, which has no member."""
+    if not policy.steps:
+        return None
+    document: dict[str, object] = {
+        "mode": ORDERED,
+        "steps": [_step_document(step) for step in policy.steps],
+        "then": EARLIEST_RESET,
+    }
+    if policy.block_models:
+        document["block_models"] = list(policy.block_models)
+    return document
+
+
 def _parse_settings(root: Path) -> Settings | None:
     """The settings, or None when the file is missing or wrong anywhere."""
     try:
@@ -91,6 +195,10 @@ def _parse_settings(root: Path) -> Settings | None:
     threshold = _int(parsed.get("threshold", DEFAULT_THRESHOLD))
     cooldown = _int(parsed.get("cooldown_s", DEFAULT_COOLDOWN_S))
     excluded = parsed.get("excluded", [])
+    policy = _parse_policy(parsed.get("policy"))
+    if policy is not None and any(step.weekly_budget for step in policy.steps):
+        budget = _budget(parsed, root)
+        policy = None if budget is None else replace(policy, budget=budget)
     if (
         not isinstance(enabled, bool)
         or threshold is None
@@ -99,9 +207,12 @@ def _parse_settings(root: Path) -> Settings | None:
         or cooldown < 0
         or not isinstance(excluded, list)
         or not all(isinstance(alias, str) and store.valid_alias(alias) for alias in excluded)
+        or policy is None
     ):
         return None
-    return Settings(enabled, threshold, cooldown, tuple(dict.fromkeys(str(a) for a in excluded)))
+    return Settings(
+        enabled, threshold, cooldown, tuple(dict.fromkeys(str(a) for a in excluded)), policy
+    )
 
 
 def read_settings(root: Path) -> Settings:
@@ -136,6 +247,14 @@ def settings_for_edit(root: Path) -> Settings:
     return Settings()
 
 
+def _carried(root: Path, key: str) -> object | None:
+    try:
+        parsed: object = json.loads(settings_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return parsed.get(key) if isinstance(parsed, dict) else None
+
+
 def write_settings(root: Path, settings: Settings) -> None:
     private_dir(root)
     document = {
@@ -145,6 +264,16 @@ def write_settings(root: Path, settings: Settings) -> None:
         "cooldown_s": settings.cooldown_s,
         "excluded": list(settings.excluded),
     }
+    policy = policy_document(settings.policy)
+    if policy is not None:
+        document["policy"] = policy
+    # The routing of `vibe run auto` and the token broker's settings live in the same file but
+    # are not auto-switch's: carry them over untouched, or `vibe auto on` would silently delete
+    # them (and a broker dropped that way would stop renewing every mirror).
+    for key in ("routing", broker.SETTINGS_KEY):
+        carried = _carried(root, key)
+        if carried is not None:
+            document[key] = carried
     write_private(settings_path(root), json.dumps(document, indent=2) + "\n")
 
 
@@ -164,7 +293,9 @@ def read_last(root: Path) -> LastSwitch | None:
         return None
     if at is None:
         return None
-    return LastSwitch(origin, target, at, reason, _time(parsed.get("until")))
+    return LastSwitch(
+        origin, target, at, reason, _time(parsed.get("until")), _int(parsed.get("limit"))
+    )
 
 
 def write_last(root: Path, last: LastSwitch) -> None:
@@ -176,16 +307,20 @@ def write_last(root: Path, last: LastSwitch) -> None:
         "at": last.at_s,
         "reason": last.reason,
         "until": last.until_s,
+        "limit": last.limit,
     }
     write_private(last_path(root), json.dumps(document, indent=2) + "\n")
 
 
 def rename(root: Path, old: str, new: str) -> None:
-    """Follow `vibe alias`: an exclusion and the last-switch record name accounts by alias."""
+    """Follow `vibe alias`: exclusions, policy steps and the last switch name accounts by alias."""
     settings = _parse_settings(root)
-    if settings is not None and old in settings.excluded:
+    steps = settings.policy.steps if settings is not None else ()
+    if settings is not None and (old in settings.excluded or any(s.account == old for s in steps)):
         excluded = tuple(new if alias == old else alias for alias in settings.excluded)
-        write_settings(root, replace(settings, excluded=excluded))
+        moved = tuple(replace(s, account=new) if s.account == old else s for s in steps)
+        policy = replace(settings.policy, steps=moved)
+        write_settings(root, replace(settings, excluded=excluded, policy=policy))
     last = read_last(root)
     if last is not None and old in (last.from_alias, last.to_alias):
         write_last(
@@ -211,12 +346,27 @@ def _readings(views: Sequence[AccountView]) -> list[Reading]:
     ]
 
 
-def _is_hot(root: Path, alias: str, now_s: float) -> bool:
-    """Whether the cached answer for ``alias`` already has a trigger row at FAST_POLL_PERCENT."""
+def _is_hot(root: Path, alias: str, now_s: float, settings: Settings) -> bool:
+    """Whether the cached answer for ``alias`` is close enough to a limit to poll every minute.
+
+    The default rule: a trigger row at FAST_POLL_PERCENT. An ordered policy: a row that
+    counts within FAST_POLL_MARGIN below one of the account's own step limits, and not
+    over it -- past 85% the next limit is 99%, and polling a spent account fast buys nothing.
+    """
     cached = store.read_usage_cache(root, alias)
     if cached is None or cached.payload is None:
         return False
-    return bool(pool.blocking(usage.summarize(cached.payload).rows, FAST_POLL_PERCENT, now_s))
+    rows = usage.summarize(cached.payload).rows
+    policy = settings.policy
+    if not policy.steps:
+        return bool(pool.blocking(rows, FAST_POLL_PERCENT, now_s))
+    models = policy.block_models
+    return any(
+        pool.blocking(rows, step.until - FAST_POLL_MARGIN, now_s, models=models)
+        and not pool.blocking(rows, step.until, now_s, models=models)
+        for step in policy.steps
+        if step.account == alias
+    )
 
 
 @dataclass(frozen=True)
@@ -229,6 +379,37 @@ def _stay(reason: str) -> TickResult:
     return TickResult(f"stay: {reason}", switched=False)
 
 
+def renewal_wait(port: KeychainPort, live: str, now_s: float) -> str | None:
+    """Why a switch away from ``live`` must wait for its login's renewal; None when it need not.
+
+    Read from the port, never from the account file: Claude Code renews the live login in the
+    Keychain, and the file only catches up at the next switch. Nothing is refreshed here. A
+    port that cannot be read now (it could a moment ago) is a wait: not knowing is no licence.
+    """
+    try:
+        raw = port.read()
+        if raw is not None and not holds_refresh_token(raw):
+            # A token broker mirror: Claude Code holds no refresh token here and can renew
+            # nothing, so there is nothing a switch could race. (Parsed first: a blob with no
+            # access token either is no mirror, and stays a wait below.)
+            parse_blob(raw, mirror_ok=True)
+            return None
+        expires_s = parse_blob(raw).expires_at_ms / 1000 if raw is not None else None
+    except VibeError:
+        expires_s = None
+    if expires_s is None:
+        return f"waiting: could not read {live}'s login to see whether it is being renewed"
+    left_s = expires_s - now_s
+    if left_s > RENEWAL_GUARD_S or -left_s > RENEWAL_IDLE_S:
+        return None
+    if left_s >= 0:
+        return f"waiting: {live}'s login renews within {RENEWAL_GUARD_S // 60} min"
+    return (
+        f"waiting: {live}'s login ended {int(-left_s) // 60} min ago and a session may be "
+        "renewing it"
+    )
+
+
 def tick(
     root: Path,
     *,
@@ -236,36 +417,81 @@ def tick(
     port: KeychainPort,
     now_s: float,
     notify: Callable[[str], None],
+    port_for: Callable[[Path], KeychainPort] = config_dir_port,
+    home: Path | None = None,
 ) -> TickResult:
     """One evaluation and, if it is due, one switch. Safe to run every minute.
 
     Everything that is not a bug is a `stay` with its reason: a claim held, a login
     vibe does not know, a target that turned out dead. None of them is retried in the
-    same tick, and none is an exit code.
+    same tick, and none is an exit code. Every tick that returns leaves status.json
+    behind, so the status line is never older than the scheduler's interval.
+
+    With the token broker on, its pass comes first and runs whether or not auto-switch is on:
+    every mirror needs its token renewed, and a switch then writes a token that is fresh. After
+    a switch the mirrors are synced again, so the incoming account's dir mirror and the default
+    item agree at once.
     """
+    report = broker.run(
+        root, client=client, default_port=port, port_for=port_for, now_s=now_s, home=home
+    )
+    result, live = _tick(root, client=client, port=port, now_s=now_s, notify=notify)
+    if result.switched:
+        after = broker.run(
+            root, client=client, default_port=port, port_for=port_for, now_s=now_s, home=home
+        )
+        report = broker.Report(
+            report.lines + after.lines, tuple(dict.fromkeys(report.problems + after.problems))
+        )
+    said = [*report.lines, *(f"problem: {problem}" for problem in report.problems)]
+    if said:
+        result = replace(result, line=f"{result.line} | broker: {'; '.join(said)}")
+    publish_status(root, live=live, now_s=now_s)
+    if result.switched or int(now_s) // LOG_EVERY_S != int(now_s - TICK_INTERVAL_S) // LOG_EVERY_S:
+        log_tick(root, result, live=live, now_s=now_s)
+    return result
+
+
+def _tick(
+    root: Path,
+    *,
+    client: HttpClient,
+    port: KeychainPort,
+    now_s: float,
+    notify: Callable[[str], None],
+) -> tuple[TickResult, str | None]:
+    """The tick, and the account Claude Code runs as after it when that is known."""
     settings = read_settings(root)
     if not settings.auto_switch:
-        return _stay(pool.REASON_OFF)
+        return _stay(pool.REASON_OFF), None
     live = store.live_alias(root, port)
     if live is None:
-        return _stay(pool.REASON_LIVE_UNKNOWN)
+        return _stay(pool.REASON_LIVE_UNKNOWN), None
     active = store.read_active(root)
     if active != live:
         # Polling would treat `active` as the account in use and the live one as any other,
-        # whose expired token it then refreshes behind Claude Code's back. `vibe switch
-        # <live>` repairs the pointer without losing the live login.
-        return _stay(
-            f"Claude Code runs as {live} but vibe's active account is {active or 'unset'}"
-            f" - run: vibe switch {live}"
-        )
+        # whose expired token it then refreshes behind Claude Code's back, while `active`
+        # itself is never refreshed and lapses. Switching to the live account repairs the
+        # pointer without losing the live login; staying instead left it broken for good.
+        try:
+            store.switch(root, live, port, now_s=now_s)
+        except (UsageError, NeedsLoginError, NotFoundError) as exc:
+            return _stay(
+                f"Claude Code runs as {live} but vibe's active account is {active or 'unset'}"
+                f" and repairing it failed: {exc.message} - run: vibe switch {live}"
+            ), live
 
     last = read_last(root)
-    fast: frozenset[str] = frozenset({live}) if _is_hot(root, live, now_s) else frozenset()
+    hot = _is_hot(root, live, now_s, settings)
+    fast: frozenset[str] = frozenset({live}) if hot else frozenset()
     views = envelope.collect(root, client=client, port=port, now_s=now_s, fast=fast)
     decision = pool.decide(_readings(views), settings=settings, live=live, now_s=now_s, last=last)
     if decision.action == "stay" or decision.target is None:
-        return _stay(decision.reason)
+        return _stay(decision.reason), live
     target = decision.target
+    waiting = renewal_wait(port, live, now_s)
+    if waiting is not None:
+        return _stay(waiting), live
 
     try:
         oauth.ensure_usable(root, target, client, now_ms=int(now_s * 1000))
@@ -273,13 +499,18 @@ def tick(
         # switch` in that time. The decision was about `live`; if that is no longer the
         # account in use, it is stale and the person's choice stands.
         if store.live_alias(root, port) != live or store.read_active(root) != live:
-            return _stay(f"the live account changed while checking, so {target} was left alone")
+            stale = f"the live account changed while checking, so {target} was left alone"
+            return _stay(stale), None
         store.switch(root, target, port, now_s=now_s)
     except (UsageError, NeedsLoginError, NetworkError, NotFoundError) as exc:
-        return _stay(exc.message)
+        return _stay(exc.message), live
 
     rows = next((v.summary.rows for v in views if v.alias == live and v.summary is not None), ())
+    limit = decision.limit if decision.limit is not None else settings.threshold
+    threshold = decision.threshold if decision.threshold is not None else limit
+    models = settings.policy.block_models
     line = f"switched {live} -> {target}: {decision.reason}"
+    notice = f"Switched to {target}: {decision.reason}"
     try:
         write_last(
             root,
@@ -288,15 +519,24 @@ def tick(
                 target,
                 now_s,
                 decision.reason,
-                pool.limited_until(rows, settings.threshold, now_s),
+                pool.limited_until(
+                    rows,
+                    threshold,
+                    now_s,
+                    models=models,
+                    weekly=decision.weekly,
+                    timezone=decision.zone,
+                ),
+                limit,
             ),
         )
     except OSError as exc:
         # The switch landed. Raising here would hide that and skip the notification; the
         # cost of the missing record is a cooldown and a memory of why `live` was left.
-        line += f" (not recorded: {exc.__class__.__name__})"
-    notify(line)
-    return TickResult(line, switched=True)
+        unrecorded = f" (not recorded: {exc.__class__.__name__})"
+        line, notice = line + unrecorded, notice + unrecorded
+    notify(notice)
+    return TickResult(line, switched=True), target
 
 
 def undo(root: Path, *, client: HttpClient, port: KeychainPort, now_s: float) -> LastSwitch:
@@ -320,6 +560,10 @@ class Status:
     active: str | None
     last: LastSwitch | None
     next_alias: str | None
+    # An ordered policy only: the step it is on now and the one a switch would go to,
+    # as 0-based indexes into settings.policy.steps.
+    step: int | None = None
+    next_step: int | None = None
 
 
 def status(root: Path, *, client: HttpClient, port: KeychainPort, now_s: float) -> Status:
@@ -327,21 +571,142 @@ def status(root: Path, *, client: HttpClient, port: KeychainPort, now_s: float) 
     live = store.live_alias(root, port)
     active = store.read_active(root)
     last = read_last(root)
-    next_alias = None
     # Not when the pointer disagrees: collecting would poll the live account as if it
     # were any other, which the tick refuses to do for the same reason.
-    if live is not None and live == active:
-        views = envelope.collect(root, client=client, port=port, now_s=now_s)
-        next_alias = pool.next_candidate(
-            _readings(views), settings=settings, live=live, now_s=now_s, last=last
+    if live is None or live != active:
+        return Status(settings, live, active, last, None)
+    views = envelope.collect(root, client=client, port=port, now_s=now_s)
+    publish_status(root, live=live, now_s=now_s)
+    readings = _readings(views)
+    next_alias = pool.next_candidate(readings, settings=settings, live=live, now_s=now_s, last=last)
+    step, next_step = pool.ordered_steps(
+        readings, settings=settings, live=live, now_s=now_s, last=last
+    )
+    return Status(settings, live, active, last, next_alias, step, next_step)
+
+
+def _row_entry(row: usage.Row) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "kind": row.kind,
+        "label": row.label,
+        "percent": row.percent,
+        "resets_at": None if row.resets_at is None else pool.parse_stamp(row.resets_at),
+    }
+    if row.used is not None and row.limit is not None:
+        entry.update(spend_used=row.used, spend_limit=row.limit, currency=row.currency)
+    return entry
+
+
+def _status_account(root: Path, alias: str) -> dict[str, object]:
+    try:
+        account = store.read_account(root, alias)
+    except VibeError:
+        return {"alias": alias, "state": "error", "fetched_at": None, "rows": []}
+    cached = store.read_usage_cache(root, alias)
+    # Another login under the same alias has another added_at; its numbers are not ours.
+    if cached is None or cached.added_at != account.added_at or cached.payload is None:
+        return {"alias": alias, "state": str(account.state), "fetched_at": None, "rows": []}
+    return {
+        "alias": alias,
+        "state": str(account.state),
+        "fetched_at": cached.fetched_at,
+        "rows": [_row_entry(row) for row in usage.summarize(cached.payload).rows],
+    }
+
+
+def _status_cursor(root: Path) -> list[dict[str, object]]:
+    """Each Cursor seat's last numbers, from the usage cache (never a request)."""
+    aliases = cursor.list_cursor_aliases(root)
+    if not aliases:
+        return []
+    try:
+        routing = route.read_routing(root)
+    except UsageError:
+        routing = route.Routing()  # a wrong routing must not blank the status line
+    return [
+        cursor.status_entry(
+            root,
+            alias,
+            margin_cents=routing.cursor_margin_cents,
+            ceiling_cents=routing.cursor_cap_cents,
         )
-    return Status(settings, live, active, last, next_alias)
+        for alias in aliases
+    ]
+
+
+def publish_status(root: Path, *, live: str | None, now_s: float) -> None:
+    """Write status.json for `vibe statusline`: who is live, every account's rows, the policy.
+
+    The rows come from the shared usage caches, not from one command's views: every
+    surface leaves its answers there, so the file says the same whichever command wrote
+    it last. ``live`` is None when the caller did not look at the Keychain. Best effort:
+    a status that cannot be written costs the status line its freshness, not the command.
+    """
+    settings, last = read_settings(root), read_last(root)
+    document: dict[str, object] = {
+        "schema": statusline.SCHEMA_VERSION,
+        "written_at": now_s,
+        "live": live,
+        "active": store.read_active(root),
+        "accounts": [_status_account(root, alias) for alias in store.list_aliases(root)],
+        "cursor": _status_cursor(root),
+        "policy": policy_document(settings.policy),
+        "last_switch": None
+        if last is None
+        else {"from": last.from_alias, "to": last.to_alias, "at": last.at_s, "reason": last.reason},
+    }
+    with contextlib.suppress(OSError):
+        statusline.write(root, document)
+
+
+def log_tick(root: Path, result: TickResult, *, live: str | None, now_s: float) -> None:
+    """Append one line to ticks.jsonl: who is live, each account's [5h, weekly] %, the outcome.
+
+    The only record of what the ticks did; status.json and auto.json keep just the latest.
+    Best effort, like publish_status.
+    """
+    percents: dict[str, list[object]] = {}
+    for alias in store.list_aliases(root):
+        rows = {row["kind"]: row["percent"] for row in _status_account(root, alias)["rows"]}  # type: ignore[attr-defined]
+        percents[alias] = [rows.get("session"), rows.get("weekly_all")]
+    entry = {
+        "at": int(now_s),
+        "live": live,
+        "pct": percents,
+        "switched": result.switched,
+        "line": result.line,
+    }
+    with contextlib.suppress(OSError):
+        fd = os.open(root / "ticks.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, FILE_MODE)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
+def publish(root: Path, *, port: KeychainPort, now_s: float) -> None:
+    """`publish_status` for a surface that has not asked who is live: it asks the port."""
+    publish_status(root, live=store.live_alias(root, port), now_s=now_s)
+
+
+def _notified(argv: list[str]) -> bool:
+    try:
+        done = subprocess.run(argv, capture_output=True, timeout=OSASCRIPT_TIMEOUT_S, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0
 
 
 def notify_macos(message: str) -> None:
-    """Tell the person a switch happened. Best effort: a failed one is not a failed switch."""
+    """Tell the person a switch happened. Best effort: a failed one is not a failed switch.
+
+    terminal-notifier when it is installed, osascript when it is not or it failed.
+    """
     platform: str = sys.platform
     if platform != "darwin":
+        return
+    notifier = TERMINAL_NOTIFIER_BIN
+    if os.access(notifier, os.X_OK) and _notified(
+        [notifier, "-title", "vibemaxxing", "-message", message]
+    ):
         return
     # The message is an argument of the script, never part of its text: it names accounts
     # and a limit kind the server chose, and none of that belongs inside AppleScript source.
@@ -353,10 +718,7 @@ def notify_macos(message: str) -> None:
     ):
         argv += ["-e", line]
     argv.append(message)
-    try:
-        subprocess.run(argv, capture_output=True, timeout=OSASCRIPT_TIMEOUT_S, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return
+    _notified(argv)
 
 
 def plist_path() -> Path:

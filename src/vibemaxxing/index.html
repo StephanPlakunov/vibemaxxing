@@ -305,6 +305,41 @@
 
   // --- the ledger ------------------------------------------------------------
 
+  // A Cursor seat is shown as one more account in the ledger: two bars (included allowance plus
+  // bonus, and on-demand against the cap), the reset, and what routing may do with it. It is not in
+  // the pool or the week chart: it has no weekly window, only a billing cycle.
+  function dollars(cents) {
+    return '$' + (cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function cursorAsAccount(seat) {
+    var rows = [];
+    var message = null;
+    if (seat.state === 'needs_login') {
+      message = 'not logged in \u2014 run: cursor-agent login';
+    } else if (seat.state !== 'ok') {
+      message = 'usage: unknown' + (seat.message ? ' (' + seat.message + ')' : '') + '; see cursor.com/dashboard';
+    } else {
+      if (typeof seat.included_percent === 'number') {
+        rows.push({ label: 'Included + bonus', percent: Math.round(seat.included_percent),
+                    severity: 'normal', resets_at: seat.resets_at });
+      }
+      var used = seat.on_demand_used_cents, cap = seat.on_demand_limit_cents;
+      if (typeof used === 'number') {
+        var share = typeof cap === 'number' && cap > 0 ? Math.min(100, Math.round(used / cap * 100)) : null;
+        rows.push({ label: 'On-demand', percent: share,
+                    severity: seat.available === false ? 'warn' : 'normal', resets_at: seat.resets_at });
+        var of = typeof cap === 'number' && cap > 0 ? ' of ' + dollars(cap) : cap === 0 ? ' (off)' : '';
+        message = dollars(used) + of + ' on-demand, billed to the company';
+      }
+      var verdict = seat.available === true ? 'available' : seat.available === false ? 'spent' : 'unknown';
+      message = (message ? message + ' \u00b7 ' : '') + 'routing: ' + verdict;
+    }
+    return { alias: seat.alias, active: false, state: seat.state, message: message,
+             email: seat.email, display_name: null, organization: null,
+             plan: 'Cursor' + (seat.team ? ' \u00b7 ' + seat.team : ''), rows: rows, breakdown: [] };
+  }
+
   function buildAccount(account) {
     var item = el('li', 'account');
     var identity = el('div');
@@ -520,10 +555,12 @@
   }
 
   function render(envelope) {
+    // Claude accounts, then any Cursor seat (envelope.cursor exists only when one is stored).
+    var shown = envelope.accounts.concat((envelope.cursor || []).map(cursorAsAccount));
     // Rebuild only when the shape changes; otherwise every value is repainted
     // into the nodes that already exist, so a page left open for days neither
     // grows nor flickers.
-    var shape = JSON.stringify(envelope.accounts.map(function (account) {
+    var shape = JSON.stringify(shown.map(function (account) {
       return [account.alias, account.active, account.email, account.display_name, account.organization,
         account.plan, account.state, account.message,
         account.rows.map(function (row) { return row.label; }),
@@ -533,13 +570,13 @@
       signature = shape;
       nodes = [];
       listEl.textContent = '';
-      envelope.accounts.forEach(function (account) {
+      shown.forEach(function (account) {
         listEl.appendChild(buildAccount(account));
       });
-      emptyEl.hidden = envelope.accounts.length > 0;
+      emptyEl.hidden = shown.length > 0;
     }
     latest = envelope;
-    paintAccounts(envelope.accounts);
+    paintAccounts(shown);
 
     weeksEl.textContent = '';
     weeksEl.appendChild(document.createTextNode(envelope.pool.remaining_account_weeks.toFixed(2)));

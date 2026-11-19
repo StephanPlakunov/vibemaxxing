@@ -51,6 +51,8 @@ class FakeHttpClient:
         headers: Mapping[str, str],
         body: bytes | None = None,
         timeout_s: float = 10.0,
+        max_bytes: int = 8 * 1024 * 1024,
+        deadline: float | None = None,
     ) -> HttpResponse:
         self.requests.append(RecordedRequest(method, url, dict(headers), body))
         if not self.responses:
@@ -75,6 +77,10 @@ class FakeKeychain:
     def write(self, blob: str) -> None:
         self.log.append("keychain.write")
         self.blob = blob
+
+    def delete(self) -> None:
+        self.log.append("keychain.delete")
+        self.blob = None
 
 
 def make_credential(
@@ -104,6 +110,7 @@ def seed_account(
     identity: Identity | None = None,
     active: bool = False,
     added_at: float = 1_757_930_000.0,
+    config_dir: str | None = None,
 ) -> Account:
     account = Account(
         alias=alias,
@@ -112,6 +119,7 @@ def seed_account(
         state=AccountState.OK,
         message=None,
         added_at=added_at,
+        config_dir=config_dir,
     )
     store.write_account(root, account)
     if active:

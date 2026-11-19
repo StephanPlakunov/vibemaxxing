@@ -1,0 +1,159 @@
+{
+ "recorded": "Atlassian Rovo MCP v2 tools/list with a real read-only login, 3 Nov 2026; names, argument names/types, required and two annotations only (no vendor text)",
+ "tools": {
+  "atlassianUserInfo": {
+   "destructiveHint": false,
+   "properties": {},
+   "readOnlyHint": true,
+   "required": []
+  },
+  "discover": {
+   "destructiveHint": false,
+   "properties": {
+    "query": "string"
+   },
+   "readOnlyHint": true,
+   "required": [
+    "query"
+   ]
+  },
+  "executeDestructive": {
+   "destructiveHint": true,
+   "properties": {
+    "cloudId": "string",
+    "inputs": "object",
+    "name": "string",
+    "responseFields": "array",
+    "view": "string"
+   },
+   "readOnlyHint": false,
+   "required": [
+    "name"
+   ]
+  },
+  "executeRead": {
+   "destructiveHint": false,
+   "properties": {
+    "cloudId": "string",
+    "inputs": "object",
+    "name": "string",
+    "responseFields": "array",
+    "view": "string"
+   },
+   "readOnlyHint": true,
+   "required": [
+    "name"
+   ]
+  },
+  "executeWrite": {
+   "destructiveHint": false,
+   "properties": {
+    "cloudId": "string",
+    "inputs": "object",
+    "name": "string",
+    "responseFields": "array",
+    "view": "string"
+   },
+   "readOnlyHint": false,
+   "required": [
+    "name"
+   ]
+  },
+  "getAccessibleAtlassianResources": {
+   "destructiveHint": false,
+   "properties": {},
+   "readOnlyHint": true,
+   "required": []
+  },
+  "getConfluenceContent": {
+   "destructiveHint": false,
+   "properties": {
+    "cloudId": "string",
+    "content_format": "string",
+    "content_id": "string",
+    "content_url": "string",
+    "detail": "string",
+    "draft": "boolean"
+   },
+   "readOnlyHint": true,
+   "required": [
+    "cloudId"
+   ]
+  },
+  "getJiraIssue": {
+   "destructiveHint": false,
+   "properties": {
+    "actionSource": "string",
+    "cloudId": "string",
+    "expand": "string",
+    "failFast": "boolean",
+    "fields": "array",
+    "fieldsByKeys": "boolean",
+    "includeEditableFields": "boolean",
+    "issueIdOrKey": "string",
+    "properties": "array",
+    "responseContentFormat": "string",
+    "view": "string"
+   },
+   "readOnlyHint": true,
+   "required": [
+    "cloudId",
+    "issueIdOrKey"
+   ]
+  },
+  "listJiraIssueComments": {
+   "destructiveHint": false,
+   "properties": {
+    "cloudId": "string",
+    "expand": "string",
+    "issueIdOrKey": "string",
+    "maxResults": "integer",
+    "orderBy": "string",
+    "reactionDetail": "string",
+    "responseContentFormat": "string",
+    "startAt": "integer",
+    "view": "string"
+   },
+   "readOnlyHint": true,
+   "required": [
+    "cloudId",
+    "issueIdOrKey"
+   ]
+  },
+  "searchConfluence": {
+   "destructiveHint": false,
+   "properties": {
+    "cloudId": "string",
+    "cql": "string",
+    "cqlcontext": "string",
+    "cursor": "string",
+    "expand": "string",
+    "limit": "integer"
+   },
+   "readOnlyHint": true,
+   "required": [
+    "cloudId",
+    "cql"
+   ]
+  },
+  "searchJiraIssuesUsingJql": {
+   "destructiveHint": false,
+   "properties": {
+    "actionSource": "string",
+    "cloudId": "string",
+    "fields": "array",
+    "jql": "string",
+    "maxResults": "number",
+    "nextPageToken": "string",
+    "responseContentFormat": "string",
+    "searchResultMode": "string",
+    "view": "string"
+   },
+   "readOnlyHint": true,
+   "required": [
+    "cloudId",
+    "jql"
+   ]
+  }
+ }
+}

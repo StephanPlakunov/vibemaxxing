@@ -21,6 +21,9 @@ BLOCKED_PATHS: Final = (
     REAL_HOME / ".vibemaxxing",
     REAL_HOME / ".claude",
     REAL_HOME / ".claude.json",
+    # The token broker's mirror dirs: a test that reached one would be next to a live login.
+    REAL_HOME / ".claude-main",
+    REAL_HOME / ".claude-extra",
 )
 BLOCKED_BINARIES: Final = ("security",)
 
@@ -119,3 +122,26 @@ def clean_secret_registry() -> Iterator[None]:
     redact._registry.clear()
     yield
     redact._registry.clear()
+
+
+# What the session running the suite may carry (a `vibe run extra` session has
+# CLAUDE_CONFIG_DIR=~/.claude-extra and VIBE_SESSION=extra): every test starts without them, or a
+# test reads the live config dir through them and its answer depends on who runs the suite.
+INHERITED_SESSION_VARS: Final = (
+    "VIBE_SESSION",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_MODEL",
+    "CLAUDE_CODE_EFFORT_LEVEL",
+    "CLAUDE_EFFORT",
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_CHILD_SESSION",
+)
+
+
+@pytest.fixture(autouse=True)
+def no_inherited_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in INHERITED_SESSION_VARS:
+        monkeypatch.delenv(name, raising=False)

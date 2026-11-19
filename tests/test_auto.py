@@ -22,7 +22,13 @@ import pytest
 from tests.fakes import FakeHttpClient, FakeKeychain, make_credential, seed_account
 from vibemaxxing import auto, cli, credentials, oauth, store, usage
 from vibemaxxing.credentials import Identity, credential_to_blob
-from vibemaxxing.errors import NeedsLoginError, NetworkError, NotFoundError, VibeError
+from vibemaxxing.errors import (
+    NeedsLoginError,
+    NetworkError,
+    NotFoundError,
+    UsageError,
+    VibeError,
+)
 from vibemaxxing.httpclient import HTTPError
 from vibemaxxing.models import AccountState
 from vibemaxxing.pool import LastSwitch, Settings
@@ -218,7 +224,7 @@ def test_tick_switches_and_records(tmp_home: Path, capsys: pytest.CaptureFixture
     assert (last.from_alias, last.to_alias, last.at_s) == ("a", "b", NOW_S)
     assert last.reason in line
     assert json.loads((w.root / "auto.json").read_text())["from"] == "a"
-    assert w.notes == [line], "one notification, naming the switch"
+    assert w.notes == [f"Switched to b: {last.reason}"], "one notification, naming the switch"
     assert w.client.requests == [], "the fresh caches answered; no request was needed"
 
 
@@ -267,16 +273,35 @@ def test_tick_stays_when_it_cannot_tell_who_is_live(tmp_home: Path) -> None:
     assert w.client.requests == []
 
 
-def test_tick_stays_when_the_active_pointer_is_not_the_live_account(tmp_home: Path) -> None:
-    # Polling would treat `a` as the active account and `b`, the live one, as any other:
-    # an expired token of b's would be refreshed behind Claude Code's back.
+def test_tick_repairs_an_active_pointer_that_is_not_the_live_account(tmp_home: Path) -> None:
+    # `a` is named active and never refreshed, while Claude Code runs as `b`. Staying here
+    # left `a` to lapse and `b` to be refreshed behind Claude Code's back, for good.
+    w = world(tmp_home, {"a": (99, 99), "b": (10, 10)}, live="b")
+    store.write_active(w.root, "a")
+    result = w.tick()
+
+    assert store.read_active(w.root) == "b"
+    assert result.switched is False
+    assert w.port.blob is not None
+    assert credentials.parse_blob(w.port.blob).access_token.reveal() == "b-live"
+
+
+def test_tick_stays_with_the_repair_command_when_the_repair_is_refused(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     w = world(tmp_home, {"a": (10, 10), "b": (99, 99)}, live="b")
     store.write_active(w.root, "a")
+
+    def refuse(*_: object, **__: object) -> None:
+        raise UsageError("another vibe switch just ran", "vibe switch b")
+
+    monkeypatch.setattr(store, "switch", refuse)
 
     result = w.tick()
 
     assert result.switched is False
     assert result.line.startswith("stay: Claude Code runs as b but vibe's active account is a")
+    assert "repairing it failed: another vibe switch just ran" in result.line
     assert "vibe switch b" in result.line
     assert w.client.requests == []
 
@@ -422,7 +447,9 @@ def test_tick_still_reports_a_switch_it_could_not_record(
     assert result.switched is True
     assert result.line.startswith("switched a -> b")
     assert "not recorded" in result.line
-    assert store.read_active(w.root) == "b" and w.notes == [result.line]
+    assert store.read_active(w.root) == "b"
+    (note,) = w.notes
+    assert note.startswith("Switched to b: ") and note.endswith("(not recorded: OSError)")
 
 
 def test_tick_respects_the_cooldown(tmp_home: Path) -> None:
@@ -831,9 +858,11 @@ def test_install_is_macos_only(
 
 
 def test_notify_passes_the_message_as_an_argument_never_as_script(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
+    # The osascript fallback: this machine may have terminal-notifier, the test must not care.
+    monkeypatch.setattr(auto, "TERMINAL_NOTIFIER_BIN", str(tmp_path / "absent"))
     calls: list[list[str]] = []
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -879,3 +908,68 @@ def test_last_switch_that_is_unreadable_is_no_record(tmp_home: Path) -> None:
     for raw in ("", "{ nope", '{"schema": 2}', '{"schema": 1, "from": "a"}', "[]"):
         (root / "auto.json").write_text(raw)
         assert auto.read_last(root) is None, raw
+
+
+def _notifier(tmp_path: Path) -> str:
+    path = tmp_path / "terminal-notifier"
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_notify_uses_terminal_notifier_when_it_is_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    notifier = _notifier(tmp_path)
+    monkeypatch.setattr(auto, "TERMINAL_NOTIFIER_BIN", notifier)
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    message = 'Switched to extra: main at 85% weekly" & (do shell script "x")'
+
+    auto.notify_macos(message)
+
+    assert calls == [[notifier, "-title", "vibemaxxing", "-message", message]]
+
+
+def test_notify_falls_back_to_osascript_when_terminal_notifier_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    notifier = _notifier(tmp_path)
+    monkeypatch.setattr(auto, "TERMINAL_NOTIFIER_BIN", notifier)
+    calls: list[str] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv[0])
+        if argv[0] == notifier:
+            return subprocess.CompletedProcess(argv, 1, "", "no GUI session")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    auto.notify_macos("Switched to extra: main at 85% weekly")
+    assert calls == [notifier, "/usr/bin/osascript"]
+
+    def broken(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv[0])
+        if argv[0] == notifier:
+            raise subprocess.TimeoutExpired(notifier, 5)
+        raise OSError("and osascript is gone too")
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", broken)
+    auto.notify_macos("Switched to extra: main at 85% weekly")
+    assert calls == [notifier, "/usr/bin/osascript"], "every failure swallowed"
+
+
+def test_a_switch_notifies_once_with_who_and_why(tmp_home: Path) -> None:
+    w = world(tmp_home, {"a": (99, 30), "b": (10, 10)})
+
+    w.tick()
+
+    assert w.notes == ["Switched to b: a session at 99%; b is at 10%"]

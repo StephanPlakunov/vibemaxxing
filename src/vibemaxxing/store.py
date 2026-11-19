@@ -22,6 +22,7 @@ from vibemaxxing.credentials import (
     Identity,
     credential_to_blob,
     credential_to_disk,
+    holds_refresh_token,
     login_lapsed,
     parse_blob,
     parse_blob_members,
@@ -31,7 +32,7 @@ from vibemaxxing.credentials import (
 )
 from vibemaxxing.errors import NeedsLoginError, NotFoundError, StoreError, UsageError, VibeError
 from vibemaxxing.fsutil import private_dir, write_private
-from vibemaxxing.keychain import KeychainPort
+from vibemaxxing.keychain import KeychainPort, storage_lock
 from vibemaxxing.models import AccountState
 
 SCHEMA_VERSION: Final = 1
@@ -54,6 +55,10 @@ class Account:
     state: AccountState
     message: str | None
     added_at: float
+    # The config dir whose Claude Code login this account is (`vibe add --from-config-dir`).
+    # Claude Code refreshes that lineage, in that dir's own Keychain item; vibe only reads it.
+    # None: the lineage is vibe's, and vibe refreshes it.
+    config_dir: str | None = None
 
 
 def valid_alias(alias: str) -> bool:
@@ -190,11 +195,14 @@ def read_account(root: Path, alias: str) -> Account:
         state=state,
         message=_optional_str(raw, "message"),
         added_at=float(added_at) if isinstance(added_at, (int, float)) else 0.0,
+        config_dir=_optional_str(raw, "config_dir"),
     )
 
 
 def write_account(root: Path, account: Account) -> None:
     identity = account.identity
+    # Only when set: a file of an account vibe owns stays what it always was.
+    owner = {"config_dir": account.config_dir} if account.config_dir is not None else {}
     _write_json(
         account_path(root, account.alias),
         root,
@@ -204,6 +212,7 @@ def write_account(root: Path, account: Account) -> None:
             "added_at": account.added_at,
             "state": str(account.state),
             "message": account.message,
+            **owner,
             "identity": {
                 "email": identity.email,
                 "account_uuid": identity.account_uuid,
@@ -429,6 +438,13 @@ def release_refresh(root: Path, alias: str) -> None:
     _claim_path(root, alias).unlink(missing_ok=True)
 
 
+def hold_refresh_claim(
+    root: Path, alias: str, recovery: str
+) -> contextlib.AbstractContextManager[None]:
+    """The refresh claim of ``alias`` for the length of a change to who holds its lineage."""
+    return _claims(root, (alias,), recovery)
+
+
 @contextlib.contextmanager
 def _claims(root: Path, names: Iterable[str | None], recovery: str) -> Iterator[None]:
     """Hold the refresh claims of ``names`` for the length of a change to `active`.
@@ -473,9 +489,10 @@ def _uuid_owner(root: Path, uuid: str, *, prefer: str | None) -> str | None:
 
 
 def _holds_login(blob: str) -> bool:
-    # `{"claudeAiOauth": {}}` is a blob and not a login: there is no token in it to lose.
+    # `{"claudeAiOauth": {}}` is a blob and not a login: there is no token in it to lose. A
+    # broker mirror (an access token and no refresh token) is a login: Claude Code runs on it.
     try:
-        parse_blob(blob)
+        parse_blob(blob, mirror_ok=True)
     except StoreError:
         return False
     return True
@@ -541,8 +558,33 @@ def require_usable(account: Account, *, now_ms: int) -> None:
         raise NeedsLoginError(f'the login for "{account.alias}" has lapsed', recovery)
 
 
+def refuse_owned(account: Account) -> None:
+    """An account whose login Claude Code keeps in another config dir is never copied elsewhere.
+
+    A switch would put its refresh token into the default login too; the next refresh by
+    either holder logs the other out. It runs with `vibe run`, which sets that config dir.
+    """
+    if account.config_dir is not None:
+        raise UsageError(
+            f'"{account.alias}" is the Claude Code login in {account.config_dir}, and copying '
+            "it into the default login would log one of the two out",
+            f"vibe run {account.alias} -- claude",
+        )
+
+
+def _port_blob(root: Path, credential: Credential, base: Mapping[str, object] | None) -> str:
+    """What the default item gets: the whole login, or with the token broker on only a mirror of
+    it (no refresh token), so Claude Code can never refresh the lineage vibe holds."""
+    from vibemaxxing import broker  # broker builds on this module
+
+    if broker.is_on(root):
+        return broker.mirror_blob(credential, base)
+    return credential_to_blob(credential, base)
+
+
 def switch(root: Path, alias: str, port: KeychainPort, *, now_s: float | None = None) -> None:
     incoming = read_account(root, alias)  # an unknown alias must fail before the port is touched
+    refuse_owned(incoming)
 
     outgoing = read_active(root)
     # `active` is only what vibe last wrote. When ~/.claude.json names another stored
@@ -564,7 +606,11 @@ def switch(root: Path, alias: str, port: KeychainPort, *, now_s: float | None = 
         # into `outgoing` would write one account's tokens into another's file.
         if read_active(root) != outgoing:
             raise UsageError("another vibe switch just ran", f"vibe switch {alias}")
-        _switch_claimed(root, alias, outgoing, owner, port)
+        # Claude Code's own write lock on its default config dir: it changes the item only as a
+        # read-modify-write under it, and so does the token broker (broker.write_mirror), so none
+        # of the three writes over what another just wrote.
+        with storage_lock(Path.home() / ".claude"):
+            _switch_claimed(root, alias, outgoing, owner, port)
 
 
 def _switch_claimed(
@@ -594,7 +640,15 @@ def _switch_claimed(
     # is free to check, so check it: resync only when the live account uuid is
     # unknown or agrees.
     holder = owner if owner is not None else outgoing
-    if base_raw is not None and holder is not None and account_path(root, holder).exists():
+    # Only a blob with a refresh token is a login Claude Code holds and may have rotated. A broker
+    # mirror carries none (vibe holds the lineage and refreshes it): copying it into the account
+    # file would replace the account's refresh token with nothing.
+    if (
+        base_raw is not None
+        and holds_refresh_token(base_raw)
+        and holder is not None
+        and account_path(root, holder).exists()
+    ):
         account = read_account(root, holder)
         stored_uuid = account.identity.account_uuid
         if live_uuid is None or stored_uuid is None or live_uuid == stored_uuid:
@@ -622,7 +676,7 @@ def _switch_claimed(
         incoming = replace(incoming, credential=successor)
         write_account(root, incoming)
         delete_stash(root, alias)
-    port.write(credential_to_blob(incoming.credential, base))
+    port.write(_port_blob(root, incoming.credential, base))
     # After the port, never before: the identity file only describes who the
     # credential belongs to, so it must not name the incoming account while the
     # port still holds the outgoing one.

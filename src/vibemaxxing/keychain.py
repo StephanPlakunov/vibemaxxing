@@ -3,14 +3,23 @@
 ``CLAUDE_CONFIG_DIR`` is never read, never set and never honoured. With it set
 Claude Code scopes the item to a hashed service name and ``NO_KEYCHAIN=1`` does
 not reliably produce a plaintext file — measured. We swap credentials, we do not
-isolate config directories, so only the fixed-name item matters.
+isolate config directories, so only the fixed-name item is ever written.
+
+The exceptions are a config dir's own item, which `vibe add --from-config-dir <dir>` reads,
+`--adopt-stored-login` writes, and `vibe release` reads and then deletes.
 """
 
 from __future__ import annotations
 
+import contextlib
 import getpass
+import hashlib
+import os
 import subprocess
 import sys
+import time
+import unicodedata
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -30,8 +39,15 @@ class KeychainPort(Protocol):
 
     def write(self, blob: str) -> None: ...
 
+    # Only `vibe release` calls it, on a config dir's own item: the login moves into vibe's
+    # store, and a second copy left behind would be a second refresher of one lineage.
+    def delete(self) -> None: ...
+
 
 class MacKeychain:
+    def __init__(self, service: str = CLAUDE_CODE_KEYCHAIN_SERVICE) -> None:
+        self.service = service
+
     def read(self) -> str | None:
         result = self._run(
             [
@@ -41,14 +57,14 @@ class MacKeychain:
                 getpass.getuser(),
                 "-w",
                 "-s",
-                CLAUDE_CODE_KEYCHAIN_SERVICE,
+                self.service,
             ]
         )
         if result.returncode == SECURITY_ABSENT_CODE:
             return None
         if result.returncode != 0:
             raise VibeError(
-                f"the macOS Keychain refused to read {CLAUDE_CODE_KEYCHAIN_SERVICE!r} "
+                f"the macOS Keychain refused to read {self.service!r} "
                 f"(security exit {result.returncode})",
                 _RECOVERY,
             )
@@ -70,14 +86,33 @@ class MacKeychain:
                 "-a",
                 getpass.getuser(),
                 "-s",
-                CLAUDE_CODE_KEYCHAIN_SERVICE,
+                self.service,
                 "-w",
                 blob,
             ]
         )
         if result.returncode != 0:
             raise VibeError(
-                f"the macOS Keychain refused to write {CLAUDE_CODE_KEYCHAIN_SERVICE!r} "
+                f"the macOS Keychain refused to write {self.service!r} "
+                f"(security exit {result.returncode})",
+                _RECOVERY,
+            )
+
+    def delete(self) -> None:
+        """Remove the item; one that is not there is already what was asked for."""
+        result = self._run(
+            [
+                SECURITY_BIN,
+                "delete-generic-password",
+                "-a",
+                getpass.getuser(),
+                "-s",
+                self.service,
+            ]
+        )
+        if result.returncode not in (0, SECURITY_ABSENT_CODE):
+            raise VibeError(
+                f"the macOS Keychain refused to delete {self.service!r} "
                 f"(security exit {result.returncode})",
                 _RECOVERY,
             )
@@ -105,8 +140,11 @@ class MacKeychain:
 
 
 class FileKeychain:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path
+
     def _path(self) -> Path:
-        return Path.home() / ".claude" / ".credentials.json"
+        return self.path if self.path is not None else Path.home() / ".claude" / ".credentials.json"
 
     def read(self) -> str | None:
         try:
@@ -130,6 +168,16 @@ class FileKeychain:
                 _RECOVERY,
             ) from None
 
+    def delete(self) -> None:
+        path = self._path()
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise VibeError(
+                f"could not delete {path}: {exc.__class__.__name__}",
+                _RECOVERY,
+            ) from None
+
 
 def default_port() -> KeychainPort:
     # Bound to a local str on purpose: mypy resolves a bare `sys.platform`
@@ -144,3 +192,96 @@ def default_port() -> KeychainPort:
     if platform == "darwin":
         return MacKeychain()
     return FileKeychain()
+
+
+def config_dir_service(config_dir: Path) -> str:
+    """The Keychain item Claude Code keeps its login in when CLAUDE_CONFIG_DIR is ``config_dir``.
+
+    Claude Code appends "-" and the first 8 hex digits of the sha256 of the dir, NFC
+    normalised. Checked against the item Claude Code created on this fork's machine for
+    an ASCII path; the NFC step is what Claude Code's source does, not something measured.
+    """
+    path = unicodedata.normalize("NFC", str(config_dir))
+    return f"{CLAUDE_CODE_KEYCHAIN_SERVICE}-{hashlib.sha256(path.encode()).hexdigest()[:8]}"
+
+
+def resolve_config_dir(config_dir: Path) -> Path:
+    """The dir as the hash must see it: absolute, `~` expanded, no trailing slash.
+
+    Symlinks are not resolved; Claude Code hashes the path it was given.
+    """
+    return Path(os.path.abspath(os.path.expanduser(config_dir)))
+
+
+def config_dir_location(config_dir: Path) -> str:
+    """Where Claude Code keeps the login for ``config_dir``, for a message that names it."""
+    platform: str = sys.platform
+    if platform == "darwin":
+        return f"the Keychain item {config_dir_service(config_dir)!r}"
+    return str(config_dir / ".credentials.json")
+
+
+def config_dir_port(config_dir: Path) -> KeychainPort:
+    """The store Claude Code keeps the login for ``config_dir`` in.
+
+    Read by the import and the polls, written by `--adopt-stored-login`, deleted by `vibe release`.
+    """
+    platform: str = sys.platform
+    if platform == "win32":
+        return default_port()  # raises: there is no Windows store
+    if platform == "darwin":
+        return MacKeychain(config_dir_service(config_dir))
+    return FileKeychain(config_dir / ".credentials.json")
+
+
+# Claude Code 2.1.318 changes its credential item only under this lock in the config dir (a
+# proper-lockfile directory, `<dir>/.storage-write` + `.lock`, stale after 15 s), as a
+# read-modify-write of the whole item. The token broker writes a mirror the same way under the
+# same lock, so neither side drops what the other just wrote (an MCP server's login, say).
+STORAGE_LOCK: Final = ".storage-write.lock"
+STORAGE_LOCK_STALE_S: Final = 15.0
+STORAGE_LOCK_WAIT_S: Final = 5.0
+
+
+@contextlib.contextmanager
+def storage_lock(
+    config_dir: Path,
+    *,
+    wait_s: float = STORAGE_LOCK_WAIT_S,
+    clock: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Iterator[None]:
+    """Hold Claude Code's own write lock of ``config_dir`` (no lock when the dir does not exist)."""
+    path = config_dir / STORAGE_LOCK
+    if not config_dir.is_dir():
+        yield
+        return
+    deadline = clock() + wait_s
+    while True:
+        try:
+            os.mkdir(path, 0o700)
+            break
+        except FileExistsError:
+            try:
+                stale = path.stat().st_mtime + STORAGE_LOCK_STALE_S <= clock()
+            except FileNotFoundError:
+                continue
+            if stale:
+                with contextlib.suppress(OSError):
+                    os.rmdir(path)
+                continue
+            if clock() >= deadline:
+                raise VibeError(
+                    f"Claude Code is writing its login in {config_dir} right now ({path} is held)",
+                    "vibe auto tick",
+                ) from None
+            sleep(0.1)
+        except OSError as exc:
+            raise VibeError(
+                f"could not take {path}: {exc.__class__.__name__}", "vibe auto tick"
+            ) from None
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            os.rmdir(path)

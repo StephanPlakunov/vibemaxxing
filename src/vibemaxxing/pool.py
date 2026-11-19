@@ -3,27 +3,36 @@ to leave the live account for another. Pure: nothing here reads a clock or a fil
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Final, Literal
+from zoneinfo import ZoneInfo
 
 from vibemaxxing.models import AccountState, Sample
 from vibemaxxing.poll import USAGE_FRESH_S
-from vibemaxxing.usage import Row
+from vibemaxxing.usage import SCOPED_LABEL_PREFIX, Row
 
 WEEKLY_ALL_KIND: Final = "weekly_all"
+SCOPED_KIND: Final = "weekly_scoped"
 # The rows a switch is about. weekly_scoped is one model's own cap and kinds the server
-# adds later are not known to mean "this account is spent", so neither moves anyone.
+# adds later are not known to mean "this account is spent", so neither moves anyone --
+# unless an ordered policy names the model (Policy.block_models).
 TRIGGER_KINDS: Final = ("session", WEEKLY_ALL_KIND)
+EARLIEST_RESET: Final = "earliest_reset"
 
 REASON_OFF: Final = "auto-switch is off"
 REASON_LIVE_UNKNOWN: Final = "live account unknown"
 
 DEFAULT_THRESHOLD: Final = 99
 DEFAULT_COOLDOWN_S: Final = 900
+CANDIDATE_MARGIN: Final = 5
 MIN_THRESHOLD: Final = 50
 MAX_THRESHOLD: Final = 100
+# route.DEFAULT_BUDGET and route.DEFAULT_TIMEZONE, repeated so this module imports no I/O; a test
+# pins the two together.
+DEFAULT_BUDGET: Final = (20, 40, 60, 80, 100, 100, 100)
+DEFAULT_BUDGET_TIMEZONE: Final = "Europe/Berlin"
 
 
 @dataclass(frozen=True)
@@ -70,6 +79,79 @@ def dry_in(samples: Sequence[Sample]) -> timedelta | None:
 
 
 @dataclass(frozen=True)
+class Step:
+    """One step of an ordered policy: ``account`` while every row that counts is below ``until``."""
+
+    account: str
+    until: int
+    # Monday..Sunday: the weekly percent this step also stops at on that weekday (local time),
+    # so a week is spent evenly. Empty: only ``until`` counts.
+    weekly_cap: tuple[int, ...] = ()
+    # The weekly percent this step also stops at is today's budget (Policy.budget, the one
+    # `vibe run auto` routes by), so the switch and the routing spend the week the same way.
+    weekly_budget: bool = False
+
+
+@dataclass(frozen=True)
+class Budget:
+    """The routing's weekday budget: the weekly percent allowed by the end of each day.
+
+    Monday..Sunday in ``timezone``; settings.json `routing.weekday_budget` and
+    `routing.timezone` (route.Routing), read by auto.read_settings.
+    """
+
+    weekdays: tuple[int, ...] = DEFAULT_BUDGET
+    timezone: str = DEFAULT_BUDGET_TIMEZONE
+
+    def today(self, now_s: float) -> int:
+        return self.weekdays[datetime.fromtimestamp(now_s, ZoneInfo(self.timezone)).weekday()]
+
+
+def weekly_limit(step: Step, now_s: float, budget: Budget | None = None) -> int | None:
+    """The weekly percent ``step`` stops at today: ``until``, or today's cap or budget if lower.
+
+    ``budget`` is the policy's (Policy.budget); None means the routing defaults.
+    """
+    if step.weekly_budget:
+        return min(step.until, (budget if budget is not None else Budget()).today(now_s))
+    if not step.weekly_cap:
+        return None
+    return min(step.until, step.weekly_cap[datetime.fromtimestamp(now_s).weekday()])
+
+
+def weekly_zone(step: Step, budget: Budget | None = None) -> str | None:
+    """The timezone whose midnight changes ``step``'s weekly limit; None for local time."""
+    if not step.weekly_budget:
+        return None
+    return (budget if budget is not None else Budget()).timezone
+
+
+def _next_midnight_s(now_s: float, timezone: str | None = None) -> float:
+    zone = ZoneInfo(timezone) if timezone is not None else None
+    tomorrow = datetime.fromtimestamp(now_s, zone).date() + timedelta(days=1)
+    return datetime.combine(tomorrow, time.min, tzinfo=zone).timestamp()
+
+
+@dataclass(frozen=True)
+class Policy:
+    """`policy` in settings.json.
+
+    No steps is the original rule: leave the live account once it reaches
+    ``Settings.threshold``, for the account with the most room. With steps, the first
+    step whose account has room is where Claude Code should be, and when none has, the
+    account that gets room back first.
+    """
+
+    steps: tuple[Step, ...] = ()
+    # Models whose own weekly row holds an account back like its session and weekly rows.
+    # None by default: one model's cap leaves the account usable for the others.
+    block_models: tuple[str, ...] = ()
+    # Today's weekly limit of a step with ``weekly_budget``. Not a member of `policy` in
+    # settings.json: it is the routing's, and only read from there.
+    budget: Budget = Budget()
+
+
+@dataclass(frozen=True)
 class Settings:
     """`~/.vibemaxxing/settings.json`. The defaults are also what an invalid file means."""
 
@@ -77,6 +159,7 @@ class Settings:
     threshold: int = DEFAULT_THRESHOLD
     cooldown_s: int = DEFAULT_COOLDOWN_S
     excluded: tuple[str, ...] = ()
+    policy: Policy = Policy()
 
 
 @dataclass(frozen=True)
@@ -92,6 +175,10 @@ class LastSwitch:
     at_s: float
     reason: str
     until_s: float | None
+    # The limit ``from_alias`` was left at. An ordered policy uses one account at two
+    # limits (85% first, 99% later), and the fence only holds at this one and below.
+    # None, from a record that predates it or an undo, fences at every limit.
+    limit: int | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +200,15 @@ class Decision:
     action: Literal["stay", "switch"]
     target: str | None
     reason: str
+    # The limit the live account was over when it is left; what LastSwitch.limit records.
+    limit: int | None = None
+    # The weekly limit in force for that step today (see weekly_limit); None without a cap.
+    weekly: int | None = None
+    # The limit the fence's reset time is computed at (limited_until's ``threshold``), when it
+    # is not ``limit``: an account left over today's budget alone is recorded at the budget.
+    threshold: int | None = None
+    # The timezone whose midnight lifts ``weekly`` (a budget's); None for local time.
+    zone: str | None = None
 
 
 def _stay(reason: str) -> Decision:
@@ -132,15 +228,38 @@ def _reset_s(row: Row) -> float | None:
     return None if row.resets_at is None else parse_stamp(row.resets_at)
 
 
-def _over(rows: Iterable[Row], threshold: int) -> list[Row]:
+def _counts(row: Row, models: Sequence[str]) -> bool:
+    """Whether ``row`` can hold an account back: session, weekly_all, and named models."""
+    if row.kind in TRIGGER_KINDS:
+        return True
+    if row.kind != SCOPED_KIND or not models or not row.label.startswith(SCOPED_LABEL_PREFIX):
+        return False
+    model = row.label.removeprefix(SCOPED_LABEL_PREFIX).casefold()
+    return model in {name.casefold() for name in models}
+
+
+def _over(
+    rows: Iterable[Row], threshold: int, models: Sequence[str] = (), weekly: int | None = None
+) -> list[Row]:
+    """The rows at or over ``threshold``; the weekly_all row at ``weekly`` when that is given."""
     return [
         row
         for row in rows
-        if row.kind in TRIGGER_KINDS and row.percent is not None and row.percent >= threshold
+        if _counts(row, models)
+        and row.percent is not None
+        and row.percent
+        >= (weekly if weekly is not None and row.kind == WEEKLY_ALL_KIND else threshold)
     ]
 
 
-def blocking(rows: Iterable[Row], threshold: int, now_s: float) -> tuple[Row, ...]:
+def blocking(
+    rows: Iterable[Row],
+    threshold: int,
+    now_s: float,
+    *,
+    models: Sequence[str] = (),
+    weekly: int | None = None,
+) -> tuple[Row, ...]:
     """The trigger rows at or over ``threshold`` whose window has not reset yet.
 
     A reading is a floor until its own row resets: usage only falls when the window
@@ -148,25 +267,42 @@ def blocking(rows: Iterable[Row], threshold: int, now_s: float) -> tuple[Row, ..
     and one whose reset has passed says nothing about now.
     """
     found: list[Row] = []
-    for row in _over(rows, threshold):
+    for row in _over(rows, threshold, models, weekly):
         reset_s = _reset_s(row)
         if reset_s is None or reset_s > now_s:
             found.append(row)
     return tuple(found)
 
 
-def limited_until(rows: Iterable[Row], threshold: int, now_s: float) -> float | None:
-    """When every row holding the account over ``threshold`` has reset; None if unknown."""
-    resets = [_reset_s(row) for row in blocking(rows, threshold, now_s)]
+def limited_until(
+    rows: Iterable[Row],
+    threshold: int,
+    now_s: float,
+    *,
+    models: Sequence[str] = (),
+    weekly: int | None = None,
+    timezone: str | None = None,
+) -> float | None:
+    """When every row holding the account over ``threshold`` has reset; None if unknown.
+
+    A weekly row held back by today's cap alone (under ``threshold``) is free again when the
+    cap rises at midnight (local, or in ``timezone`` for a budget), not when the week resets.
+    """
+    resets: list[float | None] = []
+    for row in blocking(rows, threshold, now_s, models=models, weekly=weekly):
+        if weekly is not None and row.kind == WEEKLY_ALL_KIND and (row.percent or 0) < threshold:
+            resets.append(_next_midnight_s(now_s, timezone))
+        else:
+            resets.append(_reset_s(row))
     known = [reset_s for reset_s in resets if reset_s is not None]
     if not known or len(known) != len(resets):
         return None
     return max(known)
 
 
-def trigger_percent(rows: Iterable[Row]) -> int | None:
-    """The fullest of the session and weekly_all rows; None when any is unknown or none exist."""
-    percents = [row.percent for row in rows if row.kind in TRIGGER_KINDS]
+def trigger_percent(rows: Iterable[Row], models: Sequence[str] = ()) -> int | None:
+    """The fullest of the rows that count; None when any is unknown or none exist."""
+    percents = [row.percent for row in rows if _counts(row, models)]
     known = [percent for percent in percents if percent is not None]
     if not known or len(known) != len(percents):
         return None
@@ -187,7 +323,9 @@ def _fullness(
         return None
     if not 0 <= now_s - reading.updated_at < USAGE_FRESH_S:
         return None
-    if _over(reading.rows, settings.threshold):
+    # An account this close to the threshold would cross it within minutes, and the
+    # cooldown would then keep the next switch from leaving it.
+    if _over(reading.rows, settings.threshold - CANDIDATE_MARGIN):
         return None
     if (
         last is not None
@@ -226,6 +364,9 @@ def next_candidate(
     last: LastSwitch | None,
 ) -> str | None:
     """Where a switch would go if one were due, trigger or not."""
+    if settings.policy.steps:
+        _, following = ordered_steps(readings, settings=settings, live=live, now_s=now_s, last=last)
+        return None if following is None else settings.policy.steps[following].account
     ranked = _ranked(readings, settings=settings, live=live, now_s=now_s, last=last)
     return ranked[0][1] if ranked else None
 
@@ -242,6 +383,8 @@ def decide(
         return _stay(REASON_OFF)
     if live is None:
         return _stay(REASON_LIVE_UNKNOWN)
+    if settings.policy.steps:
+        return _decide_ordered(readings, settings=settings, live=live, now_s=now_s, last=last)
     current = next((reading for reading in readings if reading.alias == live), None)
     if current is None or current.rows is None:
         return _stay(f"no fresh numbers for {live}")
@@ -261,5 +404,292 @@ def decide(
     fullness, target = ranked[0]
     worst = max(blocked, key=lambda row: row.percent or 0)
     return Decision(
-        "switch", target, f"{live} {worst.kind} at {worst.percent}%; {target} is at {fullness}%"
+        "switch",
+        target,
+        f"{live} {worst.kind} at {worst.percent}%; {target} is at {fullness}%",
+        settings.threshold,
     )
+
+
+# --- the ordered policy -------------------------------------------------------------
+
+
+def _fresh(reading: Reading, now_s: float) -> bool:
+    return reading.updated_at is not None and 0 <= now_s - reading.updated_at < USAGE_FRESH_S
+
+
+def _under(
+    reading: Reading,
+    limit: int,
+    models: Sequence[str],
+    now_s: float,
+    weekly: int | None = None,
+) -> int | None:
+    """How full ``reading`` is when fresh numbers put every row that counts below ``limit``.
+
+    Only fresh numbers say an account is below a limit: a reading is a floor, so an old
+    one that was below may not be any more.
+    """
+    if (
+        reading.rows is None
+        or not _fresh(reading, now_s)
+        or _over(reading.rows, limit, models, weekly)
+    ):
+        return None
+    return trigger_percent(reading.rows, models)
+
+
+def _fenced(alias: str, limit: int, now_s: float, last: LastSwitch | None) -> bool:
+    """Whether ``alias`` was left at ``limit`` or lower and what limited it has not reset."""
+    return (
+        last is not None
+        and last.from_alias == alias
+        and last.until_s is not None
+        and now_s < last.until_s
+        and (last.limit is None or limit <= last.limit)
+    )
+
+
+def _usable(reading: Reading, *, settings: Settings, live: str | None) -> bool:
+    # State ok is the login check: envelope.collect has already refused a lapsed login and
+    # refreshed an expired token of every account but the live one.
+    return (
+        reading.alias != live
+        and reading.alias not in settings.excluded
+        and reading.identified
+        and reading.state is AccountState.OK
+    )
+
+
+def _qualifies(
+    reading: Reading | None,
+    step: Step,
+    *,
+    settings: Settings,
+    live: str | None,
+    now_s: float,
+    last: LastSwitch | None,
+) -> int | None:
+    """How full a step's account is when it may be switched to at that step; None if not."""
+    if reading is None or not _usable(reading, settings=settings, live=live):
+        return None
+    if _fenced(reading.alias, step.until, now_s, last):
+        return None
+    policy = settings.policy
+    return _under(
+        reading, step.until, policy.block_models, now_s, weekly_limit(step, now_s, policy.budget)
+    )
+
+
+def ordered_steps(
+    readings: Sequence[Reading],
+    *,
+    settings: Settings,
+    live: str | None,
+    now_s: float,
+    last: LastSwitch | None,
+) -> tuple[int | None, int | None]:
+    """The step the policy is on now, and the first step on another account that has room.
+
+    0-based indexes into ``settings.policy.steps``. The first is where Claude Code should
+    be; the second is where a switch would go once the live account is spent.
+    """
+    by_alias = {reading.alias: reading for reading in readings}
+    models = settings.policy.block_models
+    current: int | None = None
+    following: int | None = None
+    for index, step in enumerate(settings.policy.steps):
+        reading = by_alias.get(step.account)
+        if step.account == live:
+            wk = weekly_limit(step, now_s, settings.policy.budget)
+            room = (
+                reading is not None and _under(reading, step.until, models, now_s, wk) is not None
+            )
+            if current is None and room:
+                current = index
+            continue
+        if _qualifies(reading, step, settings=settings, live=live, now_s=now_s, last=last) is None:
+            continue
+        current = index if current is None else current
+        following = index if following is None else following
+    return current, following
+
+
+def _spent(row: Row) -> str:
+    if row.kind == "session":
+        return f"{row.percent}% session"
+    if row.kind == WEEKLY_ALL_KIND:
+        return f"{row.percent}% weekly"
+    return f"{row.percent}% weekly {row.label.removeprefix(SCOPED_LABEL_PREFIX)}"
+
+
+def _decide_ordered(
+    readings: Sequence[Reading],
+    *,
+    settings: Settings,
+    live: str,
+    now_s: float,
+    last: LastSwitch | None,
+) -> Decision:
+    """Walk the steps; the first whose account has room is where Claude Code should be.
+
+    The live account's numbers decide whether it has room at its own steps, and nothing
+    is switched on a guess: no usable answer for it, or an old one below the limit, is a
+    stay. Another account needs fresh numbers below the step's limit, a usable login, and
+    not to be the account just left at that limit before what limited it has reset.
+    """
+    policy = settings.policy
+    models = policy.block_models
+    budget = policy.budget
+    by_alias = {reading.alias: reading for reading in readings}
+    current = by_alias.get(live)
+    if current is None or current.rows is None:
+        return _stay(f"no fresh numbers for {live}")
+    own = [step for step in policy.steps if step.account == live]
+    if not own:
+        # A person put Claude Code on an account the policy does not name; that is theirs.
+        return _stay(f"{live} is not in the policy")
+    # The steps of its own the live account is over: floors, true however old.
+    over = [
+        step
+        for step in own
+        if blocking(
+            current.rows,
+            step.until,
+            now_s,
+            models=models,
+            weekly=weekly_limit(step, now_s, budget),
+        )
+    ]
+    total = len(policy.steps)
+    for index, step in enumerate(policy.steps):
+        if step.account == live:
+            if step in over:
+                continue
+            cap = weekly_limit(step, now_s, budget)
+            if _under(current, step.until, models, now_s, cap) is None:
+                return _stay(f"no fresh numbers for {live}")
+            capped = ""
+            if cap is not None and cap < step.until:
+                what = (
+                    f"today's {cap}% weekly budget"
+                    if step.weekly_budget
+                    else f"{cap}% weekly today"
+                )
+                capped = f" and {what}"
+            return _stay(f"{live} is below {step.until}%{capped} (step {index + 1} of {total})")
+        reading = by_alias.get(step.account)
+        fullness = _qualifies(reading, step, settings=settings, live=live, now_s=now_s, last=last)
+        if fullness is None:
+            continue
+        if over:
+            # Leaving an account at or over one of its limits is never delayed.
+            return _leave(
+                current.rows, over, step.account, settings=settings, live=live, now_s=now_s
+            )
+        # The live account still has room; this one outranks it. The cooldown applies.
+        if last is not None and abs(now_s - last.at_s) < settings.cooldown_s:
+            return _stay(f"cooldown: last switch {int(abs(now_s - last.at_s))}s ago")
+        return Decision(
+            "switch",
+            step.account,
+            f"{step.account} is at {fullness}%, below its {step.until}% step",
+            min(own_step.until for own_step in own),
+        )
+    return _earliest_reset(by_alias, settings=settings, live=live, now_s=now_s, last=last)
+
+
+def _leave(
+    rows: tuple[Row, ...],
+    over: Sequence[Step],
+    target: str,
+    *,
+    settings: Settings,
+    live: str,
+    now_s: float,
+) -> Decision:
+    """Leave ``live``, which is over the limits of the steps ``over``, for ``target``."""
+    policy = settings.policy
+    models, budget = policy.block_models, policy.budget
+    top = max(over, key=lambda own_step: own_step.until)
+    cap = weekly_limit(top, now_s, budget)
+    worst = max(blocking(rows, top.until, now_s, models=models, weekly=cap), key=_percent)
+    reason = f"{live} at {_spent(worst)}"
+    if not top.weekly_budget:
+        if cap is not None and worst.kind == WEEKLY_ALL_KIND and _percent(worst) < top.until:
+            reason += f", over today's {cap}% weekly cap"
+        return Decision("switch", target, reason, top.until, cap)
+    if blocking(rows, top.until, now_s, models=models):
+        # A row at the step's own limit holds it back until that row resets; the budget adds
+        # nothing to wait for.
+        return Decision("switch", target, reason, top.until)
+    # Over today's budget alone. Recorded at the budget, not at ``until``: the fence is then
+    # only as wide as the budget, so the account's later steps stay open, and the budget check
+    # itself keeps it out of this one until the budget allows it again (at midnight in the
+    # budget's timezone at the latest, never only after the weekly reset).
+    reason += f", over today's {cap}% weekly budget"
+    return Decision("switch", target, reason, cap, cap, threshold=top.until, zone=budget.timezone)
+
+
+def _percent(row: Row) -> int:
+    return row.percent or 0
+
+
+def _loosest(steps: Sequence[Step], now_s: float, policy: Policy) -> Step:
+    """The step that lets an account do the most: the highest ``until``, then the highest
+    weekly limit today (no cap or budget counts as ``until``). Ties go to the first."""
+
+    def room(step: Step) -> tuple[int, int]:
+        weekly = weekly_limit(step, now_s, policy.budget)
+        return step.until, step.until if weekly is None else weekly
+
+    return max(steps, key=room)
+
+
+def _earliest_reset(
+    by_alias: Mapping[str, Reading],
+    *,
+    settings: Settings,
+    live: str,
+    now_s: float,
+    last: LastSwitch | None,
+) -> Decision:
+    """No step has room: be on the account that gets room back first.
+
+    Each account's moment is when every row holding it over its highest limit has
+    reset, the floors its numbers prove; the account just left waits for its fence
+    as well. An account whose moment is unknown is not a place to go.
+    """
+    policy = settings.policy
+    models = policy.block_models
+    best: tuple[float, str] | None = None
+    for account in dict.fromkeys(step.account for step in policy.steps):
+        reading = by_alias.get(account)
+        if reading is None or reading.rows is None:
+            continue
+        if account != live and not _usable(reading, settings=settings, live=live):
+            continue
+        loosest = _loosest(
+            [step for step in policy.steps if step.account == account], now_s, policy
+        )
+        limit = loosest.until
+        ready = limited_until(
+            reading.rows,
+            limit,
+            now_s,
+            models=models,
+            weekly=weekly_limit(loosest, now_s, policy.budget),
+            timezone=weekly_zone(loosest, policy.budget),
+        )
+        if account != live and _fenced(account, limit, now_s, last) and last is not None:
+            ready = max(ready or 0.0, last.until_s or 0.0)
+        if ready is not None and (best is None or ready < best[0]):
+            best = (ready, account)
+    if best is None:
+        return _stay("no account with headroom")
+    target = best[1]
+    reason = f"every account is at its limit; {target} resets first"
+    if target == live:
+        return _stay(reason)
+    limit = max(step.until for step in policy.steps if step.account == live)
+    return Decision("switch", target, reason, limit)

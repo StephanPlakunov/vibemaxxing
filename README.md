@@ -33,6 +33,120 @@ vibe switch side          # Claude Code is now that account
 `vibe add` with no name takes the login already in Claude Code, no browser and no
 network. That is the fastest way in: one command and you have your first account stored.
 
+### Import a login from a second config dir
+
+If you already run a second account under its own Claude Code config dir
+(`CLAUDE_CONFIG_DIR=~/.claude-work claude`), take that login over without a browser:
+
+```
+vibe add work --from-config-dir ~/.claude-work
+```
+
+It reads the Keychain item Claude Code keeps for that dir (`Claude Code-credentials-`
+plus the first 8 hex digits of the sha256 of the dir's absolute path; on Linux
+`<dir>/.credentials.json`) and the `oauthAccount` in `<dir>/.claude.json`, and stores the
+account like `vibe add` does. No request, no refresh, no Keychain write, and the active
+account does not change. It refuses a dir with no login, a profile with no account id
+(auto-switch could never tell that account apart), the active account's name, and a name
+another account already holds.
+
+**From then on that login is Claude Code's, in that dir, and vibe never refreshes it.** The account records
+the dir. `vibe run work -- claude` starts Claude Code with `CLAUDE_CONFIG_DIR=<dir>` and no token override (the other
+Claude variables are still dropped and the bridge is still handed over), so Claude Code reads and renews the login in
+the dir's own Keychain item, and a session in it keeps working for as long as the login lives, whatever else vibe
+starts or polls. (Before this, vibe copied the login, refreshed the copy itself and ran sessions on a bare access
+token: a refresh on either side logged the other out, and a long session died with "OAuth token revoked".)
+`vibe list`, the TUI and the web page read that account's usage with the token in the dir's item; once it has expired
+they show the last numbers until the next session in the dir renews it. `vibe switch work` is refused (it would copy
+the refresh token into the default login) and auto-switch never switches onto it: use `vibe run work -- claude`. A
+dir with no login, or logged in as another account, stops the run and names the command that fixes it.
+
+**A config dir has its own settings.** The `CLAUDE.md`, `settings.json`, `skills` and `projects` of `~/.claude` do not
+apply there unless linked (`ln -s ~/.claude/CLAUDE.md ~/.claude-work/`); `vibe run` names what is missing. Linking
+`projects` also lets `claude --resume` find sessions that were started in `~/.claude`.
+
+An alias imported before this change becomes owned by running the same import again: the login is already stored, so
+vibe records the dir, drops its stash and stops refreshing.
+
+### Hand the stored login to a config dir (no browser, no mailbox)
+
+When the only working login of an account is the copy vibe stored (nobody can log in again), give that copy to the
+config dir instead of importing one from it:
+
+```
+vibe add extra --from-config-dir ~/.claude-extra --adopt-stored-login
+```
+
+It writes the stored login (access and refresh token, expiry, scopes, plan) into the dir's own Claude Code Keychain
+item, and the account (`oauthAccount`: uuid, email, organisation) into `<dir>/.claude.json`, keeping every other key
+there; then `vibe run extra -- claude` works as above. **vibe stops refreshing before Claude Code can**: the account
+is marked as the dir's first, under the refresh claim, and `oauth.refresh` checks that mark again under the same claim,
+so even a tick that read the account a moment earlier cannot post the token Claude Code now holds. An access token that
+has ended is refreshed once first (a dead login is found then, with nothing handed over); one that still works is
+handed over as it is. It refuses: the active account or the one Claude Code runs as, a dir that already has a login
+(never overwritten; take that one over with the plain import), a profile naming another account, a lapsed or rejected
+login, an account that lives in another dir. If the Keychain write fails and the item is not there, the mark is taken
+back (vibe may refresh again); if it may be there, the mark stays and running the command again finishes the job. No
+token is printed.
+
+### Release a config-dir login (one shared login)
+
+The way back, for one shared login: vibe holds every account and auto-switch moves Claude Code's
+default login between them.
+
+```
+vibe release extra
+released extra: vibe holds its login now; ~/.claude-extra has no login any more
+```
+
+It reads the login from the dir's own Keychain item, checks that `<dir>/.claude.json` names the
+stored account, writes it into the account file without `config_dir` (from now on vibe refreshes it,
+and `vibe switch` and auto-switch may put it into the default login), then **deletes the dir's
+item**, so no session in that dir can use or renew a second copy: a login lives in one place only.
+`<dir>/.claude.json` stays as it is; a session started in that dir afterwards has no login (a
+`claude /login` there makes a separate one). It refuses an account that has no config dir, the active or live account, a lapsed
+or rejected login, a profile naming another account, and **any process running with
+`CLAUDE_CONFIG_DIR=<dir>`** (read with `ps -E`; it names the PIDs, and a list it cannot read is a
+refusal too). If the delete fails, the account file is put back as it was. No request, no token
+printed; `--json` works.
+
+**Polls and refreshes, until an account is adopted.** The tick, `vibe list`, the TUI and the web page refresh an account
+vibe owns only once its access token has really ended, never in the five minutes before (a session started with that
+token may still be using it); `vibe run`, whose child cannot renew a token, keeps the window. That is as seldom as a
+refresh can be: once per access token. It cannot keep a `CLAUDE_CODE_OAUTH_TOKEN` session alive past that token's
+end, which no refresh can; an adopted account can.
+
+### The token broker: fixed sessions and the background switch side by side
+
+```
+vibe broker mirror main          # ~/.claude-main: created, CLAUDE.md/settings/skills/projects linked
+vibe broker on                   # vibe renews every login; Claude Code reads mirrors
+vibe run main                    # ▶ main (fixed), for good; cs / cw / claude follow the switch
+vibe broker status               # when each token ends and is renewed, its mirrors, any problem
+```
+
+With the broker on, **vibe is the only refresher** of every account it holds. Claude Code
+reads **mirrors**: Keychain items vibe keeps filled with the account's current access token
+and **no refresh token**.
+
+- **One mirror per account:** its own dir, `~/.claude-<alias>`. `vibe run <alias>` starts
+  Claude Code there with `CLAUDE_CONFIG_DIR` and no token variable.
+- **The default login:** `~/.claude` mirrors whichever account the switch made live, so `cs`,
+  `cw` and a plain `claude` follow the switch.
+
+Claude Code 2.1.318 never refreshes a login that has no refresh token. It re-reads a replaced
+item within 30 s, and again after a 401. Both are measured with the real binary and fake
+tokens, and the evidence is in [docs/BROKER.md](docs/BROKER.md).
+
+The minute tick renews each account at half its token's lifetime (at the latest an hour
+before the end) and rewrites its mirrors. It does this while auto-switch is off too. A
+failed renewal changes nothing: every mirror keeps its token until that really ends. The
+failure shows in `vibe broker status`, `vibe auto status` and `vibe list`.
+
+`vibe broker off` gives the live login back to Claude Code and removes the dir mirrors. An
+account that still lives in its own config dir is not brokered: run `vibe release <alias>`
+first.
+
 ## Every day
 
 ```
@@ -40,10 +154,16 @@ vibe                          open the dashboard in the terminal
 vibe usage web                open it in a browser at http://127.0.0.1:8787
 vibe list                     every account, its limits, the pooled total
 vibe switch <name>            change the active account
-vibe run <name> -- <cmd>      run one command as one account
+vibe run <name>               a session on one account: `claude`, or Cursor's agent for `cursor`
+vibe run <name> -- <cmd>      run one command as one account (`cursor`: translated for Cursor)
+cw / cs                       a session with / without connectors; vibe picks the account
+vibe shell-init               print the zsh snippet that defines `cw` and `cs`
 vibe remove <name>            forget an account
+vibe release <name>           move a --from-config-dir login into vibe (the dir keeps none)
+vibe broker on|off|status     vibe renews every login, Claude Code reads mirrors, see above
 vibe alias <old> <new>        rename one
 vibe auto on|off|status       switch accounts by itself, see below
+vibe statusline               one line for Claude Code's status line, see below
 vibe help                     what each command is for
 ```
 
@@ -86,10 +206,17 @@ It is deliberately timid:
   you have not stored, it stops and tells you to `vibe add` it first. That check needs every
   account you stored to have an account id: if one has none, vibe cannot tell and falls back
   to the old behaviour.
-- It stays, and says so, while vibe's active account and the live login disagree. Run
-  `vibe switch <the live account>` once and it carries on. It also stays when the live
-  account is stored without an account id, and never switches onto such an account.
+- If vibe's active account and the live login disagree (after a `claude /login`), it points
+  vibe at the live account first and carries on. It stays when that repair is refused, when
+  the live account is stored without an account id, and never switches onto such an account.
 - 15 minutes between switches, and `vibe auto undo` goes back.
+- It does not switch away while the live login's access token ends within the next 10 minutes
+  (`stay: waiting: main's login renews within 10 min`), read from the Keychain and never
+  refreshed by vibe. A running session may hold the outgoing login for up to 30 s after a switch
+  (Claude Code's Keychain cache, found in Claude Code 2.1.318); renewing it then would write the
+  outgoing account back over the incoming one and spend the refresh token vibe just stored. A
+  token that ended more than 15 minutes ago is used by no session (one would have renewed it), so
+  the switch goes ahead. This also holds back leaving a spent account, by at most about 25 minutes.
 - While the live account is at 90% or more, it is asked for fresh numbers about every one to
   two minutes instead of three. That is a lot of requests against a budget measured at about
   28 to 30 an hour for one account, and has not been measured against the live endpoint; a
@@ -99,6 +226,78 @@ It is deliberately timid:
 The 99% and the 15 minutes live in `~/.vibemaxxing/settings.json`. The dashboards show
 whether it is on and the last switch, and cannot change it.
 
+Every automatic switch raises a notification titled "vibemaxxing", such as `Switched to
+extra: main at 85% weekly`, through `/opt/homebrew/bin/terminal-notifier` when it is
+installed and through `osascript` otherwise.
+
+### An ordered policy
+
+Instead of "the one with the most room at 99%", you can give the order accounts are used
+in. Add a `policy` to `~/.vibemaxxing/settings.json`:
+
+```json
+{"schema": 1, "auto_switch": true, "threshold": 99, "cooldown_s": 900, "excluded": [],
+ "policy": {"mode": "ordered",
+            "steps": [{"account": "main", "until": 85},
+                      {"account": "extra", "until": 99},
+                      {"account": "main", "until": 99}],
+            "then": "earliest_reset"}}
+```
+
+That reads: main until 85%, then extra until 99%, then main until 99%, then whichever
+account gets room back first. Each tick walks the steps and puts Claude Code on the first
+account whose session and weekly rows are all below that step's `until`, on fresh numbers
+and a usable login. Model rows such as "Weekly · Fable" count only when named:
+`"block_models": ["Fable"]`. When no step has room, it picks the account whose limiting
+rows reset first.
+
+- **Leaving an account at or over one of its limits is never delayed**, even right after a
+  switch. The 15-minute cooldown holds only a switch to an account that outranks one where
+  the live account still has room, such as going back to main after its weekly reset.
+- Every guard above still holds. It stays when it has no fresh numbers for the live account,
+  when the live account is unknown or the pointer is wrong, and when the live account is not
+  in the policy (that was your choice). It never switches onto an account that is excluded,
+  dead, stored without an account id, or has stale numbers. An account left at 85% stays
+  out of the 85% step until what limited it has reset; its 99% step is still open.
+- The policy is followed, so **a `vibe switch` to an account in the policy is undone by the
+  next tick** when the policy says otherwise. Run `vibe auto off` to hold an account by hand.
+- **`"weekly_budget": true`** on a step makes its weekly limit today's budget, the one `vibe run
+  auto` routes by (`routing.weekday_budget` in `routing.timezone`; default Mon 20%, Tue 40%,
+  Wed 60%, Thu 80%, Fri-Sun 100%, Berlin), while the session row (and `block_models` rows) keep the
+  step's `until`. For one shared login:
+
+  ```json
+  {"mode": "ordered",
+   "steps": [{"account": "main", "until": 99, "weekly_budget": true},
+             {"account": "extra", "until": 99}, {"account": "main", "until": 99}],
+   "then": "earliest_reset"}
+  ```
+
+  main while its week is within today's budget and its session below 99%, then extra, then main
+  again whatever the budget. An account left over the budget alone is back at that step as soon
+  as the budget allows it (at Berlin midnight at the latest, 80% to 100% on Friday), after the
+  cooldown, not only after its weekly reset; its later steps stay open meanwhile. The flag must
+  be a boolean, not together with `weekly_cap`, and a `routing` member that is wrong then leaves
+  the file at the defaults too.
+- A policy that is wrong anywhere leaves the whole file at the defaults, so auto-switch is
+  off. `vibe auto status` shows the policy, the step it is on now and the next one (a budget
+  step reads `main until 99% (weekly: today's budget 80%)`):
+
+```
+$ vibe auto status
+auto-switch  on
+policy       ordered: main until 85% -> extra until 99% -> main until 99%, then earliest reset
+cooldown     900s
+excluded     none
+live         main
+step         1 of 3: main until 85%
+last switch  none
+next step    2 of 3: extra until 99%
+```
+
+The live account is asked for numbers every minute while it is within 9 points below one of
+its own limits (76-84% and 90-98% above), not every three.
+
 `vibe auto install` only **writes** `~/Library/LaunchAgents/de.intra-ai.vibemaxxing-auto.plist`.
 Loading it is yours to do, with the one `launchctl bootstrap` line it prints, so nothing
 starts running behind your back. Anywhere else, run `vibe auto tick` from cron or a systemd
@@ -106,11 +305,49 @@ timer every minute.
 
 **Not verified: what a switch does to a `claude` session that is already running.** Like
 `vibe switch`, it changes the credential Claude Code reads and makes no attempt to signal a
-live process, so a running session is not guaranteed to pick the new account up. And a
-session that stays on the old account and later refreshes its own token may overwrite the
-Keychain with it. Both are untested. `scripts/verify_auto_live.py` is the check for the part
+live process. Claude Code 2.1.318 re-reads that Keychain item with a 30 s cache (found in its
+code, not measured here), so a running session should follow within about 30 s; a session that
+renews the old account's token inside that window may overwrite the Keychain with it, which the
+renewal wait above makes unlikely but cannot rule out. Both are untested. `scripts/verify_auto_live.py` is the check for the part
 that can be tested by hand: it does a real switch between two throwaway accounts and asserts
 the Keychain holds the incoming credential.
+
+### Status line
+
+Every command that collects usage (`vibe list`, the dashboards, `vibe auto status`) and
+every `vibe auto tick` writes `~/.vibemaxxing/status.json`: the live account, each
+account's rows with their reset times, when they were fetched, the policy and the last
+switch. `vibe statusline` prints one line from that file and nothing else: no Keychain, no
+request, about 25 ms.
+
+```
+▶ extra · main: 5h 100% (resets 19:30) wk 93% (resets Mon 00:00) · extra: 5h 28% (resets 23:10)
+```
+
+Times are local: `HH:MM` today, weekday and time otherwise. A row whose window has rolled
+over since it was read is left out, and numbers older than 15 minutes get a `?`. To show it
+in Claude Code, add this to `~/.claude/settings.json`:
+
+```json
+{"statusLine": {"type": "command", "command": "vibe statusline"}}
+```
+
+**`▶` is the account of the session the line belongs to**, not the one a new session would get.
+Claude Code and Cursor run the status line command with the session's own environment, and
+`vibe run` marks every child with `VIBE_SESSION`: `live` for a session on Claude Code's own login
+(it shows whichever account that login is now, so it changes when the background switch moves the
+login), or the account a session is fixed to (`▶ extra (fixed)`). A session vibe did not start is
+told apart by `CLAUDE_CONFIG_DIR` (the account whose dir it is) and `CLAUDE_CODE_OAUTH_TOKEN`
+(`▶ ? (fixed)`); otherwise it is on the live login.
+
+Cursor's terminal agent has the same kind of status line (an undocumented `statusLine` key in
+`~/.cursor/cli-config.json`; it replaces Cursor's own footer, and a running `cursor-agent` may
+overwrite the file when it exits, so edit it with none running). Pass the account, since the
+session is always the seat:
+
+```json
+{"statusLine": {"type": "command", "command": "vibe statusline --session cursor", "padding": 2}}
+```
 
 ### See what is left
 
@@ -148,6 +385,260 @@ vibe list --json | jq -r '.resets[] | "\(.alias) \(.at)"'
 
 The schema is frozen in [`docs/CONTRACT.md`](docs/CONTRACT.md) §10.
 
+## Cursor accounts
+
+Fork feature. A Cursor seat (the terminal agent `cursor-agent`, running the same Claude
+models) is a second kind of account:
+
+```
+cursor-agent login                  # once; Cursor keeps that login, vibe never sees it
+vibe add cursor --kind cursor       # checks `cursor-agent status`, stores a marker, no credential
+vibe list                           # the seat's real numbers, next to the Claude accounts
+vibe run cursor -- claude -p "fix the bug" --model sonnet --permission-mode auto
+```
+
+### What `vibe run cursor -- claude ...` does
+
+It turns the Claude Code command line into a `cursor-agent` one. Every flag is mapped or
+**refused by name**: nothing is dropped silently.
+
+| Claude Code | cursor-agent |
+| --- | --- |
+| `-p`, `--output-format text\|json\|stream-json` | the same |
+| `--include-partial-messages` | `--stream-partial-output` |
+| `--permission-mode auto` | `--auto-review` (never `--force`) |
+| `--permission-mode default` / `manual`, headless | `--mode ask` (Cursor's most restrictive mode, read-only exploration), see below |
+| `--permission-mode default` / `manual`, interactive | nothing (what it may do without asking is Cursor's own setting) |
+| `--permission-mode plan` | `--plan` |
+| `--permission-mode bypassPermissions`, `--dangerously-skip-permissions` | refused; `--force` only with `vibe run --allow-force` |
+| `--model`, `--effort` (or the model and effort Claude Code would use) | `--model claude-<family>-<version>-<effort>`, picked from the live `cursor-agent models` |
+| `--resume <id>` | `--resume <id>` for a Cursor chat id; a Claude session id is refused |
+| `--add-dir` | `--add-dir` |
+| no `-p` (interactive) | cursor-agent's own terminal UI, and vibe says so |
+| anything else (`--allowedTools`, `--mcp-config`, `-c`, `claude mcp ...`, ...) | refused, naming the flag |
+
+Headless Claude Code denies whatever it was not allowed to do. Cursor's own help says its `-p`
+"has access to all tools, including write and shell", and its docs say only that changes are
+proposed, not applied, without `--force`; vibe could not check more than that. So a headless run
+with no permission mode becomes `--mode ask`, and `vibe run` prints a "what it may do" line for
+every Cursor run. Use `--permission-mode auto` for an agent that may act (`--auto-review`).
+
+A model that is not in `cursor-agent models` is refused with the closest names. A `-fast`
+variant and any model marked `(NO ZDR)` (no zero data retention) are never picked unless you
+pass `--allow-fast` / `--allow-no-zdr`. `vibe run cursor -- <anything but claude>` runs the
+command unchanged. `--dry-run` prints what would run and runs nothing.
+
+### What it is not
+
+It is not Claude Code. A Cursor session has no Claude skills, no Claude hooks, no Remote
+Control, no `CLAUDE.md` memory; Cursor reads its own rules and its own MCP config. Do not
+route a program that relies on Claude Code hooks for its safety policy: run it with
+`--claude-only`. `vibe switch` and `vibe auto tick` never touch a Cursor account (the Keychain
+login cannot point at Cursor).
+
+### Where Cursor shows
+
+The seat appears wherever the Claude accounts do. `vibe` (the TUI) and the web dashboard
+(`vibe usage web`) show it as one more entry: included allowance plus bonus, on-demand against the
+cap, when the cycle resets, and whether routing may use it (it is not in the pool or the week chart).
+`vibe statusline` appends a compact segment, e.g. `cursor: 0.1% $0/$250`; `?` means no numbers, numbers
+older than 15 minutes, or a finished cycle, and `spent (resets Wed 00:00)` means routing counts the
+seat as used up. The status line and the TUI never make a request or read a Keychain on a redraw: the
+line reads `~/.vibemaxxing/status.json`, which `vibe list`, the TUI, the web page and the background
+tick (`vibe auto tick`, via launchd) keep current; the tick re-reads a seat's usage only when its cached
+numbers are older than three minutes. Unknown usage is shown as unknown, never as a number. If your
+Claude Code status line already runs `vibe statusline`, the new segment needs no change to it.
+
+### The child's environment
+
+Every child vibe starts gets an environment built on purpose. For Cursor vibe drops `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, the Bedrock/Vertex switches and every `*_TOKEN`, `*_API_KEY`, `*_SECRET`,
+`*_PASSWORD` you did not pass on purpose (`vibe run cursor --pass-env NAME,NAME`; never a Claude
+credential). A Claude Code child loses only the Claude family and is then given its account's
+token explicitly. Output names what was dropped, never a value. A shell that carries a Claude
+token or config dir (a session vibe started on extra) never decides the account: a run on main
+uses main's own token, set explicitly, not "the live login". Claude's own commands
+(`claude --version`, `claude mcp ...`) keep your environment untouched.
+
+### Usage
+
+`vibe list` / `vibe usage` show the included allowance plus Cursor's bonus (a percent), the
+on-demand spend against your personal cap, and when the cycle resets. `cursor-agent` has no
+usage command, so vibe sends the same two calls its interactive `/usage` sends
+(`GetCurrentPeriodUsage`, `GetHardLimit` on `api2.cursor.sh`; checked live on 3 Nov 2026, it
+answers) with the access token
+`cursor-agent login` stored: read at that moment, held in memory, sent in one header, never
+stored or printed. It is an undocumented API, parsed defensively; any shape change reads as
+`usage: unknown (...); see cursor.com/dashboard`, and unknown counts as unavailable. **This
+has not been verified beyond one read-only call on one seat.**
+
+### Routing: `vibe run auto`
+
+`vibe run auto [--needs slack,atlassian | --no-needs] [--claude-only] -- claude <args>` picks the
+account when the run starts and never again for that run (a running session keeps its login).
+Defaults, all configurable under `routing` in `~/.vibemaxxing/settings.json`:
+
+- **needs connectors**: `main` while its weekly usage is within today's budget, else `cursor`
+  while it has usage left, else `extra` (no connectors: the run goes without and says so), else
+  `main` whatever the budget.
+- **needs none**: `extra`, else `main` within budget, else `cursor`, else `main` whatever the
+  budget.
+- **Budget**: the share of main's weekly usage allowed by the end of each day, Berlin time:
+  Mon 20%, Tue 40%, Wed 60%, Thu 80%, Fri-Sun 100%.
+- **Cursor has usage left** while its included usage and bonus last, and then its personal
+  on-demand cap (minus a margin, default $10). The cap is the limit Cursor reports, so it follows an admin raising it; vibe's own $250
+  ceiling (`routing.cursor_cap_cents`) applies only when Cursor reports none. vibe uses an answer at most two minutes old
+  (30 seconds close to the cap; an older one is shown, never routed by), and refuses even
+  `vibe run cursor` at the limit. **On-demand is billed to the company.** It
+  counts as spent after that, until the cycle resets.
+- `--needs m365` can only go to main. `--claude-only` never picks Cursor.
+- An account with unknown usage is unavailable, and vibe prints why it was skipped.
+- `vibe run auto` prints one line, `vibemaxxing: auto picked main: 75% < 80%` (main's weekly use
+  against today's budget) or `vibemaxxing: auto picked cursor: main 82% > 80%` (why the first choice
+  was passed over), plus one line when it adds the bridge and one per real warning. A run on an
+  account you name prints nothing unless something may go wrong. A Claude session
+  id cannot be resumed on Cursor, nor the reverse: it starts a fresh run with `--brief "<task>"`
+  and `--handover <file>` instead, and says so.
+
+Routing names three **roles**, `main`, `extra` and `cursor`, and `routing.roles` maps each to the
+alias it is stored under (`{"main": "stephan", "extra": "shared", "cursor": "zvoove"}`; default:
+the same names). A Claude role that names no stored account makes the run refuse, not fall
+through to Cursor. A Cursor step cannot be the last resort.
+
+```json
+{"routing": {"weekday_budget": [20, 40, 60, 80, 100, 100, 100], "timezone": "Europe/Berlin",
+             "default_needs": ["slack", "atlassian"],
+             "connectors": {"main": ["slack", "atlassian", "m365"],
+                            "cursor": ["slack", "atlassian", "gcal"], "extra": []},
+             "order": {"needs": [{"account": "main", "budget": true}, {"account": "cursor"},
+                                 {"account": "extra", "degraded": true},
+                                 {"account": "main", "last_resort": true}]},
+             "cursor_margin_cents": 1000}}
+```
+
+`vibe shell-init` prints (and never writes) a zsh snippet with two commands, and leaves `claude`
+itself plain Claude Code: `cw` ("Claude, work": a session that may need Slack or Jira) is
+`vibe run auto -- claude`, and `cs` ("Claude, solo": no connectors) is
+`vibe run auto --no-needs -- claude`. `cw --version` and `cw mcp ...` pass through untouched.
+
+**One shared login** (`"routing": {"shared_login": true}`): every Claude run that `vibe run auto`
+routes goes on Claude Code's own login, with no token override and no config dir, whichever
+account that login is now; `vibe auto tick` moves the login between the accounts by the policy,
+and Claude Code re-reads it (a 30-second Keychain cache in Claude Code 2.1.318), so an open
+session follows a switch without a restart. The order still decides between Claude and Cursor;
+it no longer decides which Claude account, so `cs` runs on the same account as `cw`. The bridge
+is added when any Claude account the session may move to lacks an upstream it has a login for.
+A named account (`vibe run main`) is always fixed to it, even while it is the shared login: it runs on its own token, which the background switch never moves and which cannot renew, so the session ends when that token does (at most about 8 hours; an interactive run prints the time).
+An account that lives in its own config dir cannot be the shared login (`vibe release` moves it
+back). A Claude account that is already
+Claude Code's own login runs without a token override; any other runs on its own token, which
+cannot refresh itself (see Known limitations).
+
+### Connectors (MCP) on Cursor
+
+A Cursor session does not get Claude's claude.ai connectors; those belong to the Claude account.
+What the CLI agent has comes from Cursor's own MCP config and your Cursor plugins. Checked with
+the interactive `/mcp`: Slack (`https://mcp.slack.com/mcp`, the same 27 tools), Atlassian and
+Google Calendar are there; Microsoft 365 is not. So: main has slack, atlassian, m365; cursor has
+slack, atlassian, gcal; extra has none. To add one yourself (vibe adds none):
+
+- **Slack**: official hosted server `https://mcp.slack.com/mcp`, per Slack's
+  [Cursor guide](https://docs.slack.dev/ai/slack-mcp-server/connect-to-cursor); your workspace
+  admin must approve the integration.
+- **Atlassian**: official Rovo MCP server `https://mcp.atlassian.com/v1/mcp/authv2` (OAuth), see
+  [Atlassian's IDE setup](https://support.atlassian.com/atlassian-rovo-mcp-server/docs/setting-up-ides/).
+  The old `/v1/sse` endpoint stops on 30 June 2026.
+- **Microsoft 365**: Microsoft's own route is the Work IQ MCP (Entra OAuth, a global admin must
+  grant consent, it may need a Microsoft 365 Copilot licence; locally `npx -y @microsoft/workiq
+  mcp`), see [Microsoft Learn](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/work-iq/mcp/overview).
+  Treat M365 as main-only until that works for you.
+
+In headless runs (`-p`) the agent may need `--approve-mcps`; vibe adds it only to runs that
+declared `--needs`. Headless `cursor-agent -p` also stops at a workspace nobody trusted (exit 1,
+no output: seen live); `vibe run cursor --trust-workspace` passes `--trust`, and vibe never adds it
+on its own. In a headless run the Slack MCP answered "needs auth" even though the interactive agent
+is logged in to it, so check `--needs` runs on Cursor before relying on them.
+
+## The connector bridge (`vibe-bridge`)
+
+A session on the extra account has no Slack or Atlassian connector. `vibe bridge serve` is a small
+local stdio MCP server you register for extra only. Each call is forwarded **by vibe itself, as an MCP
+client, straight to the vendor's own remote MCP server**, as exactly one allowlisted upstream tool with
+the arguments given. **No model is in the path**: nothing sees the upstream's tool list, so there is
+nothing for a prompt injection to widen and nothing to fence with a prompt or a deny list.
+
+- **The allowlist is code** (`bridge.TOOLS`): **Slack reads only** (no draft, send, schedule, react or
+  canvas tool). **Atlassian: reads, and writes that never delete** (comment, edit, transition, create)
+  through one tool, `atlassian_executeWrite`, listed and callable only after a new `vibe bridge login
+  atlassian`; a login made before stays read-only. A name not on the list is refused before any network
+  is touched, whatever the upstream offers. `tools/list` shows our own fixed descriptions and argument
+  schemas (written in this repo, no network), never the vendor's text.
+- **Never a delete, three fences.** (1) The login asks for Atlassian's read scopes plus
+  `write:jira:agent-interface` and `write:confluence:agent-interface` only, and **refuses to store a
+  login whose granted scope can do more** (`delete`, `manage`, `admin`, `write:all:twg`, Slack's
+  `chat:write`, any other write), at login and at refresh. (2) Atlassian's `executeDestructive` is never
+  allowlisted. (3) `atlassian_executeWrite` refuses, in code, any operation name holding delete, remove,
+  archive, purge, destroy, trash, erase or wipe. The token sits in a Keychain item that any process of
+  yours (the extra session's shell included) might be able to read, so a write-capable Atlassian token
+  widens what a compromised process could do: writes, not deletes.
+- **Upstreams**: Slack's official MCP (`https://mcp.slack.com/mcp`) and Atlassian Rovo MCP v2
+  (`https://mcp.atlassian.com/v2/mcp`). **Microsoft 365 is left out**: Microsoft's own remote MCP (Work IQ)
+  needs a Global Administrator's consent, which is not your own OAuth.
+- **Your own OAuth login per upstream** (the MCP authorization spec: resource and server metadata,
+  dynamic client registration if offered, PKCE S256, the browser, a one-shot listener on `127.0.0.1`
+  for the redirect). Tokens live only in the macOS Keychain under `vibemaxxing-bridge-<upstream>-*`:
+  handed to the Keychain tool on its standard input, never a file, a log, an error or a command line.
+  Refresh is handled under a lock and is crash-safe: the new refresh token is stored first, so a kill
+  at any point after that leaves a login that refreshes on its own (the one instant before the first
+  write, the length of a Keychain call, is not recoverable by any ordering). Every endpoint a
+  discovery document names must be on that upstream's own hosts, or nothing is sent.
+- **Each call**: a deadline (60 s) that binds every request, the body read and the wait for the
+  refresh lock, so a timed-out call is not left running; at most 30 calls per hour per bridge process, a
+  result size cap (100 kB: refused, not cut), results returned as data, and one log line in `~/.vibemaxxing/bridge.log`
+  (upstream, tool, duration, bytes, outcome; never arguments or content). `routing.bridge` can set
+  `timeout_s`, `max_calls_per_hour`, `max_result_bytes`; it cannot add a tool or an upstream.
+
+What you run yourself, once:
+
+```
+# Atlassian: registers a public client by itself; asks for read scopes and the two non-destructive
+# write scopes (run it again to turn writes on for a login made before)
+vibe bridge login atlassian
+
+# Slack has NO dynamic client registration: it needs a Slack app of your own (an internal app in
+# your workspace, approved by its admin) with the redirect URL below. vibe asks for its client id and
+# secret (the secret is typed hidden, never an argument). Reads only.
+vibe bridge login slack [--client-id ID] [--port N]
+#   redirect URL to register on the Slack app: http://127.0.0.1:8765/callback
+
+vibe bridge status        # who is logged in, token expiry, allowlist size, whether it may write;
+                          # never a token
+vibe bridge tools slack   # which allowlisted tools the live upstream offers, and whether our
+                          # argument names match its own (names only; none of its text)
+vibe bridge logout slack|atlassian|all
+vibe bridge add-command   # prints the line that registers the bridge for extra; it never runs it
+```
+
+**You do not need to register it for `vibe run` sessions.** `vibe run <account> -- claude ...` (and
+`vibe run auto`) start claude with a token override and without `CLAUDE_CONFIG_DIR` (for an account that lives in
+its own config dir: with `CLAUDE_CONFIG_DIR` and no token), so Claude Code may not read the one in `~/.claude-extra`. So when the Claude run is on an account that lacks a
+connector the bridge offers (by `routing.connectors`: extra has none) and the bridge has a login for that
+upstream, vibe adds `--mcp-config=<~/.vibemaxxing/bridge/mcp-config.json>` to the claude arguments itself: a
+vibe-owned file holding only `vibe-bridge` (not `--strict-mcp-config`, so the account's own servers stay) and
+prints one line saying so. Never for Cursor runs; `vibe run --no-bridge ...` turns it off.
+
+`vibe bridge add-command` still prints the registration line, for a session you start **without** `vibe
+run`, for `~/.claude-extra`:
+
+```
+CLAUDE_CONFIG_DIR=~/.claude-extra claude mcp add --scope user vibe-bridge -- vibe bridge serve
+```
+
+Nothing in the bridge writes to Slack, so the Slack app needs no write scope: give it the read user scopes only.
+Text an upstream returns (a Slack message, a Jira
+description) reaches the extra session as the tool result: data, and the same prompt-injection surface any
+connector has. It does not widen what the bridge can do.
+
 ## How it works
 
 It swaps **credentials**, plus the one line of config that names them. One `~/.claude`
@@ -167,7 +658,9 @@ predecessor is treated as spent. A crash mid-refresh leaves a recoverable succes
 rather than a dead account.
 
 It talks to three hosts and no others — `claude.ai`, `platform.claude.com`,
-`api.anthropic.com` — and refuses to contact anything else, redirects included. No
+`api.anthropic.com` — and refuses to contact anything else, redirects included. (Fork: with a
+Cursor account stored, a second client also reaches `api2.cursor.sh`, for the seat's usage, and
+only that host.) No
 version pings, no analytics, no telemetry. The web dashboard binds `127.0.0.1`, and
 `--host` with anything else is a hard error.
 
@@ -208,13 +701,18 @@ truncates at ~4005 bytes and stores the truncated value, and the Security framew
 refuses to read Claude Code's item from a process outside its ACL, which would put an
 authorization prompt in front of every switch. Multi-user macOS is out of scope for v1.
 
-**`vibe run` cannot refresh its own token.** It sets `CLAUDE_CODE_OAUTH_TOKEN` for the
-child only, which is what lets two shells hold two accounts, but a session outliving that
-access token needs a re-run. Every grandchild inherits the variable.
+**`vibe run` cannot refresh its own token, for an account vibe owns.** It sets `CLAUDE_CODE_OAUTH_TOKEN` for the
+child only, which is what lets two shells hold two accounts, but that is an access token (about 8 hours) and nothing
+in the session can renew it: a session that outlives it fails, which is why an interactive run prints "this session
+carries a token that ends at HH:MM". Every grandchild inherits the variable. **For a session that lives longer, give
+the account its own config dir** (`vibe add NAME --from-config-dir DIR`, see "Import a login from a second config
+dir"): `vibe run` then starts Claude Code with `CLAUDE_CONFIG_DIR=DIR` and no token, and Claude Code refreshes the
+login itself.
 
 **Switching does not reach a running session.** `vibe switch` makes no attempt to signal
 a live Claude Code process. Restart it, or use `vibe run`. Automatic switching has the same
-limit, and the untested caveat above it.
+limit, and the untested caveat above it. An ordered policy switches more often than the
+default rule (at 85% and back after a reset), so it meets that caveat more often.
 
 **`vibe switch` can now refuse.** It will not write an account whose login has lapsed or
 was rejected by the server (`vibe add <name>` fixes it), and it will not overwrite a Claude

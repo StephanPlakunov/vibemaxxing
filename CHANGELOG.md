@@ -3,6 +3,202 @@
 Notable changes per release. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - fork `stephan/ordered-failover`
+
+### Added
+
+- **Token broker** (`vibe broker on|off|status|mirror`): vibe is the only refresher of every Claude account it
+  holds, and Claude Code reads mirrors (an access token and no refresh token, in each account's
+  `~/.claude-<alias>` and in the default login for the live account). `vibe run main` / `vibe run extra` are fixed
+  for good and never die from their token; `cs`, `cw` and `claude` follow the switch. Renewal at half the token's
+  lifetime from the minute tick (also while auto-switch is off). A failed renewal keeps every mirror and is reported
+  in `vibe broker status`, `vibe auto status` and `vibe list`. Off by default. Evidence and design: `docs/BROKER.md`.
+- **One shared login** (`routing.shared_login`): `vibe run auto` puts every Claude run on Claude Code's own
+  login, which the background tick moves between the accounts, so open sessions follow a switch.
+- **`cw` and `cs`** from `vibe shell-init` (with and without connectors); `claude` stays plain Claude Code.
+- **`vibe run <account>` is always fixed to that account** (its own token, `▶ main (fixed)`), even while it is the
+  shared login; with no `-- <cmd>` it starts a session. `cw` and `cs` follow the background switch.
+- **The status line shows this session's account** (`VIBE_SESSION`, set on every `vibe run` child, then
+  `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN`), not the account a new session would get;
+  `vibe statusline --session cursor` for Cursor's own status line.
+
+### Changed
+
+- **The bridge may do Atlassian writes that never delete.** `atlassian_executeWrite` (Atlassian's own
+  `executeWrite`: comment, edit, transition, create) is listed and callable only after a new `vibe bridge
+  login atlassian`, which also asks for `write:jira:agent-interface` and `write:confluence:agent-interface`;
+  an older login stays read-only and `vibe bridge status` says so. Never a delete: a granted `delete`,
+  `manage`, `admin` or `write:all:twg` scope is still refused (login and refresh), `executeDestructive` is
+  never allowlisted, and an operation name holding delete/remove/archive/purge/destroy/trash/erase/wipe is
+  refused in code. Slack stays read only.
+- **Shorter start lines**, prefixed `vibemaxxing:`: `auto picked main: 75% < 80%`, one line when the bridge
+  is added, nothing for a run on a named account unless something may go wrong.
+
+### Fixed
+
+- **A running Claude session no longer loses its login because vibe started or polled something.** A long
+  interactive session on extra stopped with "OAuth token revoked": it had been started with
+  `CLAUDE_CODE_OAUTH_TOKEN` (an access token that cannot renew itself) while vibe's own 5-minute tick refreshed the
+  same lineage and rotated its refresh token. An account imported with `--from-config-dir` now records that dir,
+  `vibe run` starts Claude Code with `CLAUDE_CONFIG_DIR=<dir>` and no token (Claude Code refreshes the login itself;
+  env scrub and bridge injection unchanged), and nothing in vibe refreshes it: `oauth.refresh` refuses it for every
+  caller (run, list, TUI, web, tick, `run auto`), `vibe switch` and auto-switch never copy it into the default login,
+  and its usage is read with the token in the dir's own Keychain item. Importing the same dir again converts an
+  alias imported earlier. An interactive run on a vibe-owned account prints when its token ends.
+
+### Added
+
+- **One shared login.** `vibe release ALIAS` moves a `--from-config-dir` login back into vibe: under the refresh claim
+  it reads the dir's own Keychain item, checks `<dir>/.claude.json` names the stored account, refuses a lapsed or
+  rejected login, writes the account file without `config_dir`, then deletes the dir's item (`KeychainPort.delete`,
+  `security delete-generic-password`), so one login lives in one place only; a failed delete puts the file back. It
+  refuses while any process runs with `CLAUDE_CONFIG_DIR=<dir>` (`ps -E`, PIDs named; an unreadable list refuses too).
+  `<dir>/.claude.json` is left alone. `--json` supported.
+- **A policy step with `"weekly_budget": true`** stops at today's routing budget on the weekly row
+  (`routing.weekday_budget` in `routing.timezone`, default 20/40/60/80/100/100/100 Berlin) and at `until` on the
+  others. An account left over the budget alone is recorded at the budget, so it returns as soon as the budget allows
+  (Berlin midnight at the latest, after the cooldown) and its later steps stay open. `vibe auto status` shows
+  `main until 99% (weekly: today's budget 80%)`.
+- **The tick waits while the live login is about to renew.** No switch away while the live access token (read from
+  the Keychain, never refreshed by vibe) ends within 10 minutes, unless it ended more than 15 minutes ago: a session
+  still holding the outgoing login after the switch (Claude Code's 30 s Keychain cache) would renew it and write it
+  back over the incoming one, spending the refresh token vibe just stored. `stay: waiting: <live>'s login renews
+  within 10 min`.
+- **`vibe add ALIAS --from-config-dir DIR --adopt-stored-login`** hands the login vibe has stored for ALIAS to a config
+  dir without a browser: it is written into the dir's own Claude Code Keychain item and `<dir>/.claude.json`, and the
+  account is marked as the dir's *before* Claude Code can refresh it (checked again under the refresh claim, so no
+  earlier-started refresh can post it). Never overwrites a dir's login; a dead lineage is found before anything is handed
+  over; a failed write gives the lineage back to vibe. Polls (tick, list, TUI, web) now refresh a vibe-owned account only
+  once its access token has ended, not in the five minutes before.
+
+### Changed
+
+- **The bridge reaches `vibe run` sessions by itself.** `vibe run` / `vibe run auto` start claude with a token
+  override and no `CLAUDE_CONFIG_DIR`, so a bridge registered in `~/.claude-extra` was never seen. A Claude
+  session on an account that lacks a connector the bridge offers now gets `--mcp-config=<vibe-owned file with
+  only vibe-bridge>` (one line printed; never for Cursor; `--no-bridge` turns it off), and `vibe bridge
+  add-command` says so.
+
+- **Atlassian allowlist = the live server.** Aligned with the real `tools/list` of the Atlassian MCP (read
+  with a real read-only login): the nine read-only tools it offers (incl. `discover` and `executeRead`),
+  with its own argument names, types and required; names it does not offer (`listJiraProjects`, ...) are
+  gone; `executeWrite`/`executeDestructive` stay unreachable, and `executeRead` may only name a read
+  operation (enforced in code). One real read through `vibe bridge serve` worked.
+
+- **vibe-bridge v2: no model in the bridge.** `vibe bridge serve` now forwards each call, as an MCP client,
+  straight to Slack's and Atlassian's own remote MCP servers with the user's own OAuth login (`vibe bridge
+  login|logout|status|tools`), exactly one allowlisted upstream tool per call (reads only), tokens only in the Keychain, a timeout, a per-hour cap, a size cap and a content-free
+  log. The v1 nested-`claude -p` bridge, its fence check and its disabled switch are removed. No
+  Microsoft 365 (its remote MCP needs admin consent). Read-only: no draft tool, no `--drafts`, and a login
+  whose granted scope can write is refused; `tools/list` shows our own fixed schemas (no network); a
+  kill during a token refresh no longer costs a browser login; no input (deeply nested JSON, an oversized
+  `expires_in`) can end `vibe bridge serve`; a call's deadline binds every request and the refresh lock;
+  the login listener ignores stray requests and cannot be blocked by an idle connection. `docs/CONTRACT.md`
+  section 20.
+
+- **Cursor on every surface.** The TUI and the web dashboard show a Cursor seat as one more ledger
+  entry (included + bonus, on-demand against the cap, reset, routing state), `vibe statusline` appends
+  `cursor: 0.1% $0/$250` (`?` for unknown or old numbers, `spent (resets ...)`), and `status.json` has a
+  `cursor` array. The line and the TUI use cached numbers only; the background tick re-reads a seat
+  older than three minutes. `docs/CONTRACT.md` section 10 and 19.
+
+- Every child of `vibe run` gets an explicit environment (`childenv.py`): Claude credentials and
+  config dir are never inherited, Cursor and the bridge's nested run also lose secret-looking
+  variables (`--pass-env` to pass one). Routing uses roles (`routing.roles`) and refuses a run that
+  would reach Cursor only because main/extra are misnamed. Headless Cursor runs default to
+  `--mode ask` and say what they may do; Cursor's cap is held to vibe's $250 ceiling with fresh
+  readings; an interactive move to Cursor prints one clear line first. The bridge pins setting
+  sources (`user`: measured, `project` alone hides the connectors) and permission mode, refuses a
+  user settings file with an MCP allow rule, and fails on a denial. It is disabled
+  (`bridge.ENABLED = False`) until a live run shows a non-allowed tool denied or absent: an init
+  listing showed the model is offered every connector tool. Its tool names and write-tool lists now
+  follow the live connectors (the Atlassian server is
+  `Atlassian_Rovo`). A `Fence` check (built on fakes) denies every tool the
+  connectors offer except the allowed one and verifies the init event before each call. It stays off:
+  a final live init still offered six more Slack tools (send, draft, schedule, reaction, canvases)
+  that an earlier listing of the connected server had not shown, so a listing proves nothing complete.
+
+### Added
+
+- **`vibe bridge serve` (vibe-bridge).** A local stdio MCP server that lets a session on extra
+  borrow Slack, Atlassian or Microsoft 365 for one read or draft at a time: one headless Claude
+  Code run on main (never Cursor, never extra: fixed in code), with only that tool allowed (plus
+  `--permission-prompts none` and a deny list of the connector's write tools), on a cheap model,
+  under a timeout and a calls-per-hour cap, logged without content to `~/.vibemaxxing/bridge.log`. Sends, posts,
+  ticket changes, deletes and reactions are refused ("ask the lead"). `vibe bridge add-command`
+  prints the `claude mcp add` line for extra's config dir. `docs/CONTRACT.md` §20.
+- **Cursor accounts.** `vibe add [alias] --kind cursor` registers a Cursor seat (no credential
+  of vibe's: `cursor-agent login` keeps it). `vibe run cursor -- claude <args>` translates the
+  Claude Code command line to `cursor-agent` (every flag mapped or refused by name; the model is
+  picked from the live `cursor-agent models`, never a `-fast` or `(NO ZDR)` one unless allowed).
+  `vibe list` shows the seat's usage, read the way cursor-agent's own `/usage` reads it
+  (unverified against the live endpoint; unknown on any shape change). `vibe run auto` routes a
+  run by need (connectors or none) with a weekday budget on main, Cursor's on-demand cap and
+  extra; `vibe shell-init` prints the zsh snippet. `vibe run cursor --trust-workspace` passes
+  `--trust` for headless runs. `docs/CONTRACT.md` §19.
+- **An ordered failover policy.** An optional `policy` in `~/.vibemaxxing/settings.json`
+  (`{"mode": "ordered", "steps": [{"account", "until"}...], "then": "earliest_reset"}`)
+  replaces "the most room at 99%": each tick puts Claude Code on the first step whose
+  account has every session and weekly row below that step's limit, on fresh numbers and a
+  usable login, and on the account that gets room back first when no step has any. Model
+  rows block only when named in `block_models`. The cooldown holds only a switch to an
+  account that outranks one where the live account still has room; leaving an account at or
+  over a limit is never delayed. Every existing stay still holds, and an account outside the
+  policy is left alone. The fence records the limit an account was left at (`auto.json`
+  `limit`), so an account left at 85% can still be used at 99%. The live account is polled
+  every minute within 9 points below each of its own limits. `vibe auto status` shows the
+  policy, the step and the next step (`--json`: `policy`, `step`, `next_step`); `vibe alias`
+  renames steps. Without a `policy` nothing changes. `docs/CONTRACT.md` §18.
+- **`vibe add [alias] --from-config-dir DIR`** imports the login Claude Code keeps for
+  `CLAUDE_CONFIG_DIR=DIR` (its Keychain item `Claude Code-credentials-<8 hex of
+  sha256(DIR)>`, or `DIR/.credentials.json` off macOS) and the `oauthAccount` in
+  `DIR/.claude.json`. No browser, no request, no refresh, no Keychain write; `active` does
+  not move.
+- **`~/.vibemaxxing/status.json` and `vibe statusline`.** Every command that collects usage
+  and every tick writes the live account, each account's rows (percent, reset), when they
+  were fetched, the policy and the last switch. `vibe statusline` prints one line from that
+  file alone, for Claude Code's `statusLine`: `▶ extra · main: 5h 100% (resets 19:30) wk 93%
+  (resets Mon 00:00) · extra: 5h 28% (resets 23:10)`. About 25 ms: the console scripts start
+  in `vibemaxxing.entry`, which answers it before the CLI imports anything heavy.
+- **terminal-notifier.** The notification on every automatic switch goes through
+  `/opt/homebrew/bin/terminal-notifier` when it is installed (title "vibemaxxing"), and through
+  `osascript` when it is not or fails.
+
+### Changed
+
+- The switch notification reads `Switched to <to>: <reason>` instead of the tick's line.
+- `vibemaxxing.__version__` is looked up on first use instead of at import.
+
+### Fixed
+
+- Two tests failed on Python 3.14, which warns when the collector closes an unclosed
+  `HTTPError`; the client and the test now close it.
+
+### Not verified
+
+- Everything in "Not verified" under 0.3.0 still holds, and an ordered policy switches more
+  often than the default rule.
+- The Keychain item name for a config dir was checked against one ASCII path on one machine,
+  not against Claude Code's source; the NFC step for non-ASCII paths is from memory of it.
+- No real Keychain, running `claude`, loaded launchd job or real terminal-notifier
+  notification was exercised.
+## [0.3.1] - 2026-10-29
+
+### Fixed
+
+- **Auto-switch no longer moves onto an account within 5 points of the threshold.** An account
+  at 98% passed as headroom, crossed 99% minutes later, and the 15-minute cooldown then held
+  you there at the limit. Such an account is not a candidate; with no other, the tick stays
+  (`no account with headroom`). `CONTRACT.md` §17.
+- **`vibe auto tick` no longer stays stuck when `active` and the live login disagree.**
+  After a `claude /login` the pointer named an account Claude Code no longer ran, so that
+  account's token was never refreshed and lapsed (`token expired - vibe leaves the active
+  account's token to Claude Code`) and auto-switching never ran again. The tick now
+  switches onto the live account itself, which repairs the pointer without losing the live
+  login. `CONTRACT.md` §17.
+- A usage `401` or `403` said `run: vibe list`, the command that had just produced it. It now
+  says the token was refused and names `vibe add <alias>`.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added

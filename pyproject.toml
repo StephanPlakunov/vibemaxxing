@@ -1,6 +1,6 @@
 [project]
 name = "vibemaxxing"
-version = "0.3.0"
+version = "0.3.1"
 description = "Manage several Claude Code accounts and see pooled plan usage across all of them"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,8 +30,8 @@ Repository = "https://github.com/jskarbecki/vibemaxxing"
 Issues = "https://github.com/jskarbecki/vibemaxxing/issues"
 
 [project.scripts]
-vibemaxxing = "vibemaxxing.cli:main"
-vibe = "vibemaxxing.cli:main"
+vibemaxxing = "vibemaxxing.entry:main"
+vibe = "vibemaxxing.entry:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -57,7 +57,7 @@ filterwarnings = ["error"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
-extend-exclude = ["*.md"]
+extend-exclude = ["*.md", "scripts/cc-mirror-experiment"]  # measurement tools, docs/BROKER.md
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

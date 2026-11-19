@@ -22,6 +22,9 @@ PROFILE_URL: Final = "https://api.anthropic.com/api/oauth/profile"
 BETA_HEADER: Final = "oauth-2025-04-20"
 
 _LABELS: Final = {"session": "Session", "weekly_all": "Weekly · all models"}
+# A weekly_scoped row is labelled with this and its model's name, which is how the
+# ordered policy finds the models it was told to count.
+SCOPED_LABEL_PREFIX: Final = "Weekly · "
 
 
 def _get(client: HttpClient, url: str, token: Secret, timeout_s: float) -> dict[str, object]:
@@ -71,6 +74,10 @@ class Row:
     percent: int | None
     severity: str | None
     resets_at: str | None
+    # A monthly_spend row only: the seat's spend and its cap, in the payload's currency units.
+    used: float | None = None
+    limit: float | None = None
+    currency: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,7 +119,7 @@ def _label(entry: Mapping[str, object], kind: str) -> str:
     if kind == "weekly_scoped":
         name = _scoped_name(entry)
         if name is not None:
-            return f"Weekly · {name}"
+            return f"{SCOPED_LABEL_PREFIX}{name}"
     return _LABELS.get(kind) or kind.replace("_", " ").capitalize()
 
 
@@ -159,5 +166,48 @@ def _breakdown(payload: Mapping[str, object]) -> tuple[BreakdownRow, ...]:
     return tuple(rows)
 
 
+def _money(value: object) -> float | None:
+    """`{"amount_minor": 15, "exponent": 2}` -> 0.15; anything else -> None."""
+    if not isinstance(value, Mapping):
+        return None
+    amount: object = value.get("amount_minor")
+    exponent: object = value.get("exponent")
+    if isinstance(amount, bool) or not isinstance(amount, int):
+        return None
+    if isinstance(exponent, bool) or not isinstance(exponent, int):
+        return None
+    return amount / (10**exponent)
+
+
+def _spend_row(payload: Mapping[str, object]) -> Row | None:
+    """An enterprise seat has no time windows (`limits` is empty) but a monthly
+    spend cap in `spend`. Show it as one row so the account is not blank."""
+    spend: object = payload.get("spend")
+    if not isinstance(spend, Mapping) or spend.get("enabled") is False:
+        return None
+    used = _money(spend.get("used"))
+    limit = _money(spend.get("limit"))
+    if used is None or limit is None or limit <= 0:
+        return None
+    currency = _text((spend.get("used") or {}).get("currency")) or ""
+    sign = "$" if currency == "USD" else (currency + " " if currency else "")
+    percent = used / limit * 100
+    return Row(
+        kind="monthly_spend",
+        label=f"Monthly spend {sign}{used:,.2f} of {sign}{limit:,.0f}",
+        percent=_percent(percent),
+        severity=_text(spend.get("severity")),
+        resets_at=None,
+        used=used,
+        limit=limit,
+        currency=currency or None,
+    )
+
+
 def summarize(payload: Mapping[str, object]) -> Summary:
-    return Summary(rows=_rows(payload), breakdown=_breakdown(payload))
+    rows = _rows(payload)
+    if not rows:
+        spend = _spend_row(payload)
+        if spend is not None:
+            rows = (spend,)
+    return Summary(rows=rows, breakdown=_breakdown(payload))

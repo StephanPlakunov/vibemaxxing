@@ -18,6 +18,8 @@ from vibemaxxing.fsutil import write_private
 from vibemaxxing.redact import Secret
 
 EXPIRY_BUFFER_MS: Final = 5 * 60 * 1000
+# The refresh token of a token broker mirror, which holds none.
+NO_REFRESH_TOKEN: Final = Secret("")
 OAUTH_MEMBER: Final = "claudeAiOauth"
 
 _RECOVERY: Final = "vibe add"
@@ -82,11 +84,17 @@ def _optional_str(raw: Mapping[str, object], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def parse_credential(raw: Mapping[str, object]) -> Credential:
+def parse_credential(raw: Mapping[str, object], *, mirror_ok: bool = False) -> Credential:
+    """``mirror_ok``: a broker mirror (no refresh token) is a credential too, with an empty one."""
     scopes = raw.get("scopes")
+    refresh = raw.get("refreshToken")
+    if mirror_ok and refresh is None:
+        refresh_token = NO_REFRESH_TOKEN
+    else:
+        refresh_token = Secret(_required_str(raw, "refreshToken"))
     return Credential(
         access_token=Secret(_required_str(raw, "accessToken")),
-        refresh_token=Secret(_required_str(raw, "refreshToken")),
+        refresh_token=refresh_token,
         expires_at_ms=_required_int(raw, "expiresAt"),
         refresh_token_expires_at_ms=_optional_int(raw, "refreshTokenExpiresAt"),
         scopes=tuple(s for s in scopes if isinstance(s, str)) if isinstance(scopes, list) else (),
@@ -107,14 +115,31 @@ def parse_blob_members(raw: str) -> dict[str, object]:
     return {str(key): value for key, value in parsed.items()}
 
 
-def parse_blob(raw: str) -> Credential:
+def parse_blob(raw: str, *, mirror_ok: bool = False) -> Credential:
     member = parse_blob_members(raw).get(OAUTH_MEMBER)
     if not isinstance(member, dict):
         raise StoreError(
             f"the stored credential blob has no {OAUTH_MEMBER!r} object",
             _LOGIN,
         )
-    return parse_credential({str(key): value for key, value in member.items()})
+    return parse_credential({str(key): value for key, value in member.items()}, mirror_ok=mirror_ok)
+
+
+def holds_refresh_token(raw: str | None) -> bool:
+    """Whether a Keychain blob carries a refresh token: a login Claude Code holds and may renew.
+
+    A token broker mirror carries none (broker.py); an empty string is Claude Code's own mark of
+    a login that ended, so it is no refresh token either.
+    """
+    if raw is None:
+        return False
+    try:
+        members = parse_blob_members(raw)
+    except StoreError:
+        return False
+    member = members.get(OAUTH_MEMBER)
+    token = member.get("refreshToken") if isinstance(member, dict) else None
+    return isinstance(token, str) and bool(token)
 
 
 def credential_to_disk(c: Credential) -> dict[str, object]:
@@ -129,12 +154,27 @@ def credential_to_disk(c: Credential) -> dict[str, object]:
     }
 
 
-def credential_to_blob(c: Credential, base: Mapping[str, object] | None = None) -> str:
+def mirror_to_disk(c: Credential) -> dict[str, object]:
+    """A token broker mirror: everything but the refresh token, whose key is left out.
+
+    Claude Code 2.1.318 never calls the token endpoint for a login without one (every refresh
+    path starts with ``if(!U?.refreshToken)return"no_refresh_token"``), and treats a missing one
+    as a usable login, where an empty string means "this login ended". docs/BROKER.md.
+    """
+    disk = credential_to_disk(c)
+    disk.pop("refreshToken")
+    disk.pop("refreshTokenExpiresAt")
+    return disk
+
+
+def credential_to_blob(
+    c: Credential, base: Mapping[str, object] | None = None, *, mirror: bool = False
+) -> str:
     # Replace only the claudeAiOauth member: the live blob has siblings
     # (mcpOAuth was measured on this machine) and writing a bare
     # {"claudeAiOauth": ...} would delete the user's MCP logins on the first switch.
     blob: dict[str, object] = dict(base) if base is not None else {}
-    blob[OAUTH_MEMBER] = credential_to_disk(c)
+    blob[OAUTH_MEMBER] = mirror_to_disk(c) if mirror else credential_to_disk(c)
     return json.dumps(blob)
 
 

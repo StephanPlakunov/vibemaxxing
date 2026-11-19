@@ -214,7 +214,8 @@ def test_a_failing_envelope_serves_no_token(tmp_home: Path) -> None:
             _LOOPBACK_OPENER.open(f"http://{host}:{port}/api/usage", timeout=5)
             raise AssertionError("expected a 500")
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode()
+            with exc:
+                body = exc.read().decode()
     finally:
         server.shutdown()
         server.server_close()
