@@ -188,13 +188,17 @@ def test_list_writes_the_seat_into_status_json_with_its_fresh_numbers(
     assert statusline.render(rig.status(), now_s=NOW_S).endswith("cursor: 42% $12.5/$250")
 
 
-def test_status_json_holds_the_lower_of_cursors_cap_and_vibes_ceiling(rig: Rig) -> None:
-    rig.queue(on_demand_used=100, on_demand_limit=100_000)  # Cursor says $1000
-    rig.ctx().cursor_readings()
+def test_status_json_holds_the_cap_cursor_reports_not_vibes_ceiling(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rig.queue(on_demand_used=100, on_demand_limit=75_000)  # Cursor says $750
+    assert cli.main(["list"], context=rig.ctx()) == 0
+    capsys.readouterr()
 
     entry = cursor.status_entry(rig.root, "cursor", margin_cents=1000, ceiling_cents=25_000)
 
-    assert entry["on_demand_cap_cents"] == 25_000
+    assert entry["on_demand_cap_cents"] == 75_000
+    assert statusline.render(rig.status(), now_s=NOW_S).endswith("$1/$750")
 
 
 def test_a_seat_nobody_has_read_has_no_figures_and_the_line_says_so(rig: Rig) -> None:

@@ -74,6 +74,10 @@ class Row:
     percent: int | None
     severity: str | None
     resets_at: str | None
+    # A monthly_spend row only: the seat's spend and its cap, in the payload's currency units.
+    used: float | None = None
+    limit: float | None = None
+    currency: str | None = None
 
 
 @dataclass(frozen=True)
@@ -194,6 +198,9 @@ def _spend_row(payload: Mapping[str, object]) -> Row | None:
         percent=_percent(percent),
         severity=_text(spend.get("severity")),
         resets_at=None,
+        used=used,
+        limit=limit,
+        currency=currency or None,
     )
 
 

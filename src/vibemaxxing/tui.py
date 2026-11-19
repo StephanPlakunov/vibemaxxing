@@ -150,7 +150,7 @@ def cursor_content(reading: launch.CursorReading, *, now_s: float) -> Content:
         )
     used, cap = usage.on_demand_used_cents, usage.on_demand_limit_cents
     if used is not None:
-        cap = None if cap is None else min(cap, cursor_usage.HARD_CAP_CENTS)
+        cap = cursor_usage.effective_cap(usage)
         share = None if not cap else round(min(100, used / cap * 100))
         of = f" of {_money(cap)}" if cap else " (off)" if cap == 0 else ""
         spent = reading.availability.ok is False

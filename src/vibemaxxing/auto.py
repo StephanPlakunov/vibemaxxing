@@ -586,12 +586,15 @@ def status(root: Path, *, client: HttpClient, port: KeychainPort, now_s: float) 
 
 
 def _row_entry(row: usage.Row) -> dict[str, object]:
-    return {
+    entry: dict[str, object] = {
         "kind": row.kind,
         "label": row.label,
         "percent": row.percent,
         "resets_at": None if row.resets_at is None else pool.parse_stamp(row.resets_at),
     }
+    if row.used is not None and row.limit is not None:
+        entry.update(spend_used=row.used, spend_limit=row.limit, currency=row.currency)
+    return entry
 
 
 def _status_account(root: Path, alias: str) -> dict[str, object]:

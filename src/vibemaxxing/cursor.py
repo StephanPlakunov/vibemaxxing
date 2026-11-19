@@ -314,7 +314,7 @@ def status_entry(
 
     No Keychain, no network, no process: the status line runs on every redraw. A seat nobody has
     read yet, or whose numbers are not ours, has no figures. ``on_demand_cap_cents`` is the cap
-    vibe holds the seat to (the lower of Cursor's and vibe's own ceiling).
+    vibe holds the seat to: the limit Cursor reports, or vibe's own ceiling when it reports none.
     """
     entry: dict[str, object] = {
         "alias": alias,
@@ -334,12 +334,11 @@ def status_entry(
     if cached is None or cached.added_at != added_at or cached.payload is None:
         return entry
     usage = cursor_usage.usage_from_payload(cached.payload)
-    reported = usage.on_demand_limit_cents
     entry.update(
         fetched_at=cached.fetched_at,
         included_percent=usage.included_percent,
         on_demand_used_cents=usage.on_demand_used_cents,
-        on_demand_cap_cents=None if reported is None else min(reported, ceiling_cents),
+        on_demand_cap_cents=cursor_usage.effective_cap(usage, ceiling_cents),
         cycle_end_s=usage.cycle_end_s,
         available=cursor_usage.availability(
             usage, margin_cents=margin_cents, ceiling_cents=ceiling_cents

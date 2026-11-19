@@ -675,15 +675,15 @@ def test_on_demand_at_the_cap_refuses_a_named_cursor_run_and_starts_nothing(
     assert world.fake.calls() == []
 
 
-def test_vibes_ceiling_holds_when_cursor_reports_a_higher_cap(
+def test_a_higher_cap_cursor_reports_is_the_cap(
     tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     world = World(tmp_home, monkeypatch)
     world.add_cursor()
     world.cursor_usage(on_demand_used=24_500, on_demand_limit=100_000)  # Cursor says $1000
 
-    assert world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku") == 2
-    assert world.fake.calls() == []
+    assert world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku") == 0
+    assert len(world.fake.calls()) == 1
 
 
 def test_an_unreadable_usage_warns_but_does_not_stop_a_run_you_named(

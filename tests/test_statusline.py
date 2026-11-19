@@ -302,3 +302,14 @@ def test_the_console_script_still_runs_every_other_command(tmp_home: Path) -> No
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == importlib.metadata.version("vibemaxxing")
+
+
+def test_an_enterprise_seat_shows_its_monthly_spend_like_cursor() -> None:
+    from vibemaxxing import statusline
+
+    row = {"kind": "monthly_spend", "label": "Monthly spend", "percent": 0, "resets_at": None,
+           "spend_used": 0.15, "spend_limit": 125.0, "currency": "USD"}
+    doc = {"schema": 1, "accounts": [
+        {"alias": "zvoove-claude", "state": "ok", "fetched_at": 100.0, "rows": [row]}]}
+    assert statusline.render(doc, now_s=110.0) == "zvoove-claude: $0.15/$125"
+    assert statusline.render(doc, now_s=100.0 + 3600).endswith("$0.15/$125?")

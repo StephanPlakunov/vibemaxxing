@@ -486,8 +486,8 @@ Defaults, all configurable under `routing` in `~/.vibemaxxing/settings.json`:
 - **Budget**: the share of main's weekly usage allowed by the end of each day, Berlin time:
   Mon 20%, Tue 40%, Wed 60%, Thu 80%, Fri-Sun 100%.
 - **Cursor has usage left** while its included usage and bonus last, and then its personal
-  on-demand cap (minus a margin, default $10). vibe also holds the cap to its own $250 ceiling
-  (`routing.cursor_cap_cents`) whatever Cursor reports, uses an answer at most two minutes old
+  on-demand cap (minus a margin, default $10). The cap is the limit Cursor reports, so it follows an admin raising it; vibe's own $250
+  ceiling (`routing.cursor_cap_cents`) applies only when Cursor reports none. vibe uses an answer at most two minutes old
   (30 seconds close to the cap; an older one is shown, never routed by), and refuses even
   `vibe run cursor` at the limit. **On-demand is billed to the company.** It
   counts as spent after that, until the cycle resets.

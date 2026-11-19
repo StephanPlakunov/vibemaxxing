@@ -229,6 +229,14 @@ class Availability:
 HARD_CAP_CENTS: Final = 25_000
 
 
+def effective_cap(usage: CursorUsage | None, ceiling_cents: int = HARD_CAP_CENTS) -> int | None:
+    """The cap in force: what Cursor reports, else vibe's ``ceiling_cents``; None without usage."""
+    if usage is None:
+        return None
+    reported = usage.on_demand_limit_cents
+    return ceiling_cents if reported is None else reported
+
+
 def availability(
     usage: CursorUsage | None,
     *,
@@ -240,18 +248,19 @@ def availability(
 
     While on-demand spend is zero the seat is still on included usage plus Cursor's bonus,
     which is not visible as a number: it ends the moment on-demand starts counting. Then the
-    cap decides, and the cap is the lower of what Cursor reports and vibe's own ceiling
-    (``ceiling_cents``, $250): vibe never allows more than that, whatever the answer says, and
-    an answer that names no cap is held to the ceiling. A cap of 0 means on-demand is off.
+    cap decides, and the cap is the on-demand limit Cursor reports (it follows an admin raising
+    it, nothing is set here). Only an answer that names no limit is held to vibe's own ceiling
+    (``ceiling_cents``, $250). A cap of 0 means on-demand is off.
     """
     if usage is None:
         return Availability(None, reason or "usage unknown")
-    used, reported = usage.on_demand_used_cents, usage.on_demand_limit_cents
+    used = usage.on_demand_used_cents
     if used is None:
         return Availability(None, "usage unknown (no on-demand figure in the answer)")
     if used <= 0:
         return Availability(True, "included usage and bonus left, on-demand untouched")
-    cap = ceiling_cents if reported is None else min(reported, ceiling_cents)
+    cap = effective_cap(usage, ceiling_cents)
+    assert cap is not None
     if cap <= 0:
         return Availability(False, "included usage is used up and on-demand is off")
     left = cap - used
@@ -264,8 +273,8 @@ def near_cap(usage: CursorUsage | None, *, margin_cents: int, ceiling_cents: int
     """Whether a reading is close enough to the cap that only a very fresh one may route."""
     if usage is None or usage.on_demand_used_cents is None or usage.on_demand_used_cents <= 0:
         return False
-    reported = usage.on_demand_limit_cents
-    cap = ceiling_cents if reported is None else min(reported, ceiling_cents)
+    cap = effective_cap(usage, ceiling_cents)
+    assert cap is not None
     return cap - usage.on_demand_used_cents <= margin_cents * 5
 
 

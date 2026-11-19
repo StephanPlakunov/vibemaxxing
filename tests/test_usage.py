@@ -836,6 +836,7 @@ def test_an_enterprise_seat_without_windows_shows_its_monthly_spend() -> None:
     assert rows[0].kind == "monthly_spend"
     assert rows[0].label == "Monthly spend $0.15 of $125"
     assert rows[0].percent == 0
+    assert (rows[0].used, rows[0].limit) == (0.15, 125.0)
 
 
 def test_a_seat_with_windows_keeps_only_its_windows() -> None:

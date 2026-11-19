@@ -1714,7 +1714,9 @@ every web snapshot. A failed write is swallowed.
 and a counted model's own row, each `<percent>%` plus `(resets HH:MM)` in local time today or
 `(resets Mon HH:MM)` on another day. A row with no percent, or whose reset has passed, is
 left out; an account with none left reads `<alias>: -`, a `needs_login` one
-`<alias>: needs login`. Numbers fetched more than `STALE_S` (15 min) ago, or in the future,
+`<alias>: needs login`. An enterprise seat (no windows, a `monthly_spend` row carrying
+`spend_used`/`spend_limit`/`currency` from the usage payload's `spend`) reads `<alias>: $0.15/$125`, and a
+Cursor seat's `$used/$cap` uses the on-demand limit Cursor reports. Numbers fetched more than `STALE_S` (15 min) ago, or in the future,
 get a `?`. A missing or unreadable file prints `vibe: no status yet`. Exit 0 always. No
 emoji.
 
@@ -1822,7 +1824,7 @@ atlassian, gcal; extra: none), `order` per class (`needs`, `no_needs`: lists of
 `{"account", "budget", "degraded", "last_resort"}`), `cursor_margin_cents`, `spent_percent`
 (99), `roles` (role -> alias for `main`, `extra`, `cursor`; steps and `connectors` are written in
 roles; a Claude role naming no stored account makes a run that would end on Cursor refuse),
-`cursor_cap_cents` (25000: vibe's own ceiling over whatever Cursor reports). A Cursor step cannot
+`cursor_cap_cents` (25000: vibe's own ceiling, used only when Cursor reports no on-demand limit; otherwise the limit Cursor reports is the cap, shown and used). A Cursor step cannot
 be `last_resort`. Defaults: needs = main within budget, cursor, extra (degraded: runs without the
 connectors, with a warning), main (last resort); no needs = extra, main within budget,
 cursor, main (last resort). Unknown usage is unavailable and printed; only the last resort

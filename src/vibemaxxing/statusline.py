@@ -104,6 +104,23 @@ def _label(row: Mapping[str, object], models: set[str]) -> str | None:
     return model if model.casefold() in models else None
 
 
+def _spend(rows: object, fetched: float | None, now_s: float) -> str | None:
+    """An enterprise seat's monthly spend, ``$0.15/$125``: its only row, from the usage payload."""
+    if not isinstance(rows, list) or fetched is None:
+        return None
+    for row in rows:
+        if not isinstance(row, dict) or row.get("kind") != "monthly_spend":
+            continue
+        used, limit = _number(row.get("spend_used")), _number(row.get("spend_limit"))
+        if used is None or limit is None or limit <= 0:
+            return None
+        currency = _text(row.get("currency"))
+        sign = "$" if currency in (None, "USD") else f"{currency} "
+        stale = "" if 0 <= now_s - fetched <= STALE_S else "?"
+        return f"{sign}{used:,.2f}/{sign}{limit:,.0f}{stale}"
+    return None
+
+
 def _account(entry: Mapping[str, object], models: set[str], now_s: float) -> str | None:
     alias = _text(entry.get("alias"))
     if alias is None:
@@ -112,6 +129,9 @@ def _account(entry: Mapping[str, object], models: set[str], now_s: float) -> str
         return f"{alias}: needs login"
     fetched = _number(entry.get("fetched_at"))
     rows = entry.get("rows")
+    spend = _spend(rows, fetched, now_s)
+    if spend is not None:
+        return f"{alias}: {spend}"
     cells: list[tuple[str, str, float | None]] = []
     for row in rows if isinstance(rows, list) and fetched is not None else []:
         if not isinstance(row, dict):

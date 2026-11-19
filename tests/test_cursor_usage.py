@@ -313,10 +313,15 @@ def test_the_pooled_team_spend_is_not_mistaken_for_ours() -> None:
     assert parsed is not None and parsed.on_demand_used_cents == 0  # pooledUsed is 1587827
 
 
-def test_vibes_own_ceiling_beats_a_higher_reported_cap() -> None:
-    # Cursor says the cap is $500; vibe never allows more than $250 whatever it says.
-    assert avail(24_500, 50_000).ok is False
-    assert avail(20_000, 50_000).ok is True
+def test_the_reported_cap_is_the_cap_and_the_ceiling_only_fills_in_when_none_is_reported() -> None:
+    # Cursor says the cap is $500 (or $750): that is the cap, vibe's $250 does not override it.
+    assert avail(24_500, 50_000).ok is True
+    assert avail(49_500, 50_000).ok is False
+    assert avail(30_000, 75_000).ok is True
+    assert avail(30_000, None).ok is False  # no reported cap: vibe's own ceiling
+    assert cursor_usage.effective_cap(CursorUsage(1.0, 1, 75_000, None)) == 75_000
+    assert cursor_usage.effective_cap(CursorUsage(1.0, 1, None, None)) == 25_000
+    assert cursor_usage.effective_cap(CursorUsage(1.0, 1, 0, None)) == 0
     assert (
         availability(
             CursorUsage(1.0, 40_000, 100_000, None), margin_cents=1000, ceiling_cents=50_000
