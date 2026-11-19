@@ -817,3 +817,32 @@ def test_retry_after_is_read_from_the_response_headers() -> None:
     assert _retry_after_s("120") == 120.0
     assert _retry_after_s("Wed, 21 Oct 2026 07:28:00 GMT") is None
     assert _retry_after_s(None) is None
+
+
+def test_an_enterprise_seat_without_windows_shows_its_monthly_spend() -> None:
+    from vibemaxxing import usage as u
+
+    payload = {
+        "limits": [],
+        "spend": {
+            "used": {"amount_minor": 15, "currency": "USD", "exponent": 2},
+            "limit": {"amount_minor": 12500, "currency": "USD", "exponent": 2},
+            "severity": "normal",
+            "enabled": True,
+        },
+    }
+    rows = u.summarize(payload).rows
+    assert len(rows) == 1
+    assert rows[0].kind == "monthly_spend"
+    assert rows[0].label == "Monthly spend $0.15 of $125"
+    assert rows[0].percent == 0
+
+
+def test_a_seat_with_windows_keeps_only_its_windows() -> None:
+    from vibemaxxing import usage as u
+
+    payload = {
+        "limits": [{"kind": "weekly_all", "percent": 40}],
+        "spend": {"used": {"amount_minor": 1, "exponent": 2}, "limit": {"amount_minor": 100, "exponent": 2}},
+    }
+    assert [r.kind for r in u.summarize(payload).rows] == ["weekly_all"]

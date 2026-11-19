@@ -162,5 +162,45 @@ def _breakdown(payload: Mapping[str, object]) -> tuple[BreakdownRow, ...]:
     return tuple(rows)
 
 
+def _money(value: object) -> float | None:
+    """`{"amount_minor": 15, "exponent": 2}` -> 0.15; anything else -> None."""
+    if not isinstance(value, Mapping):
+        return None
+    amount: object = value.get("amount_minor")
+    exponent: object = value.get("exponent")
+    if isinstance(amount, bool) or not isinstance(amount, int):
+        return None
+    if isinstance(exponent, bool) or not isinstance(exponent, int):
+        return None
+    return amount / (10**exponent)
+
+
+def _spend_row(payload: Mapping[str, object]) -> Row | None:
+    """An enterprise seat has no time windows (`limits` is empty) but a monthly
+    spend cap in `spend`. Show it as one row so the account is not blank."""
+    spend: object = payload.get("spend")
+    if not isinstance(spend, Mapping) or spend.get("enabled") is False:
+        return None
+    used = _money(spend.get("used"))
+    limit = _money(spend.get("limit"))
+    if used is None or limit is None or limit <= 0:
+        return None
+    currency = _text((spend.get("used") or {}).get("currency")) or ""
+    sign = "$" if currency == "USD" else (currency + " " if currency else "")
+    percent = used / limit * 100
+    return Row(
+        kind="monthly_spend",
+        label=f"Monthly spend {sign}{used:,.2f} of {sign}{limit:,.0f}",
+        percent=_percent(percent),
+        severity=_text(spend.get("severity")),
+        resets_at=None,
+    )
+
+
 def summarize(payload: Mapping[str, object]) -> Summary:
-    return Summary(rows=_rows(payload), breakdown=_breakdown(payload))
+    rows = _rows(payload)
+    if not rows:
+        spend = _spend_row(payload)
+        if spend is not None:
+            rows = (spend,)
+    return Summary(rows=rows, breakdown=_breakdown(payload))
