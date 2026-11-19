@@ -307,14 +307,12 @@ def resolve_model(
     return max(candidates, key=lambda pair: pair[0])[1].id
 
 
-def status_entry(
-    root: Path, alias: str, *, margin_cents: int, ceiling_cents: int
-) -> dict[str, object]:
+def status_entry(root: Path, alias: str) -> dict[str, object]:
     """One Cursor seat for ``status.json``, from the shared usage cache and nothing else.
 
     No Keychain, no network, no process: the status line runs on every redraw. A seat nobody has
-    read yet, or whose numbers are not ours, has no figures. ``on_demand_cap_cents`` is the cap
-    vibe holds the seat to: the limit Cursor reports, or vibe's own ceiling when it reports none.
+    read yet, or whose numbers are not ours, has no figures. ``on_demand_cap_cents`` is the limit
+    Cursor reports (None when it reports none: vibe adds no limit of its own).
     """
     entry: dict[str, object] = {
         "alias": alias,
@@ -338,10 +336,8 @@ def status_entry(
         fetched_at=cached.fetched_at,
         included_percent=usage.included_percent,
         on_demand_used_cents=usage.on_demand_used_cents,
-        on_demand_cap_cents=cursor_usage.effective_cap(usage, ceiling_cents),
+        on_demand_cap_cents=cursor_usage.effective_cap(usage),
         cycle_end_s=usage.cycle_end_s,
-        available=cursor_usage.availability(
-            usage, margin_cents=margin_cents, ceiling_cents=ceiling_cents
-        ).ok,
+        available=cursor_usage.availability(usage).ok,
     )
     return entry

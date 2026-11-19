@@ -165,8 +165,6 @@ def read_cursor(
     svc: Services,
     alias: str,
     *,
-    margin_cents: int,
-    ceiling_cents: int = cursor_usage.HARD_CAP_CENTS,
     fresh: bool = False,
 ) -> CursorReading:
     """One Cursor account: logged in or not, and its usage.
@@ -190,13 +188,9 @@ def read_cursor(
         if cached is None or cached.payload is None
         else cursor_usage.usage_from_payload(cached.payload)
     )
-    window = (
-        cursor_usage.NEAR_CAP_FRESH_S
-        if cursor_usage.near_cap(held, margin_cents=margin_cents, ceiling_cents=ceiling_cents)
-        else cursor_usage.FRESH_S
-    )
+    window = cursor_usage.NEAR_CAP_FRESH_S if cursor_usage.near_cap(held) else cursor_usage.FRESH_S
     if not fresh and held is not None and age is not None and 0 <= age < window:
-        return _reading(alias, status, held, "", margin_cents, ceiling_cents)
+        return _reading(alias, status, held, "")
     usage, why = cursor_usage.fetch(svc.cursor_client, svc.cursor_token)
     if usage is not None:
         store.write_usage_cache(
@@ -206,7 +200,7 @@ def read_cursor(
                 added_at, svc.now_s, cursor_usage.usage_to_payload(usage), None, 0, None
             ),
         )
-        return _reading(alias, status, usage, "", margin_cents, ceiling_cents)
+        return _reading(alias, status, usage, "")
     if (
         held is not None
         and cached is not None
@@ -225,7 +219,7 @@ def read_cursor(
             # Shown, never routed by: dollars move while an answer ages.
             cursor_usage.Availability(None, f"{why}; the last answer ({at}) is too old to use"),
         )
-    return _reading(alias, status, None, why, margin_cents, ceiling_cents)
+    return _reading(alias, status, None, why)
 
 
 def _reading(
@@ -233,8 +227,6 @@ def _reading(
     status: cursor.AgentStatus,
     usage: CursorUsage | None,
     note: str,
-    margin_cents: int,
-    ceiling_cents: int,
 ) -> CursorReading:
     return CursorReading(
         alias,
@@ -243,9 +235,7 @@ def _reading(
         status.team,
         usage,
         note,
-        cursor_usage.availability(
-            usage, margin_cents=margin_cents, reason=note, ceiling_cents=ceiling_cents
-        ),
+        cursor_usage.availability(usage, reason=note),
     )
 
 
@@ -341,12 +331,7 @@ def candidates(svc: Services, routing: route.Routing) -> Callable[[str], route.C
         if alias in found:
             return found[alias]
         if alias in seats:
-            reading = read_cursor(
-                svc,
-                alias,
-                margin_cents=routing.cursor_margin_cents,
-                ceiling_cents=routing.cursor_cap_cents,
-            )
+            reading = read_cursor(svc, alias)
             found[alias] = _cursor_candidate(reading)
         else:
             if not claude:
@@ -628,17 +613,11 @@ def _with_bridge(
 def _ceiling_notes(svc: Services, alias: str) -> list[str]:
     """Refuse a Cursor run at the money limit; warn when the usage cannot be read.
 
-    The reading is fresh (two minutes, thirty seconds close to the cap). A seat whose on-demand
-    spend is within the margin of the cap, or of vibe's own ceiling, is spent. An unknown reading
+    The reading is fresh (two minutes, thirty seconds close to the limit). A seat whose on-demand
+    spend has reached the limit Cursor reports is spent. An unknown reading
     does not stop a run the person asked for by name, but it is said.
     """
-    routing = route.read_routing(svc.root)
-    reading = read_cursor(
-        svc,
-        alias,
-        margin_cents=routing.cursor_margin_cents,
-        ceiling_cents=routing.cursor_cap_cents,
-    )
+    reading = read_cursor(svc, alias)
     if reading.logged_in and reading.availability.ok is False:
         raise UsageError(
             f"Cursor is at its on-demand limit: {reading.availability.why}",

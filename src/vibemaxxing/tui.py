@@ -27,7 +27,7 @@ from textual.containers import VerticalScroll
 from textual.content import Content
 from textual.widgets import Static
 
-from vibemaxxing import auto, cursor, cursor_usage, envelope, history, launch, store
+from vibemaxxing import auto, cursor, envelope, history, launch, store
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.poll import DASHBOARD_INTERVAL_S
 from vibemaxxing.pool import LastSwitch, Settings, dry_in
@@ -150,9 +150,8 @@ def cursor_content(reading: launch.CursorReading, *, now_s: float) -> Content:
         )
     used, cap = usage.on_demand_used_cents, usage.on_demand_limit_cents
     if used is not None:
-        cap = cursor_usage.effective_cap(usage)
         share = None if not cap else round(min(100, used / cap * 100))
-        of = f" of {_money(cap)}" if cap else " (off)" if cap == 0 else ""
+        of = f" of {_money(cap)}" if cap else " (off)" if cap == 0 else " (no limit reported)"
         spent = reading.availability.ok is False
         lines.append(
             Content.styled(

@@ -94,7 +94,7 @@ def test_the_cap_falls_back_to_the_hard_limit() -> None:
 )
 def test_a_shape_change_is_unknown_not_a_crash(answer: dict[str, object] | None) -> None:
     assert parse_usage(answer, None) is None
-    assert availability(None, margin_cents=1000).ok is None
+    assert availability(None).ok is None
 
 
 def test_garbage_numbers_are_not_numbers() -> None:
@@ -109,14 +109,14 @@ def test_garbage_numbers_are_not_numbers() -> None:
     assert parsed is not None
     assert parsed.included_percent == 12.0  # NaN is skipped; derived from spend / limit
     assert parsed.on_demand_used_cents is None and parsed.on_demand_limit_cents is None
-    assert availability(parsed, margin_cents=1000).ok is None
+    assert availability(parsed).ok is None
 
 
 # --- the rule: used until it is used up -------------------------------------------------
 
 
-def avail(used: int | None, cap: int | None, margin: int = 1000) -> cursor_usage.Availability:
-    return availability(CursorUsage(50.0, used, cap, None), margin_cents=margin)
+def avail(used: int | None, cap: int | None) -> cursor_usage.Availability:
+    return availability(CursorUsage(50.0, used, cap, None))
 
 
 def test_included_usage_and_bonus_count_as_room_while_on_demand_is_untouched() -> None:
@@ -125,26 +125,26 @@ def test_included_usage_and_bonus_count_as_room_while_on_demand_is_untouched() -
     assert avail(0, 0).ok is True
 
 
-def test_on_demand_is_used_up_to_the_cap_minus_the_margin() -> None:
+def test_on_demand_is_used_up_to_exactly_the_reported_limit() -> None:
     assert avail(5_000, 25_000).ok is True
     assert avail(23_999, 25_000).ok is True
-    assert avail(24_000, 25_000).ok is False  # within the $10 margin of the cap
+    assert avail(24_000, 25_000).ok is True  # no margin of vibe's own: only the limit counts
+    assert avail(24_999, 25_000).ok is True
     assert avail(25_000, 25_000).ok is False
     assert avail(30_000, 25_000).ok is False
-    assert avail(24_500, 25_000, margin=0).ok is True
 
 
 def test_on_demand_off_or_unnamed_once_it_has_started() -> None:
     assert avail(100, 0).ok is False
-    assert avail(100, None).ok is True  # no cap named: held to vibe's own $250 ceiling
-    assert avail(24_500, None).ok is False
+    assert avail(100, None).ok is True  # no limit reported: vibe adds none
+    assert avail(24_500, None).ok is True
+    assert avail(1_000_000, None).ok is True
+    assert "no limit reported" in avail(100, None).why
     assert avail(None, 25_000).ok is None
 
 
 def test_the_reason_is_carried_when_there_is_no_answer() -> None:
-    assert availability(None, margin_cents=1000, reason="usage unknown (HTTP 401)").why == (
-        "usage unknown (HTTP 401)"
-    )
+    assert availability(None, reason="usage unknown (HTTP 401)").why == ("usage unknown (HTTP 401)")
 
 
 # --- failure is unknown, and never carries the token ------------------------------------
@@ -282,15 +282,15 @@ def test_the_real_answer_has_no_used_field_when_nothing_is_used() -> None:
     assert parsed is not None
     assert parsed.on_demand_used_cents == 0 and parsed.on_demand_limit_cents == 25_000
     assert parsed.included_percent == pytest.approx(0.096)
-    assert availability(parsed, margin_cents=1000).ok is True
+    assert availability(parsed).ok is True
 
 
 def test_used_is_derived_from_the_remaining_when_it_is_left_out() -> None:
     parsed = parse_usage(real_answer(individualRemaining=20_000), None)
 
     assert parsed is not None and parsed.on_demand_used_cents == 5_000
-    spent = parse_usage(real_answer(individualRemaining=500), None)
-    assert spent is not None and availability(spent, margin_cents=1000).ok is False
+    spent = parse_usage(real_answer(individualRemaining=0), None)
+    assert spent is not None and availability(spent).ok is False
 
 
 def test_with_neither_used_nor_remaining_the_figure_is_unknown() -> None:
@@ -302,7 +302,7 @@ def test_with_neither_used_nor_remaining_the_figure_is_unknown() -> None:
     parsed = parse_usage(answer, None)
 
     assert parsed is not None and parsed.on_demand_used_cents is None
-    assert availability(parsed, margin_cents=1000).ok is None  # never guessed as zero
+    assert availability(parsed).ok is None  # never guessed as zero
     spend["individualLimit"] = 0
     assert parse_usage(answer, None).on_demand_used_cents == 0  # type: ignore[union-attr]
 
@@ -313,32 +313,18 @@ def test_the_pooled_team_spend_is_not_mistaken_for_ours() -> None:
     assert parsed is not None and parsed.on_demand_used_cents == 0  # pooledUsed is 1587827
 
 
-def test_the_reported_cap_is_the_cap_and_the_ceiling_only_fills_in_when_none_is_reported() -> None:
-    # Cursor says the cap is $500 (or $750): that is the cap, vibe's $250 does not override it.
+def test_the_reported_limit_is_the_only_limit_and_none_reported_means_none() -> None:
     assert avail(24_500, 50_000).ok is True
-    assert avail(49_500, 50_000).ok is False
+    assert avail(49_999, 50_000).ok is True
+    assert avail(50_000, 50_000).ok is False
     assert avail(30_000, 75_000).ok is True
-    assert avail(30_000, None).ok is False  # no reported cap: vibe's own ceiling
+    assert avail(30_000, None).ok is True  # no reported limit: vibe adds none
     assert cursor_usage.effective_cap(CursorUsage(1.0, 1, 75_000, None)) == 75_000
-    assert cursor_usage.effective_cap(CursorUsage(1.0, 1, None, None)) == 25_000
+    assert cursor_usage.effective_cap(CursorUsage(1.0, 1, None, None)) is None
     assert cursor_usage.effective_cap(CursorUsage(1.0, 1, 0, None)) == 0
-    assert (
-        availability(
-            CursorUsage(1.0, 40_000, 100_000, None), margin_cents=1000, ceiling_cents=50_000
-        ).ok
-        is True
-    )  # a deliberately raised ceiling is a setting, not a default
-    assert (
-        availability(CursorUsage(1.0, 10, 5_000, None), margin_cents=1000, ceiling_cents=50_000).ok
-        is True
-    )
-    assert cursor_usage.near_cap(
-        CursorUsage(1.0, 22_000, 25_000, None), margin_cents=1000, ceiling_cents=25_000
-    )
-    assert not cursor_usage.near_cap(
-        CursorUsage(1.0, 1_000, 25_000, None), margin_cents=1000, ceiling_cents=25_000
-    )
-    assert not cursor_usage.near_cap(
-        CursorUsage(1.0, 0, 25_000, None), margin_cents=1000, ceiling_cents=25_000
-    )
-    assert not cursor_usage.near_cap(None, margin_cents=1000, ceiling_cents=25_000)
+    assert cursor_usage.effective_cap(None) is None
+    assert cursor_usage.near_cap(CursorUsage(1.0, 22_000, 25_000, None))
+    assert not cursor_usage.near_cap(CursorUsage(1.0, 1_000, 25_000, None))
+    assert not cursor_usage.near_cap(CursorUsage(1.0, 0, 25_000, None))
+    assert not cursor_usage.near_cap(CursorUsage(1.0, 22_000, None, None))
+    assert not cursor_usage.near_cap(None)

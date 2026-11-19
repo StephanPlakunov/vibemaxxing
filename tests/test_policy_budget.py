@@ -253,15 +253,6 @@ def test_a_flag_that_is_not_a_boolean_means_the_defaults(tmp_home: Path, flag: o
     assert auto.read_settings(root) == Settings()
 
 
-def test_a_budget_and_a_weekly_cap_on_one_step_mean_the_defaults(tmp_home: Path) -> None:
-    root = tmp_home / ".vibemaxxing"
-    document = json.loads(json.dumps(DOCUMENT))
-    document["steps"][0]["weekly_cap"] = [50] * 7
-    _write(root, {"schema": 1, "auto_switch": True, "policy": document})
-
-    assert auto.read_settings(root) == Settings()
-
-
 def test_a_wrong_routing_under_a_budget_step_means_the_defaults(tmp_home: Path) -> None:
     root = tmp_home / ".vibemaxxing"
     wrong = {"weekday_budget": [80]}

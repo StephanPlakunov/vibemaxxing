@@ -1595,7 +1595,7 @@ A `vibe switch` is not recorded, so a person who switches to an account the poli
 not choose is switched back by the next tick (after the cooldown, when one applies).
 `vibe auto off` holds an account by hand.
 
-(fork) **`"weekly_budget": true`** (a boolean; not together with `weekly_cap`) makes a step's
+(fork) **`"weekly_budget": true`** (a boolean) makes a step's
 weekly limit `min(until, today's budget)`: `pool.Budget(weekdays, timezone)` on `Policy.budget`,
 which `auto.read_settings` fills from the `routing` member (`route.parse_routing`; `weekday_budget`
 and `timezone`, defaults `pool.DEFAULT_BUDGET` = `route.DEFAULT_BUDGET`, Europe/Berlin). A routing
@@ -1752,7 +1752,7 @@ the pool. Every key is present: `alias`, `kind` (`"cursor"`), `state` (`ok`, `ne
 (true/false/null) and `available_why`. `/api/usage` carries the same `cursor` member (web.snapshot). The TUI paints a panel per seat; the
 web page shows each as one more ledger entry (two bars, reset, routing line; not in the pool or the
 week chart). `status.json` gains a `cursor` array (alias, fetched_at, included_percent,
-on_demand_used_cents, on_demand_cap_cents = the lower of Cursor's cap and vibe's ceiling, cycle_end_s,
+on_demand_used_cents, on_demand_cap_cents = the limit Cursor reports (null when it reports none; vibe adds no limit), cycle_end_s,
 available), written by `auto.publish_status` from the usage cache only (no Keychain, request or
 process), and `vibe statusline` appends `cursor: 0.1% $0/$250` (`?` for no numbers, numbers older than
 15 minutes or a finished cycle; `spent (resets ...)` once routing counts the seat as used up). The
@@ -1776,12 +1776,13 @@ JSON. The answer leaves out a field that is zero (proto3 JSON): no `individualUs
 `individualRemaining` (cap minus used) then carries the cap, so `used` is derived from it; with
 neither figure it is unknown, never 0. `spendLimitUsage.pooledUsed` is the team's, not ours.
 
-Freshness: an answer is used for 120 s (30 s when within five margins of the cap); an older one
+Freshness: an answer is used for 120 s (30 s when within $50 of the reported limit); an older one
 (to 15 min) is shown with its time and never routes. `vibe run <cursor>` is refused at the limit
 (unknown only warns). Availability: while on-demand spend is 0 the seat is on included usage plus Cursor's bonus
-and is available. Once it is above 0 the personal cap decides: available while
-`cap - used > margin` (`routing.cursor_margin_cents`, 1000), spent after, and a cap of 0
-(on-demand off) means spent. On-demand is billed to the company.
+and is available. Once it is above 0 the limit Cursor reports decides: available while
+`limit - used > 0`, spent after, and a limit of 0 (on-demand off) means spent. When Cursor
+reports no limit, vibe applies none: the seat stays available ("no limit reported"). vibe has no
+margin or ceiling of its own. On-demand is billed to the company.
 
 ### Translation — `cursor_translate.py`
 
@@ -1821,10 +1822,10 @@ refused, never guessed; `vibe auto on|off` carries it over untouched): `timezone
 weekly usage allowed by the end of the day), `default_needs` (`["slack","atlassian"]`),
 `no_degrade` (`["m365"]`), `connectors` (main: slack, atlassian, m365; cursor: slack,
 atlassian, gcal; extra: none), `order` per class (`needs`, `no_needs`: lists of
-`{"account", "budget", "degraded", "last_resort"}`), `cursor_margin_cents`, `spent_percent`
+`{"account", "budget", "degraded", "last_resort"}`), `spent_percent`
 (99), `roles` (role -> alias for `main`, `extra`, `cursor`; steps and `connectors` are written in
 roles; a Claude role naming no stored account makes a run that would end on Cursor refuse),
-`cursor_cap_cents` (25000: vibe's own ceiling, used only when Cursor reports no on-demand limit; otherwise the limit Cursor reports is the cap, shown and used). A Cursor step cannot
+(`cursor_cap_cents`, `cursor_margin_cents` and a step's `weekly_cap` were removed on 19 Nov 2026: vibe imposes no spending or usage cap of its own, only the limits providers report; the old keys are still accepted and ignored). A Cursor step cannot
 be `last_resort`. Defaults: needs = main within budget, cursor, extra (degraded: runs without the
 connectors, with a warning), main (last resort); no needs = extra, main within budget,
 cursor, main (last resort). Unknown usage is unavailable and printed; only the last resort

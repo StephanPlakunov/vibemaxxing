@@ -101,18 +101,6 @@ def _time(value: object) -> float | None:
     return seconds
 
 
-def _weekly_cap(raw: object) -> tuple[int, ...] | None:
-    """A step's `weekly_cap`: absent is none, else seven percents for Monday..Sunday."""
-    if raw is None:
-        return ()
-    if not isinstance(raw, list) or len(raw) != 7:
-        return None
-    caps = [_int(cap) for cap in raw]
-    if any(cap is None or not 1 <= cap <= MAX_THRESHOLD for cap in caps):
-        return None
-    return tuple(cap for cap in caps if cap is not None)
-
-
 def _parse_policy(raw: object) -> Policy | None:
     """The `policy` member: absent is the default rule, and None means it is wrong anywhere."""
     if raw is None:
@@ -135,14 +123,10 @@ def _parse_policy(raw: object) -> Policy | None:
             return None
         if until is None or not 1 <= until <= MAX_THRESHOLD:
             return None
-        weekly_cap = _weekly_cap(step.get("weekly_cap"))
-        if weekly_cap is None:
-            return None
         weekly_budget = step.get("weekly_budget", False)
-        # Both on one step would be two weekly limits, and which one was meant is a guess.
-        if not isinstance(weekly_budget, bool) or (weekly_budget and weekly_cap):
+        if not isinstance(weekly_budget, bool):
             return None
-        parsed.append(Step(account, until, weekly_cap, weekly_budget))
+        parsed.append(Step(account, until, weekly_budget))
     return Policy(tuple(parsed), tuple(str(model).strip() for model in models))
 
 
@@ -162,8 +146,6 @@ def _budget(parsed: dict[str, object], root: Path) -> pool.Budget | None:
 
 def _step_document(step: Step) -> dict[str, object]:
     document: dict[str, object] = {"account": step.account, "until": step.until}
-    if step.weekly_cap:
-        document["weekly_cap"] = list(step.weekly_cap)
     if step.weekly_budget:
         document["weekly_budget"] = True
     return document
@@ -619,19 +601,7 @@ def _status_cursor(root: Path) -> list[dict[str, object]]:
     aliases = cursor.list_cursor_aliases(root)
     if not aliases:
         return []
-    try:
-        routing = route.read_routing(root)
-    except UsageError:
-        routing = route.Routing()  # a wrong routing must not blank the status line
-    return [
-        cursor.status_entry(
-            root,
-            alias,
-            margin_cents=routing.cursor_margin_cents,
-            ceiling_cents=routing.cursor_cap_cents,
-        )
-        for alias in aliases
-    ]
+    return [cursor.status_entry(root, alias) for alias in aliases]
 
 
 def publish_status(root: Path, *, live: str | None, now_s: float) -> None:
