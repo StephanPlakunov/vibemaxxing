@@ -1,6 +1,6 @@
 """vibe-bridge: a local stdio MCP server that forwards one allowlisted call to a vendor's own MCP.
 
-A session on the extra account has no Slack or Atlassian connector. It starts this server
+A session on an account without Slack or Atlassian connectors starts this server
 (`vibe bridge serve`) and calls its tools. Each call is forwarded by vibe itself, as an MCP client,
 straight to the vendor's remote MCP server, as exactly one allowlisted upstream tool with the
 arguments given. **No model is anywhere in the path**, so there is no tool list for a prompt
@@ -92,7 +92,7 @@ UPSTREAMS: Final = {upstream.id: upstream for upstream in (SLACK, ATLASSIAN)}
 
 @dataclass(frozen=True)
 class BridgeTool:
-    name: str  # what the extra session calls
+    name: str  # what the session calls
     upstream: str  # an id in UPSTREAMS
     upstream_tool: str  # the vendor's own tool name
     description: str  # our own words: nothing the vendor wrote is ever shown to the model
@@ -649,8 +649,8 @@ def write_mcp_config(root: Path, *, python: str | None = None) -> Path:
     return path
 
 
-def print_add_command(config_dir: str = "~/.claude-extra") -> str:
-    """The command that registers the bridge with the extra account's config dir. Printed only."""
+def print_add_command(config_dir: str = "~/.claude-<alias>") -> str:
+    """The command that registers the bridge with an account's config dir. Printed only."""
     return (
         f"CLAUDE_CONFIG_DIR={config_dir} claude mcp add --scope user {SERVER_NAME} "
         "-- vibe bridge serve"

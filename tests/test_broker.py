@@ -24,7 +24,7 @@ from vibemaxxing.models import AccountState
 HOUR_MS = 3600 * 1000
 NOW_MS = int(NOW_S * 1000)
 MAIN = Identity("main@example.com", "umain", None, "org-main", None, None, None)
-EXTRA = Identity("extra@example.com", "uextra", None, "org-extra", None, None, None)
+ALT = Identity("alt@example.com", "ualt", None, "org-alt", None, None, None)
 
 
 # --- a small world ----------------------------------------------------------------------------
@@ -53,10 +53,10 @@ class Broker:
         )
         seed_account(
             self.root,
-            "extra",
-            identity=EXTRA,
+            "alt",
+            identity=ALT,
             credential=make_credential(
-                access="extra-at-1", refresh="extra-rt-1", expires_at_ms=NOW_MS + 7 * HOUR_MS
+                access="alt-at-1", refresh="alt-rt-1", expires_at_ms=NOW_MS + 7 * HOUR_MS
             ),
         )
         (home / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "umain"}}))
@@ -64,7 +64,7 @@ class Broker:
         self.port.blob = broker.mirror_blob(
             store.read_account(self.root, "main").credential, {"mcpOAuth": {"kept": True}}
         )
-        for alias in ("main", "extra"):
+        for alias in ("main", "alt"):
             (home / f".claude-{alias}").mkdir()
         broker.write_settings(self.root, broker.BrokerSettings(on=on))
 
@@ -90,7 +90,6 @@ class Broker:
             client=self.client,
             port=self.port,
             now_s=now_s,
-            notify=lambda _: None,
             port_for=self.port_for,
             home=self.home,
         )
@@ -155,7 +154,7 @@ def test_the_tick_refreshes_a_due_account_and_leaves_one_that_is_not_due(tmp_hom
     assert [body["refresh_token"] for body in w.token_requests()] == ["main-rt-1"]
     assert w.stored("main").access_token.reveal() == "main-at-2"
     assert w.stored("main").refresh_token.reveal() == "main-rt-2"
-    assert w.stored("extra").access_token.reveal() == "extra-at-1"  # 7 h left: not due
+    assert w.stored("alt").access_token.reveal() == "alt-at-1"  # 7 h left: not due
     assert "refreshed main" in report.lines
     assert report.problems == ()
 
@@ -182,12 +181,6 @@ def test_a_settings_member_that_cannot_be_read_means_off(tmp_home: Path) -> None
         assert broker.read_settings(root).on is False
 
 
-def test_auto_settings_keep_the_broker_member(w: Broker) -> None:
-    auto.write_settings(w.root, replace(auto.read_settings(w.root), auto_switch=True))
-
-    assert broker.read_settings(w.root).on is True
-
-
 # --- mirror rewrite ---------------------------------------------------------------------------
 
 
@@ -206,42 +199,42 @@ def test_a_refresh_rewrites_every_mirror_of_that_account_and_no_refresh_token_re
         assert member["expiresAt"] == w.stored("main").expires_at_ms  # the real end
         assert member["scopes"] == list(w.stored("main").scopes)
     assert json.loads(w.port.blob or "")["mcpOAuth"] == {"kept": True}  # siblings stay
-    extra = oauth_member(w.dir_port("extra").blob)
-    assert extra["accessToken"] == "extra-at-1" and "refreshToken" not in extra
-    profile = json.loads((tmp_home / ".claude-extra" / ".claude.json").read_text())
-    assert profile["oauthAccount"]["accountUuid"] == "uextra"
-    assert profile["oauthAccount"]["organizationUuid"] == "org-extra"  # Remote Control needs it
+    alt = oauth_member(w.dir_port("alt").blob)
+    assert alt["accessToken"] == "alt-at-1" and "refreshToken" not in alt
+    profile = json.loads((tmp_home / ".claude-alt" / ".claude.json").read_text())
+    assert profile["oauthAccount"]["accountUuid"] == "ualt"
+    assert profile["oauthAccount"]["organizationUuid"] == "org-alt"  # Remote Control needs it
 
 
 def test_an_unchanged_mirror_is_not_written_again(w: Broker) -> None:
     w.run()
-    w.dir_port("extra").log.clear()
+    w.dir_port("alt").log.clear()
 
     w.run(NOW_S + 60)
 
-    assert "keychain.write" not in w.dir_port("extra").log
+    assert "keychain.write" not in w.dir_port("alt").log
 
 
 def test_a_mirror_claude_code_wrote_back_an_older_token_into_is_put_right(w: Broker) -> None:
     w.run()
-    old = make_credential(access="extra-at-0", refresh="x", expires_at_ms=NOW_MS + HOUR_MS)
-    w.dir_port("extra").blob = credential_to_blob(old, mirror=True)
+    old = make_credential(access="alt-at-0", refresh="x", expires_at_ms=NOW_MS + HOUR_MS)
+    w.dir_port("alt").blob = credential_to_blob(old, mirror=True)
 
     w.run(NOW_S + 60)
 
-    assert oauth_member(w.dir_port("extra").blob)["accessToken"] == "extra-at-1"
+    assert oauth_member(w.dir_port("alt").blob)["accessToken"] == "alt-at-1"
 
 
 def test_a_dir_that_does_not_exist_gets_no_mirror_until_it_is_made(w: Broker) -> None:
-    (w.home / ".claude-extra").rmdir()
+    (w.home / ".claude-alt").rmdir()
 
     w.run()
 
-    assert str(w.home / ".claude-extra") not in w.dirs
+    assert str(w.home / ".claude-alt") not in w.dirs
 
 
 def test_the_mirror_write_holds_claude_codes_own_write_lock(w: Broker) -> None:
-    lock = w.home / ".claude-extra" / keychain.STORAGE_LOCK
+    lock = w.home / ".claude-alt" / keychain.STORAGE_LOCK
     seen: list[bool] = []
 
     class Watching(FakeKeychain):
@@ -249,7 +242,7 @@ def test_the_mirror_write_holds_claude_codes_own_write_lock(w: Broker) -> None:
             seen.append(lock.is_dir())
             super().write(blob)
 
-    w.dirs[str(w.home / ".claude-extra")] = Watching()
+    w.dirs[str(w.home / ".claude-alt")] = Watching()
 
     w.run()
 
@@ -293,43 +286,43 @@ def test_a_mirror_blob_has_no_refresh_token_key_the_one_thing_claude_code_refres
 def test_a_switch_never_copies_a_mirror_into_the_store_or_a_refresh_token_into_the_item(
     w: Broker,
 ) -> None:
-    store.switch(w.root, "extra", w.port, now_s=NOW_S)
+    store.switch(w.root, "alt", w.port, now_s=NOW_S)
 
     assert w.stored("main").refresh_token.reveal() == "main-rt-1"  # not replaced by "nothing"
     member = oauth_member(w.port.blob)
-    assert member["accessToken"] == "extra-at-1" and "refreshToken" not in member
+    assert member["accessToken"] == "alt-at-1" and "refreshToken" not in member
     assert json.loads(w.port.blob or "")["mcpOAuth"] == {"kept": True}
 
 
 def test_a_login_claude_code_made_in_a_mirror_dir_is_adopted_and_then_mirrored(w: Broker) -> None:
-    # `claude /login` in ~/.claude-extra: a newer lineage of extra, held by Claude Code.
-    (w.home / ".claude-extra" / ".claude.json").write_text(
-        json.dumps({"oauthAccount": {"accountUuid": "uextra"}})
+    # `claude /login` in ~/.claude-alt: a newer lineage of alt, held by Claude Code.
+    (w.home / ".claude-alt" / ".claude.json").write_text(
+        json.dumps({"oauthAccount": {"accountUuid": "ualt"}})
     )
     newer = make_credential(
-        access="extra-cc-at", refresh="extra-cc-rt", expires_at_ms=NOW_MS + 8 * HOUR_MS
+        access="alt-cc-at", refresh="alt-cc-rt", expires_at_ms=NOW_MS + 8 * HOUR_MS
     )
-    w.dir_port("extra").blob = credential_to_blob(newer)
+    w.dir_port("alt").blob = credential_to_blob(newer)
 
     report = w.run()
 
-    assert w.stored("extra").refresh_token.reveal() == "extra-cc-rt"
-    member = oauth_member(w.dir_port("extra").blob)
-    assert member["accessToken"] == "extra-cc-at" and "refreshToken" not in member
+    assert w.stored("alt").refresh_token.reveal() == "alt-cc-rt"
+    member = oauth_member(w.dir_port("alt").blob)
+    assert member["accessToken"] == "alt-cc-at" and "refreshToken" not in member
     assert any(line.startswith("took over") for line in report.lines)
 
 
 def test_a_login_of_another_account_in_a_mirror_dir_is_never_written_over(w: Broker) -> None:
-    (w.home / ".claude-extra" / ".claude.json").write_text(
+    (w.home / ".claude-alt" / ".claude.json").write_text(
         json.dumps({"oauthAccount": {"accountUuid": "somebody-else"}})
     )
     stranger = credential_to_blob(make_credential(access="other-at", refresh="other-rt"))
-    w.dir_port("extra").blob = stranger
+    w.dir_port("alt").blob = stranger
 
     report = w.run()
 
-    assert w.dir_port("extra").blob == stranger
-    assert w.stored("extra").refresh_token.reveal() == "extra-rt-1"
+    assert w.dir_port("alt").blob == stranger
+    assert w.stored("alt").refresh_token.reveal() == "alt-rt-1"
     assert any("did not write" in problem for problem in report.problems)
 
 
@@ -402,41 +395,43 @@ def test_a_switch_moves_the_default_mirror_and_leaves_each_dir_on_its_own_accoun
 ) -> None:
     w.run()
 
-    store.switch(w.root, "extra", w.port, now_s=NOW_S)
+    store.switch(w.root, "alt", w.port, now_s=NOW_S)
     w.run(NOW_S + 60)
 
-    assert oauth_member(w.port.blob)["accessToken"] == "extra-at-1"
+    assert oauth_member(w.port.blob)["accessToken"] == "alt-at-1"
     assert oauth_member(w.dir_port("main").blob)["accessToken"] == "main-at-1"
-    assert oauth_member(w.dir_port("extra").blob)["accessToken"] == "extra-at-1"
+    assert oauth_member(w.dir_port("alt").blob)["accessToken"] == "alt-at-1"
     assert json.loads((w.home / ".claude.json").read_text())["oauthAccount"]["accountUuid"] == (
-        "uextra"
+        "ualt"
     )
     assert w.stored("main").refresh_token.reveal() == "main-rt-1"
-    assert w.stored("extra").refresh_token.reveal() == "extra-rt-1"
+    assert w.stored("alt").refresh_token.reveal() == "alt-rt-1"
 
 
 def test_after_a_switch_the_old_live_account_is_still_renewed_for_its_fixed_sessions(
     w: Broker,
 ) -> None:
-    store.switch(w.root, "extra", w.port, now_s=NOW_S)
-    later = NOW_S + 4 * 3600  # main has 3.5 h left, extra 3 h: both due (in alias order)
-    w.client.queue_json(200, token_answer("extra-at-2", "extra-rt-2"))
+    store.switch(w.root, "alt", w.port, now_s=NOW_S)
+    later = NOW_S + 4 * 3600  # main has 3.5 h left, alt 3 h: both due (in alias order)
+    w.client.queue_json(200, token_answer("alt-at-2", "alt-rt-2"))
     w.client.queue_json(200, token_answer("main-at-2", "main-rt-2"))
 
     w.run(later)
 
     assert oauth_member(w.dir_port("main").blob)["accessToken"] == "main-at-2"
-    assert oauth_member(w.port.blob)["accessToken"] == "extra-at-2"
-    assert oauth_member(w.dir_port("extra").blob)["accessToken"] == "extra-at-2"
+    assert oauth_member(w.port.blob)["accessToken"] == "alt-at-2"
+    assert oauth_member(w.dir_port("alt").blob)["accessToken"] == "alt-at-2"
 
 
-def test_the_tick_renews_mirrors_while_auto_switch_is_off(tmp_home: Path) -> None:
+def test_the_tick_renews_mirrors(tmp_home: Path) -> None:
     w = Broker(tmp_home, main_left_h=3)
     w.client.queue_json(200, token_answer("main-at-2", "main-rt-2"))
+    w.client.queue(HTTPError(503, b"{}"))  # the usage polls, one per account
+    w.client.queue(HTTPError(503, b"{}"))
 
     result = w.tick()
 
-    assert result.line.startswith("stay: ") and "refreshed main" in result.line
+    assert result.line.startswith("live main | broker: ") and "refreshed main" in result.line
     assert oauth_member(w.port.blob)["accessToken"] == "main-at-2"
 
 
@@ -475,7 +470,7 @@ def test_on_takes_the_live_login_into_the_store_and_leaves_a_mirror(tmp_home: Pa
     assert member["accessToken"] == "main-cc-at" and "refreshToken" not in member
     assert json.loads(w.port.blob or "")["mcpOAuth"] == {"kept": True}
     assert broker.is_on(w.root)
-    assert oauth_member(w.dir_port("extra").blob)["accessToken"] == "extra-at-1"
+    assert oauth_member(w.dir_port("alt").blob)["accessToken"] == "alt-at-1"
     assert w.client.requests == []
 
 
@@ -505,7 +500,7 @@ def test_off_gives_the_live_login_back_and_removes_the_dir_mirrors(w: Broker) ->
     said = broker.turn_off(w.root, default_port=w.port, port_for=w.port_for, home=w.home)
 
     assert oauth_member(w.port.blob)["refreshToken"] == "main-rt-1"
-    assert w.dir_port("main").blob is None and w.dir_port("extra").blob is None
+    assert w.dir_port("main").blob is None and w.dir_port("alt").blob is None
     assert not broker.is_on(w.root)
     assert said[0] == "gave main's login back to Claude Code's default login"
 
@@ -532,9 +527,9 @@ def run_world(tmp_home: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     )
     seed_account(
         world.root,
-        "extra",
-        identity=EXTRA,
-        credential=make_credential(access="extra-at-1", refresh="extra-rt-1"),
+        "alt",
+        identity=ALT,
+        credential=make_credential(access="alt-at-1", refresh="alt-rt-1"),
     )
     (tmp_home / ".claude").mkdir()
     (tmp_home / ".claude" / "CLAUDE.md").write_text("shared")
@@ -544,7 +539,7 @@ def run_world(tmp_home: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     return world
 
 
-@pytest.mark.parametrize("alias", ["main", "extra"])
+@pytest.mark.parametrize("alias", ["main", "alt"])
 def test_vibe_run_alias_starts_in_its_mirror_dir_with_no_token_in_the_environment(
     run_world: World, monkeypatch: pytest.MonkeyPatch, alias: str
 ) -> None:
@@ -569,13 +564,13 @@ def test_vibe_run_alias_starts_in_its_mirror_dir_with_no_token_in_the_environmen
 
 
 def test_a_dry_run_writes_no_mirror(run_world: World) -> None:
-    assert run_world.main("run", "--dry-run", "extra", "--", "claude") == 0
+    assert run_world.main("run", "--dry-run", "alt", "--", "claude") == 0
 
-    assert not (run_world.home / ".claude-extra").exists()
+    assert not (run_world.home / ".claude-alt").exists()
 
 
 def test_a_run_on_a_dead_login_starts_nothing(run_world: World) -> None:
-    account = store.read_account(run_world.root, "extra")
+    account = store.read_account(run_world.root, "alt")
     store.write_account(
         run_world.root,
         replace(
@@ -586,7 +581,7 @@ def test_a_run_on_a_dead_login_starts_nothing(run_world: World) -> None:
         ),
     )
 
-    assert run_world.main("run", "extra", "--", "claude", "-p", "hi") != 0
+    assert run_world.main("run", "alt", "--", "claude", "-p", "hi") != 0
     assert run_world.claude_calls() == []
 
 
@@ -600,7 +595,7 @@ def test_the_status_line_says_fixed_for_a_session_in_a_mirror_dir(
         environ["VIBE_SESSION"] = "main"  # what `vibe run main` sets
 
     session = statusline.session_account(environ, root=w.root, home=tmp_home)
-    line = statusline.render({"live": "extra", "accounts": []}, now_s=NOW_S, session=session)
+    line = statusline.render({"live": "alt", "accounts": []}, now_s=NOW_S, session=session)
 
     assert session == ("main", True)
     assert line.startswith("▶ main (fixed)")
@@ -612,41 +607,41 @@ def test_a_plain_session_on_the_default_login_follows_the_switch(tmp_home: Path)
     session = statusline.session_account({}, root=w.root, home=tmp_home)
 
     assert session == (None, False)
-    assert statusline.render({"live": "extra"}, now_s=NOW_S, session=session).startswith("▶ extra")
+    assert statusline.render({"live": "alt"}, now_s=NOW_S, session=session).startswith("▶ alt")
 
 
 def test_an_older_login_of_the_same_account_in_a_mirror_dir_is_replaced_by_the_mirror(
     w: Broker,
 ) -> None:
-    (w.home / ".claude-extra" / ".claude.json").write_text(
-        json.dumps({"oauthAccount": {"accountUuid": "uextra"}})
+    (w.home / ".claude-alt" / ".claude.json").write_text(
+        json.dumps({"oauthAccount": {"accountUuid": "ualt"}})
     )
     older = make_credential(
-        access="extra-old-at", refresh="extra-old-rt", expires_at_ms=NOW_MS + HOUR_MS
+        access="alt-old-at", refresh="alt-old-rt", expires_at_ms=NOW_MS + HOUR_MS
     )
-    w.dir_port("extra").blob = credential_to_blob(older)
+    w.dir_port("alt").blob = credential_to_blob(older)
 
     report = w.run()
 
-    member = oauth_member(w.dir_port("extra").blob)
-    assert member["accessToken"] == "extra-at-1" and "refreshToken" not in member
-    assert w.stored("extra").refresh_token.reveal() == "extra-rt-1"
+    member = oauth_member(w.dir_port("alt").blob)
+    assert member["accessToken"] == "alt-at-1" and "refreshToken" not in member
+    assert w.stored("alt").refresh_token.reveal() == "alt-rt-1"
     assert report.problems == ()
 
 
 def test_a_login_claude_code_may_be_renewing_right_now_is_not_taken_over_yet(w: Broker) -> None:
-    (w.home / ".claude-extra" / ".claude.json").write_text(
-        json.dumps({"oauthAccount": {"accountUuid": "uextra"}})
+    (w.home / ".claude-alt" / ".claude.json").write_text(
+        json.dumps({"oauthAccount": {"accountUuid": "ualt"}})
     )
     ending = make_credential(
-        access="extra-cc-at", refresh="extra-cc-rt", expires_at_ms=NOW_MS + 4 * 60 * 1000
+        access="alt-cc-at", refresh="alt-cc-rt", expires_at_ms=NOW_MS + 4 * 60 * 1000
     )
-    w.dir_port("extra").blob = credential_to_blob(ending)
+    w.dir_port("alt").blob = credential_to_blob(ending)
 
     w.run()
 
-    assert w.stored("extra").refresh_token.reveal() == "extra-rt-1"
-    assert w.dir_port("extra").blob == credential_to_blob(ending)  # not written over either
+    assert w.stored("alt").refresh_token.reveal() == "alt-rt-1"
+    assert w.dir_port("alt").blob == credential_to_blob(ending)  # not written over either
 
 
 def test_vibe_broker_mirror_creates_the_dir_and_links_what_claude_shares(
@@ -665,17 +660,17 @@ def test_vibe_broker_mirror_refuses_the_default_dir_and_a_dir_another_account_ha
     run_world: World,
 ) -> None:
     assert run_world.main("broker", "mirror", "main", str(run_world.home / ".claude")) != 0
-    assert run_world.main("broker", "mirror", "extra", str(run_world.home / ".claude-main")) != 0
+    assert run_world.main("broker", "mirror", "alt", str(run_world.home / ".claude-main")) != 0
     assert broker.read_settings(run_world.root).mirrors == {}
 
 
-def test_a_tick_switch_with_the_broker_on_moves_the_default_mirror_and_keeps_both_lineages(
+def test_a_tick_with_the_broker_on_never_moves_the_default_mirror_to_another_account(
     tmp_home: Path,
 ) -> None:
     from tests.test_auto import NOW_S as AUTO_NOW_S
     from tests.test_auto import world as auto_world
 
-    w = auto_world(tmp_home, {"a": (99, 10), "b": (10, 10)}, live="a")  # a spent: switch to b
+    w = auto_world(tmp_home, {"a": (100, 100), "b": (0, 0)}, live="a")  # a spent, b has room
     w.port.blob = broker.mirror_blob(
         store.read_account(w.root, "a").credential, {"mcpOAuth": {"kept": True}}
     )
@@ -688,16 +683,15 @@ def test_a_tick_switch_with_the_broker_on_moves_the_default_mirror_and_keeps_bot
         client=w.client,
         port=w.port,
         now_s=AUTO_NOW_S,
-        notify=lambda _: None,
         port_for=lambda d: dirs.setdefault(str(d), FakeKeychain()),
         home=tmp_home,
     )
 
-    assert result.switched, result.line
+    assert result.line.startswith("live a"), result.line
     member = oauth_member(w.port.blob)
-    assert member["accessToken"] == "b-file" and "refreshToken" not in member
+    assert member["accessToken"] == "a-file" and "refreshToken" not in member
     assert json.loads(w.port.blob or "")["mcpOAuth"] == {"kept": True}
-    assert oauth_member(dirs[str(tmp_home / ".claude-a")].blob)["accessToken"] == "a-file"
+    assert store.read_active(w.root) == "a"
     assert store.read_account(w.root, "a").credential.refresh_token.reveal() == "a-rt"
     assert store.read_account(w.root, "b").credential.refresh_token.reveal() == "b-rt"
     assert [r for r in w.client.requests if r.url == oauth.TOKEN_URL] == []
@@ -739,14 +733,14 @@ def test_a_switch_landing_mid_pass_keeps_the_incoming_account_in_the_default_ite
     w: Broker,
 ) -> None:
     def switched() -> None:
-        store.write_active(w.root, "extra")
+        store.write_active(w.root, "alt")
 
-    # The switch has written extra's mirror into the default item by the time the pass writes.
-    w.port = Landing(broker.mirror_blob(w.stored("extra"), None), switched)
+    # The switch has written alt's mirror into the default item by the time the pass writes.
+    w.port = Landing(broker.mirror_blob(w.stored("alt"), None), switched)
 
     w.run()
 
-    assert oauth_member(w.port.blob)["accessToken"] == "extra-at-1"  # main's did not land over it
+    assert oauth_member(w.port.blob)["accessToken"] == "alt-at-1"  # main's did not land over it
 
 
 def test_off_leaves_a_login_vibe_did_not_write_in_the_default_item(w: Broker) -> None:
@@ -777,13 +771,13 @@ def test_the_live_account_cannot_be_removed_or_renamed_with_the_broker_on(
     run_world: World,
 ) -> None:
     assert run_world.main("remove", "main") != 0
-    assert run_world.main("alias", "extra", "spare") != 0
-    assert store.list_aliases(run_world.root) == ["extra", "main"]
+    assert run_world.main("alias", "alt", "spare") != 0
+    assert store.list_aliases(run_world.root) == ["alt", "main"]
 
 
 def test_a_dir_an_account_lives_in_is_never_a_mirror(tmp_home: Path) -> None:
     w = Broker(tmp_home)
-    account = store.read_account(w.root, "extra")
+    account = store.read_account(w.root, "alt")
     store.write_account(w.root, replace(account, config_dir=str(tmp_home / ".claude-main")))
     held = credential_to_blob(make_credential(access="cc-at", refresh="cc-rt"))
     w.dir_port("main").blob = held
@@ -796,7 +790,7 @@ def test_a_dir_an_account_lives_in_is_never_a_mirror(tmp_home: Path) -> None:
 
 
 def test_vibe_broker_mirror_refuses_a_config_dir_account_s_dir(run_world: World) -> None:
-    account = store.read_account(run_world.root, "extra")
+    account = store.read_account(run_world.root, "alt")
     store.write_account(
         run_world.root, replace(account, config_dir=str(run_world.home / ".claude-x"))
     )
@@ -810,8 +804,8 @@ def test_vibe_broker_mirror_refuses_a_config_dir_account_s_dir(run_world: World)
 def test_off_refuses_when_a_switch_lands_between_reading_active_and_the_claim(
     w: Broker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The reviewer's probe: extra is active and live; the first read of `active` says main."""
-    store.switch(w.root, "extra", w.port, now_s=NOW_S)
+    """The reviewer's probe: alt is active and live; the first read of `active` says main."""
+    store.switch(w.root, "alt", w.port, now_s=NOW_S)
     before = w.port.blob
     reads = iter(["main"])
     real = store.read_active
@@ -820,13 +814,13 @@ def test_off_refuses_when_a_switch_lands_between_reading_active_and_the_claim(
     with pytest.raises(VibeError, match="a switch just ran"):
         broker.turn_off(w.root, default_port=w.port, port_for=w.port_for, home=w.home)
 
-    assert w.port.blob == before  # main's whole login was not written over extra's mirror
+    assert w.port.blob == before  # main's whole login was not written over alt's mirror
     assert "refreshToken" not in oauth_member(w.port.blob)
     assert broker.is_on(w.root)  # still renewing
 
 
 def test_off_refuses_when_claude_codes_profile_names_another_account(w: Broker) -> None:
-    (w.home / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "uextra"}}))
+    (w.home / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "ualt"}}))
     before = w.port.blob
 
     with pytest.raises(VibeError, match="does not name main"):
@@ -892,15 +886,15 @@ def test_on_refuses_a_settings_file_it_cannot_save_before_writing_anything(
 
 def test_a_dead_login_is_never_answered_with_vibe_add(tmp_home: Path) -> None:
     w = Broker(tmp_home)
-    account = store.read_account(w.root, "extra")
+    account = store.read_account(w.root, "alt")
     store.write_account(
         w.root,
-        replace(account, state=AccountState.NEEDS_LOGIN, message="run: vibe add extra"),
+        replace(account, state=AccountState.NEEDS_LOGIN, message="run: vibe add alt"),
     )
 
     (problem,) = broker.problems(w.root, home=w.home)
 
-    assert "report it" in problem and "do not run vibe add extra" in problem
+    assert "report it" in problem and "do not run vibe add alt" in problem
 
 
 def test_a_run_refuses_a_login_of_the_same_account_vibe_has_not_taken_over_yet(

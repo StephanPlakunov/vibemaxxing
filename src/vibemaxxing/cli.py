@@ -50,7 +50,6 @@ from vibemaxxing.envelope import AccountView
 from vibemaxxing.errors import (
     NeedsLoginError,
     NetworkError,
-    NotFoundError,
     UsageError,
     VibeError,
 )
@@ -63,7 +62,7 @@ from vibemaxxing.httpclient import (
 )
 from vibemaxxing.keychain import KeychainPort, default_port
 from vibemaxxing.models import AccountState
-from vibemaxxing.pool import Policy, Step, dry_in
+from vibemaxxing.pool import dry_in
 from vibemaxxing.redact import Secret, err, install_excepthook, out
 from vibemaxxing.web import LOOPBACK
 
@@ -81,9 +80,6 @@ class Context:
     clock: Callable[[], float] = time.time
     prompt: Callable[[str], str] = input
     browser: Callable[[str], bool] = webbrowser.open
-    # What `vibe auto tick` tells the person after it switched. A field, not a call to
-    # auto.notify_macos, so a test that drives a switch never raises a real notification.
-    notify: Callable[[str], None] = auto.notify_macos
     # The store Claude Code keeps a second config dir's login in, for `vibe add
     # --from-config-dir`. Read only; a field so a test hands it a fake.
     port_for: Callable[[Path], KeychainPort] = keychain.config_dir_port
@@ -372,8 +368,8 @@ def _import(ctx: Context, wanted: str | None, given: Path, as_json: bool) -> int
     credential = credentials.parse_blob(blob)
     identity = credentials.read_claude_identity(directory / ".claude.json")
     if identity.account_uuid is None:
-        # Stored without one, vibe could never tell this account from the live one, and
-        # auto-switch never switches onto it (CONTRACT section 17).
+        # Stored without one, vibe could never tell this account from the live one
+        # (CONTRACT section 17).
         raise UsageError(
             f"{directory / '.claude.json'} names no account (oauthAccount.accountUuid)",
             f"CLAUDE_CONFIG_DIR={directory} claude",
@@ -403,7 +399,7 @@ def _import(ctx: Context, wanted: str | None, given: Path, as_json: bool) -> int
     if not store.valid_alias(alias):
         raise UsageError(
             f'"{alias}" is not a usable alias: lower-case letters, digits, dot, dash, underscore',
-            f"vibe add extra --from-config-dir {directory}",
+            f"vibe add work --from-config-dir {directory}",
         )
     _require_unused(ctx.root, alias)
     if store.read_active(ctx.root) == alias:
@@ -683,8 +679,6 @@ def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
             views,
             now_s=ctx.now_s,
             dry_in=None if dry is None else timedelta(seconds=dry),
-            auto=auto.read_settings(ctx.root),
-            last_switch=auto.read_last(ctx.root),
             cursor=[launch.cursor_entry(reading) for reading in readings],
             codex=[launch.codex_entry(reading) for reading in codex_seen],
         ),
@@ -748,128 +742,26 @@ def cmd_switch(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
-def _toggle_auto(args: argparse.Namespace, ctx: Context, *, on: bool) -> int:
-    settings = replace(auto.settings_for_edit(ctx.root), auto_switch=on)
-    auto.write_settings(ctx.root, settings)
-    word = "on" if on else "off"
-    _emit(
-        _action(f"auto {word}", enabled=on, threshold=settings.threshold),
-        as_json=args.json,
-        human=f"auto-switch is {word} (threshold {settings.threshold}%)\n",
-    )
-    return 0
-
-
-def cmd_auto_on(args: argparse.Namespace, ctx: Context) -> int:
-    return _toggle_auto(args, ctx, on=True)
-
-
-def cmd_auto_off(args: argparse.Namespace, ctx: Context) -> int:
-    return _toggle_auto(args, ctx, on=False)
-
-
-def cmd_auto_exclude(args: argparse.Namespace, ctx: Context) -> int:
-    if args.alias not in store.list_aliases(ctx.root):
-        raise NotFoundError(f'there is no account named "{args.alias}"', "vibe list")
-    settings = auto.settings_for_edit(ctx.root)
-    excluded = tuple(dict.fromkeys((*settings.excluded, args.alias)))
-    auto.write_settings(ctx.root, replace(settings, excluded=excluded))
-    _emit(
-        _action("auto exclude", alias=args.alias, excluded=list(excluded)),
-        as_json=args.json,
-        human=f'auto-switch will not switch to "{args.alias}"\n',
-    )
-    return 0
-
-
-def cmd_auto_include(args: argparse.Namespace, ctx: Context) -> int:
-    settings = auto.settings_for_edit(ctx.root)
-    excluded = tuple(alias for alias in settings.excluded if alias != args.alias)
-    auto.write_settings(ctx.root, replace(settings, excluded=excluded))
-    _emit(
-        _action("auto include", alias=args.alias, excluded=list(excluded)),
-        as_json=args.json,
-        human=f'auto-switch may switch to "{args.alias}" again\n',
-    )
-    return 0
-
-
-def _render_one_step(step: Step) -> str:
-    return f"{step.account} until {step.until}%"
-
-
-def _render_policy(policy: Policy, now_s: float) -> str:
-    steps = " -> ".join(_render_one_step(step) for step in policy.steps)
-    text = f"ordered: {steps}, then earliest reset"
-    if policy.block_models:
-        text += f"; {', '.join(policy.block_models)} weekly rows count too"
-    return text
-
-
-def _render_step(policy: Policy, index: int | None, now_s: float) -> str:
-    if index is None:
-        return "none has room - earliest reset"
-    step = policy.steps[index]
-    return f"{index + 1} of {len(policy.steps)}: {_render_one_step(step)}"
-
-
-def _render_status(status: auto.Status, now_s: float) -> str:
-    settings = status.settings
-    policy = settings.policy
+def _render_status(status: auto.Status) -> str:
     live = status.live or "unknown"
     if status.live is not None and status.active != status.live:
         live += f"  (vibe's active account is {status.active or 'unset'}"
         live += f" - run: vibe switch {status.live})"
-    last = "none"
-    if status.last is not None:
-        when = datetime.fromtimestamp(status.last.at_s).strftime("%Y-%m-%d %H:%M")
-        last = (
-            f"{status.last.from_alias} -> {status.last.to_alias} at {when}  ({status.last.reason})"
-        )
-    if not policy.steps:
-        return (
-            f"auto-switch  {'on' if settings.auto_switch else 'off'}\n"
-            f"threshold    {settings.threshold}%  cooldown {settings.cooldown_s}s\n"
-            f"excluded     {', '.join(settings.excluded) or 'none'}\n"
-            f"live         {live}\n"
-            f"last switch  {last}\n"
-            f"next         {status.next_alias or 'none'}\n"
-        )
-    # Collected only while the pointer agrees with the live account; otherwise unknown.
-    known = status.live is not None and status.live == status.active
-    return (
-        f"auto-switch  {'on' if settings.auto_switch else 'off'}\n"
-        f"policy       {_render_policy(policy, now_s)}\n"
-        f"cooldown     {settings.cooldown_s}s\n"
-        f"excluded     {', '.join(settings.excluded) or 'none'}\n"
-        f"live         {live}\n"
-        f"step         {_render_step(policy, status.step, now_s) if known else 'unknown'}\n"
-        f"last switch  {last}\n"
-        f"next step    {_render_step(policy, status.next_step, now_s) if known else 'unknown'}\n"
-    )
+    return f"live         {live}\n"
 
 
 def cmd_auto_status(args: argparse.Namespace, ctx: Context) -> int:
-    status = auto.status(ctx.root, client=ctx.client, port=ctx.port, now_s=ctx.now_s)
+    status = auto.status(ctx.root, port=ctx.port)
     _emit(
         _action(
             "auto status",
-            enabled=status.settings.auto_switch,
-            threshold=status.settings.threshold,
-            cooldown_s=status.settings.cooldown_s,
-            excluded=list(status.settings.excluded),
             live=status.live,
             active=status.active,
-            last_switch=envelope.last_switch_entry(status.last),
-            next=status.next_alias,
-            policy=auto.policy_document(status.settings.policy),
-            step=None if status.step is None else status.step + 1,
-            next_step=None if status.next_step is None else status.next_step + 1,
             broker=_broker_entries(ctx),
         ),
         as_json=args.json,
         # Only once it is on: an install that never used the broker reads as it always did.
-        human=_render_status(status, ctx.now_s)
+        human=_render_status(status)
         + "".join(f"{line}\n" for line in _broker_lines(ctx) if status_shows_broker(ctx)),
     )
     return 0
@@ -882,23 +774,12 @@ def cmd_auto_tick(args: argparse.Namespace, ctx: Context) -> int:
         client=ctx.client,
         port=ctx.port,
         now_s=ctx.now_s,
-        notify=ctx.notify,
         port_for=ctx.port_for,
     )
     _emit(
-        _action("auto tick", switched=result.switched, line=result.line),
+        _action("auto tick", line=result.line),
         as_json=args.json,
         human=result.line + "\n",
-    )
-    return 0
-
-
-def cmd_auto_undo(args: argparse.Namespace, ctx: Context) -> int:
-    record = auto.undo(ctx.root, client=ctx.client, port=ctx.port, now_s=ctx.now_s)
-    _emit(
-        _action("auto undo", alias=record.to_alias),
-        as_json=args.json,
-        human=f'Claude Code is back on "{record.to_alias}"\n',
     )
     return 0
 
@@ -1138,7 +1019,6 @@ def cmd_alias(args: argparse.Namespace, ctx: Context) -> int:
     else:
         _require_unused(ctx.root, args.new)
         store.rename_account(ctx.root, args.old, args.new)
-        auto.rename(ctx.root, args.old, args.new)
     _emit(
         _action("alias", old=args.old, new=args.new),
         as_json=args.json,
@@ -1196,16 +1076,12 @@ def _run_flags(args: argparse.Namespace) -> launch.RunFlags:
             )
     return launch.RunFlags(
         needs=needs,
-        no_needs=args.no_needs,
-        claude_only=args.claude_only,
         allow_force=args.allow_force,
         allow_fast=args.allow_fast,
         allow_no_zdr=args.allow_no_zdr,
         trust_workspace=args.trust_workspace,
         no_bridge=args.no_bridge,
         pass_env=tuple(name.strip() for name in (args.pass_env or "").split(",") if name.strip()),
-        brief=args.brief,
-        handover=args.handover,
     )
 
 
@@ -1239,13 +1115,10 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
     flags = _run_flags(args)
     plan = launch.plan_run(ctx.services(), args.alias, command, flags)
     # The child's environment is built on purpose, never inherited whole (childenv.py).
-    # Passthrough (`claude --version`, `claude mcp ...`) is the person's own command: unchanged.
-    child: childenv.ChildEnv | None = None
-    if not plan.passthrough:
-        child = childenv.build(
-            os.environ, strict=plan.kind == cursor.KIND_CURSOR, pass_env=flags.pass_env
-        )
-        # What was dropped is in the --json and --dry-run output (names only), not on every start.
+    # What was dropped is in the --json and --dry-run output (names only), not on every start.
+    child = childenv.build(
+        os.environ, strict=plan.kind == cursor.KIND_CURSOR, pass_env=flags.pass_env
+    )
     # Last, so the line about a move to Cursor's own UI is the final thing before it starts.
     for note in plan.notes:
         _say(note)
@@ -1258,23 +1131,15 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
                 argv=list(plan.argv),
                 dry_run=True,
                 notes=list(plan.notes),
-                env_dropped=list(child.dropped) if child else [],
+                env_dropped=list(child.dropped),
             ),
             as_json=args.json,
             human=f"would run on {plan.alias} ({plan.kind}): {' '.join(plan.argv)}\n",
         )
         return 0
-    # Which account this session is, for its status line: "live" follows Claude Code's own login
-    # (and so the background switch); an alias is fixed for the life of the session.
-    session = (
-        childenv.SESSION_LIVE
-        if plan.kind == cursor.KIND_CLAUDE and plan.config_dir is None and not plan.claude_token
-        else plan.alias
-    )
-    marked = {**child.env, childenv.SESSION_VAR: session} if child is not None else {}
-    if child is None:
-        code = _spawn(plan.argv, None)  # `claude --version` and friends: no account involved
-    elif plan.kind == cursor.KIND_CURSOR:
+    # Which account this session is, for its status line: fixed for the life of the session.
+    marked = {**child.env, childenv.SESSION_VAR: plan.alias}
+    if plan.kind == cursor.KIND_CURSOR:
         # No credential of ours goes anywhere: cursor-agent reads its own login.
         code = _spawn(plan.argv, marked)
     elif plan.mirror and plan.config_dir is not None:
@@ -1295,9 +1160,6 @@ def cmd_run(args: argparse.Namespace, ctx: Context) -> int:
         # token of ours, so a session that outlives the access token keeps its login, and vibe
         # starting another run can never take it away.
         code = _spawn(plan.argv, {**marked, "CLAUDE_CONFIG_DIR": plan.config_dir})
-    elif not plan.claude_token:
-        # Claude Code's own login: no token override, and no inherited Claude variable either.
-        code = _spawn(plan.argv, marked)
     else:
         credential = _fresh_token(ctx, plan.alias)
         if cursor_translate.is_claude_command(plan.argv) and not {"-p", "--print"} & set(plan.argv):
@@ -1519,24 +1381,11 @@ def cmd_bridge_add(args: argparse.Namespace, ctx: Context) -> int:
     out(
         "run this yourself (vibe does not): it registers vibe-bridge with that config dir only\n"
         f"  {command}\n"
-        "note: `vibe run` and `vibe run auto` now add the bridge by themselves to a Claude run\n"
+        "note: `vibe run` adds the bridge by itself to a Claude run\n"
         "on an account without Slack or Atlassian (a vibe-owned --mcp-config; `--no-bridge`\n"
         "turns it off), because such a run does not read this config dir. Register it by hand\n"
         "only for a session you start without `vibe run`.\n"
     )
-    return 0
-
-
-SHELL_INIT: Final = """# vibemaxxing (add to ~/.zshrc): `claude` itself stays plain Claude Code
-# cw: Claude, work - a session that may need Slack or Jira
-cw() { vibe run auto -- claude "$@"; }
-# cs: Claude, solo - a session that needs no connectors
-cs() { vibe run auto --no-needs -- claude "$@"; }
-"""
-
-
-def cmd_shell_init(args: argparse.Namespace, ctx: Context) -> int:
-    out(SHELL_INIT)
     return 0
 
 
@@ -1554,17 +1403,14 @@ Getting started
 Every day
   vibe                        the dashboard, in the terminal
   vibe list                   each account's limits and the pooled headroom
-  cw                          a session that may need Slack or Jira (vibe picks the account)
-  cs                          a session that needs no connectors (vibe picks the account)
-  vibe run main|extra|cursor  a session on that account (`-- <cmd>` runs something else)
-  vibe shell-init             print the zsh snippet that defines `cw` and `cs`
+  vibe run <alias>            a session on that account (`-- <cmd>` runs something else)
   vibe add cursor --kind cursor
                               a Cursor seat (log in with `cursor-agent login` first)
   vibe add codex --kind codex
                               a Codex account's plan usage (log in with `codex login` first)
   vibe usage web              the same dashboard in a browser, http://127.0.0.1:8787
 
-Connector bridge (for a session on the extra account)
+Connector bridge (for a session on an account without connectors)
   vibe bridge login atlassian|slack     your own OAuth login, in the browser (run it yourself)
   vibe bridge status|tools|logout       who is logged in; what the upstream offers; forget a login
   vibe bridge add-command               print the `claude mcp add` line (it never runs it)
@@ -1577,27 +1423,24 @@ Status line
 Housekeeping
   vibe alias old new          rename an account
   vibe remove work            forget an account (the login itself is not revoked)
-  vibe release work           move a --from-config-dir login into vibe, so auto-switch can
-                              use it; the dir's own login is deleted
+  vibe release work           move a --from-config-dir login into vibe, so the token broker
+                              renews it; the dir's own login is deleted
   vibe usage --once           fetch the numbers once and print them
   vibe --version              the installed version
 
 Token broker (off until you turn it on; docs/BROKER.md)
   vibe broker on              vibe renews every login; Claude Code reads mirrors with no
-                              refresh token, so `vibe run main` stays on main for good and
-                              cs/cw/claude follow the switch; `off` gives the login back
+                              refresh token, so `vibe run main` stays on main for good;
+                              `off` gives the login back
   vibe broker mirror main     create ~/.claude-main (links CLAUDE.md, settings, skills, projects)
   vibe broker status          when each token ends and is renewed, its mirrors, any problem
 
-Automatic switching (off until you turn it on)
-  vibe auto on                leave the live account for the one with the most room once its
-                              session or week reaches 99%; `off` stops it
-  vibe auto status            the settings, who is live, the last switch, where one would go
-  vibe auto tick              check once and switch if it is due; a scheduler runs this
+Background tick (vibe never switches accounts by itself)
+  vibe auto tick              renew the broker's logins and fetch every account's numbers
+                              once, for the status lines; a scheduler runs this
   vibe auto install           macOS: write the launchd job that does that every minute, and
                               print the one command that loads it
-  vibe auto exclude work      never switch to that account; `include` allows it again
-  vibe auto undo              go back to the account the last automatic switch left
+  vibe auto status            who is live, and the token broker's state
 
 switch or run?
   `switch` is global and lasts: every shell, until you switch again. It swaps the
@@ -1681,14 +1524,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json(switch)
     switch.set_defaults(handler=cmd_switch)
 
-    run = subs.add_parser(
-        "run", help="a session on one account: main, extra or cursor (`cw`/`cs` pick it for you)"
-    )
-    run.add_argument("alias", help="main, extra or cursor (`auto` is what `cw` and `cs` run)")
-    # What `cw` and `cs` (and agents) pass to `vibe run auto`; not part of the everyday surface.
+    run = subs.add_parser("run", help="a session on one account (an alias from `vibe list`)")
+    run.add_argument("alias", help="an account alias from `vibe list`")
+    # On a Cursor account: the connectors the run needs (refused when the seat lacks one).
     run.add_argument("--needs", metavar="LIST", help=argparse.SUPPRESS)
-    run.add_argument("--no-needs", action="store_true", help=argparse.SUPPRESS)
-    run.add_argument("--claude-only", action="store_true", help=argparse.SUPPRESS)
     run.add_argument(
         "--allow-force", action="store_true", help="on Cursor: let bypassPermissions mean --force"
     )
@@ -1711,8 +1550,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="on Cursor: pass --trust (headless runs refuse a workspace nobody trusted)",
     )
-    run.add_argument("--brief", metavar="TEXT", help=argparse.SUPPRESS)
-    run.add_argument("--handover", type=Path, metavar="FILE", help=argparse.SUPPRESS)
     run.add_argument("--dry-run", action="store_true", help="print what would run; run nothing")
     # The command is cut off before parsing (split_run_command); nothing is left for argparse.
     _add_json(run)
@@ -1720,7 +1557,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     bridge_cmd = subs.add_parser(
         "bridge",
-        help="vibe-bridge: Slack and Atlassian reads for a session on extra (your own login)",
+        help="vibe-bridge: Slack and Atlassian reads through your own login",
     )
     bridge_subs = bridge_cmd.add_subparsers(dest="bridge_command", required=True)
     serve = bridge_subs.add_parser("serve", help="the stdio MCP server (Claude Code starts it)")
@@ -1747,15 +1584,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json(tools)
     tools.set_defaults(handler=cmd_bridge_tools)
     add_cmd = bridge_subs.add_parser(
-        "add-command", help="print the `claude mcp add` command for the extra config dir"
+        "add-command", help="print the `claude mcp add` command for a config dir"
     )
-    add_cmd.add_argument("--config-dir", default="~/.claude-extra")
+    add_cmd.add_argument("--config-dir", default="~/.claude-<alias>")
     add_cmd.set_defaults(handler=cmd_bridge_add)
-
-    init = subs.add_parser(
-        "shell-init", help="print the zsh snippet for `cw` (connectors) and `cs` (solo)"
-    )
-    init.set_defaults(handler=cmd_shell_init)
 
     remove = subs.add_parser("remove", help="forget an account")
     remove.add_argument("alias")
@@ -1811,31 +1643,20 @@ def build_parser() -> argparse.ArgumentParser:
     use.set_defaults(handler=cmd_usage)
 
     automatic = subs.add_parser(
-        "auto", help="switch accounts by itself when the live one is nearly spent"
+        "auto", help="the background tick: token renewal and fresh numbers (never a switch)"
     )
     auto_subs = automatic.add_subparsers(
         dest="auto_command",
         required=True,
-        metavar="{on,off,status,exclude,include,undo,tick,install,uninstall}",
+        metavar="{status,tick,install,uninstall}",
     )
     for name, handler, summary in (
-        ("on", cmd_auto_on, "turn automatic switching on"),
-        ("off", cmd_auto_off, "turn automatic switching off"),
-        ("status", cmd_auto_status, "show the settings, the live account and where a switch goes"),
-        ("undo", cmd_auto_undo, "go back to the account the last automatic switch left"),
-        ("tick", cmd_auto_tick, "check once and switch if it is due (what a scheduler runs)"),
+        ("status", cmd_auto_status, "show who is live and the token broker's state"),
+        ("tick", cmd_auto_tick, "renew logins and fetch the numbers once (what a scheduler runs)"),
         ("install", cmd_auto_install, "macOS: write the launchd job that runs a tick a minute"),
         ("uninstall", cmd_auto_uninstall, "macOS: remove that job's file"),
     ):
         auto_sub = auto_subs.add_parser(name, help=summary)
-        _add_json(auto_sub)
-        auto_sub.set_defaults(handler=handler)
-    for name, handler, summary in (
-        ("exclude", cmd_auto_exclude, "never switch automatically to this account"),
-        ("include", cmd_auto_include, "allow switching to this account again"),
-    ):
-        auto_sub = auto_subs.add_parser(name, help=summary)
-        auto_sub.add_argument("alias")
         _add_json(auto_sub)
         auto_sub.set_defaults(handler=handler)
 
@@ -1858,14 +1679,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-_RUN_VALUE_FLAGS: Final = ("--needs", "--brief", "--handover", "--pass-env")
+_RUN_VALUE_FLAGS: Final = ("--needs", "--pass-env")
 # vibe's own `run` options, which may also follow the alias when no `--` comes after it
 # (`vibe run cursor --dry-run`): a session with no command, not a command named `--dry-run`.
 _RUN_FLAGS: Final = frozenset(
     {
         *_RUN_VALUE_FLAGS,
-        "--no-needs",
-        "--claude-only",
         "--allow-force",
         "--allow-fast",
         "--allow-no-zdr",

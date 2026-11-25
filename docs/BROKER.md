@@ -1,15 +1,15 @@
-# The token broker: one login per account, fixed and switching sessions side by side
+# The token broker: one login per account, sessions fixed to one account
 
 `vibe broker on` makes vibe the **only refresher** of every Claude account it holds. Every Claude Code
 login that Claude Code reads becomes a **mirror**: a Keychain item that vibe keeps filled with the
 account's current access token and **no refresh token**.
 
-- `vibe run main` / `vibe run extra` start Claude Code in that account's own mirror dir
-  (`~/.claude-main`, `~/.claude-extra`). They set `CLAUDE_CONFIG_DIR` and no token variable, so the
+- `vibe run main` / `vibe run work` start Claude Code in that account's own mirror dir
+  (`~/.claude-main`, `~/.claude-work`). They set `CLAUDE_CONFIG_DIR` and no token variable, so the
   session stays on that account for good, never dies from its token, and the status line shows
   `▶ main (fixed)`.
-- `cs`, `cw` and a plain `claude` use Claude Code's default item (`~/.claude`). It mirrors whichever
-  account the background switch made live, so they follow the switch as before.
+- A plain `claude` uses Claude Code's default item (`~/.claude`). It mirrors whichever account
+  `vibe switch` made live.
 - There is exactly one login per account: the refresh token is in vibe's store and nowhere else, so
   nothing can log anything else out.
 
@@ -94,17 +94,17 @@ live service yet**; see the cutover plan.
 
 | Part | What it does |
 |---|---|
-| `settings.json` → `"broker": {"on": bool, "mirrors": {alias: dir}, "refresh_left": 0.5}` | Off, and unreadable values, mean off. An alias with no entry mirrors into `~/.claude-<alias>`. `vibe auto on/off` keep the member. |
+| `settings.json` → `"broker": {"on": bool, "mirrors": {alias: dir}, "refresh_left": 0.5}` | Off, and unreadable values, mean off. An alias with no entry mirrors into `~/.claude-<alias>`. |
 | `~/.vibemaxxing/broker.json` | Per account: issue time of the current token, last refresh, last problem, failures, next retry, and the mirrors written. |
-| `broker.run` (each tick, before auto-switch, **also while auto-switch is off**) | Per account vibe holds (not Cursor, not a config-dir account): **take over** a full login Claude Code made in a mirror (`claude /login`) if it is the same account, newer, and not within 10 min of its end; **refresh** when due (half the lifetime left, at the latest 1 h before the end; through `oauth.refresh` with its claim, stash and dead-token mark); **rewrite every mirror** (its dir once the dir exists, plus the default item if it is the active account) when its content differs. |
-| A failed refresh | Writes nothing: every mirror keeps its token until that really ends. Reported in `vibe broker status`, `vibe auto status`, `vibe list` (`broker problem: …`) and the tick line. Retries after 1, 2, 4, 8, then every 15 min. A rejected refresh token is marked dead and never posted again; the message says to report it and not to run `vibe add` (a new sign-in, impossible for extra). |
+| `broker.run` (each tick, first) | Per account vibe holds (not Cursor, not a config-dir account): **take over** a full login Claude Code made in a mirror (`claude /login`) if it is the same account, newer, and not within 10 min of its end; **refresh** when due (half the lifetime left, at the latest 1 h before the end; through `oauth.refresh` with its claim, stash and dead-token mark); **rewrite every mirror** (its dir once the dir exists, plus the default item if it is the active account) when its content differs. |
+| A failed refresh | Writes nothing: every mirror keeps its token until that really ends. Reported in `vibe broker status`, `vibe auto status`, `vibe list` (`broker problem: …`) and the tick line. Retries after 1, 2, 4, 8, then every 15 min. A rejected refresh token is marked dead and never posted again; the message says to report it and not to run `vibe add` (a new sign-in, which an account may not allow). |
 | A login vibe did not write (another account's) | Never written over; reported. |
 | `oauth.refresh` | Refuses the active account only while the broker is off; with it on, the default item holds no refresh token and vibe refreshes every account. |
 | `store.switch` | Resyncs the outgoing account from the default item only if that item holds a refresh token (never copies a mirror into the store). With the broker on, writes the incoming account into the default item as a mirror. |
 | `auto.renewal_wait` | No wait for a mirror: Claude Code cannot renew one. |
 | Polls (`vibe list`, TUI, web, tick) | With the broker on, the active account is read from the store like any other. |
-| `vibe run <alias>` (and `vibe run auto` when it picks an account that is not live) | Broker on and the account is vibe's: create `~/.claude-<alias>` (0700) if missing, link `CLAUDE.md`, `settings.json`, `skills` and `projects` from `~/.claude`, refresh if due, write the mirror and `oauthAccount` (with `organizationUuid`) into `<dir>/.claude.json`, then start Claude Code with `CLAUDE_CONFIG_DIR=<dir>`, `VIBE_SESSION=<alias>`, and **no** `CLAUDE_CODE_OAUTH_TOKEN` (inherited ones are dropped). `--dry-run` writes nothing. A dead login starts nothing. |
-| Status line | A session in a mirror dir is `▶ <alias> (fixed)`, from `VIBE_SESSION` or, without it, from the mirror dir in `settings.json`. `cs`/`cw`/plain `claude` show the live account. |
+| `vibe run <alias>` | Broker on and the account is vibe's: create `~/.claude-<alias>` (0700) if missing, link `CLAUDE.md`, `settings.json`, `skills` and `projects` from `~/.claude`, refresh if due, write the mirror and `oauthAccount` (with `organizationUuid`) into `<dir>/.claude.json`, then start Claude Code with `CLAUDE_CONFIG_DIR=<dir>`, `VIBE_SESSION=<alias>`, and **no** `CLAUDE_CODE_OAUTH_TOKEN` (inherited ones are dropped). `--dry-run` writes nothing. A dead login starts nothing. |
+| Status line | A session in a mirror dir is `▶ <alias> (fixed)`, from `VIBE_SESSION` or, without it, from the mirror dir in `settings.json`. A plain `claude` shows the live account. |
 | `vibe broker on` | Needs vibe's active account to be the live one. Waits while the live login ends within 10 min (`auto.renewal_wait`). Under that account's refresh claim: takes the login Claude Code holds in the default item into the store, writes the mirror over it (siblings kept), sets `on`, then runs one pass. |
 | `vibe broker off` | Under the active account's claim and Claude Code's write lock: refuses, changing nothing, when a switch landed since it read the active account or `~/.claude.json` names another account; otherwise sets `off` first, folds a refresh stash into the account file, then gives the live account's **whole** login back to the default item (Claude Code renews it again). Deletes every dir mirror (they could not renew). Leaves a login vibe did not write alone. Also undoes a `broker on` that stopped half way (the default item a mirror of the active account, the setting off). |
 | Races | Every write of the default item (`switch`, `broker on/off`, a mirror) holds Claude Code's own `~/.claude/.storage-write.lock`; a mirror write asks again under that lock whether the broker is still on and (default item) the account still active, so a `broker off` or a switch in another process mid-pass is never undone. `broker on` sets `on` under the claim and the lock. |

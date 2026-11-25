@@ -21,15 +21,8 @@ from vibemaxxing.errors import StoreError, VibeError
 from vibemaxxing.httpclient import HttpClient, HTTPError
 from vibemaxxing.keychain import KeychainPort
 from vibemaxxing.models import AccountState
-from vibemaxxing.poll import BACKOFF_S, POLL_FLOOR_S, USAGE_FRESH_S, USAGE_WAIT_CAP_S
-from vibemaxxing.pool import (
-    WEEKLY_ALL_KIND,
-    AccountUsage,
-    LastSwitch,
-    Settings,
-    parse_stamp,
-    pool_remaining,
-)
+from vibemaxxing.poll import BACKOFF_S, USAGE_FRESH_S, USAGE_WAIT_CAP_S
+from vibemaxxing.pool import WEEKLY_ALL_KIND, AccountUsage, parse_stamp, pool_remaining
 from vibemaxxing.redact import scrub
 from vibemaxxing.usage import Summary
 
@@ -175,9 +168,8 @@ def _usage_view(
     never past USAGE_WAIT_CAP_S) and, when an answer under USAGE_WAIT_CAP_S old
     exists, still shows it rather than blanking the account.
 
-    ``fresh_s`` is how old an answer may be and still be served without a request.
-    The auto-switch tick shortens it to POLL_FLOOR_S for the live account while that
-    account is close to its limit; the backoff check below still comes first.
+    ``fresh_s`` is how old an answer may be and still be served without a request; the
+    backoff check below still comes first.
     """
     alias = account.alias
     cached = store.read_usage_cache(root, alias)
@@ -478,12 +470,9 @@ def collect(
     port: KeychainPort,
     now_s: float,
     fetch: bool = True,
-    fast: frozenset[str] = frozenset(),
     port_for: Callable[[Path], KeychainPort] = keychain.config_dir_port,
 ) -> list[AccountView]:
-    """Every account's view. ``fast`` names the accounts whose usage answer may be
-    reused for POLL_FLOOR_S instead of USAGE_FRESH_S: an account close to its limit,
-    where three minutes is too long to find out that it is there."""
+    """Every account's view."""
     active = store.read_active(root)
     return [
         _view(
@@ -494,7 +483,6 @@ def collect(
             port=port,
             now_s=now_s,
             fetch=fetch,
-            fresh_s=POLL_FLOOR_S if alias in fast else USAGE_FRESH_S,
             port_for=port_for,
         )
         for alias in store.list_aliases(root)
@@ -527,17 +515,6 @@ def account_entry(view: AccountView) -> dict[str, object]:
             {"label": row.label, "percent": row.percent}
             for row in (summary.breakdown if summary else ())
         ],
-    }
-
-
-def last_switch_entry(last: LastSwitch | None) -> dict[str, object] | None:
-    if last is None:
-        return None
-    return {
-        "from": last.from_alias,
-        "to": last.to_alias,
-        "at": _iso(last.at_s),
-        "reason": last.reason,
     }
 
 
@@ -574,21 +551,11 @@ def resets(views: Sequence[AccountView]) -> list[dict[str, object]]:
     return [entry for _, entry in sorted(found, key=lambda pair: pair[0])]
 
 
-def auto_switch_entry(settings: Settings, last: LastSwitch | None) -> dict[str, object]:
-    return {
-        "enabled": settings.auto_switch,
-        "threshold": settings.threshold,
-        "last_switch": last_switch_entry(last),
-    }
-
-
 def build(
     views: Sequence[AccountView],
     *,
     now_s: float,
     dry_in: timedelta | None = None,
-    auto: Settings | None = None,
-    last_switch: LastSwitch | None = None,
     cursor: Sequence[Mapping[str, object]] = (),
     codex: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
@@ -602,7 +569,6 @@ def build(
             "dry_in_seconds": None if dry_in is None else int(dry_in.total_seconds()),
         },
         "resets": resets(views),
-        "auto_switch": auto_switch_entry(auto if auto is not None else Settings(), last_switch),
     }
     if cursor:
         # Additive and only when a Cursor account is stored, so a Claude-only setup emits the

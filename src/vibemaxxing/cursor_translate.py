@@ -1,6 +1,6 @@
 """A Claude Code command line, as a `cursor-agent` one.
 
-`vibe run cursor -- claude <args>` and a `vibe run auto` that picks Cursor both come here.
+`vibe run cursor -- claude <args>` comes here.
 The rule is the one in the README: every Claude flag either has a mapping below or is
 refused by name. Nothing is silently dropped, because a dropped `--permission-mode` or
 `--allowedTools` is a run with a different safety posture than the one that was asked for.
@@ -89,48 +89,6 @@ def _split_eq(token: str) -> tuple[str, str | None]:
         flag, value = token.split("=", 1)
         return flag, value
     return token, None
-
-
-def strip_resume(args: Sequence[str]) -> tuple[list[str], bool]:
-    """``args`` without `--resume [id]`, `-r [id]` and `--continue`; and whether any was there.
-
-    For a run moved to another kind of account: a Claude session id cannot be resumed on Cursor,
-    nor a Cursor chat id by Claude, so the move is a fresh run and says so.
-    """
-    kept: list[str] = []
-    removed = False
-    index = 0
-    while index < len(args):
-        token = args[index]
-        flag, value = _split_eq(token)
-        if token == "--":
-            kept.extend(args[index:])
-            break
-        if flag in _CONTINUE_FLAGS:
-            removed = True
-        elif flag in _RESUME_FLAGS:
-            removed = True
-            nxt = args[index + 1] if index + 1 < len(args) else None
-            if value is None and nxt is not None and not nxt.startswith("-"):
-                index += 1  # the id
-        else:
-            kept.append(token)
-        index += 1
-    return kept, removed
-
-
-def resume_id(args: Sequence[str]) -> str | None:
-    """The id given to `--resume`/`-r`, if there is one."""
-    for index, token in enumerate(args):
-        if token == "--":
-            return None
-        flag, value = _split_eq(token)
-        if flag in _RESUME_FLAGS:
-            if value is not None:
-                return value
-            nxt = args[index + 1] if index + 1 < len(args) else None
-            return nxt if nxt is not None and not nxt.startswith("-") else None
-    return None
 
 
 def is_not_a_session(args: Sequence[str]) -> bool:

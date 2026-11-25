@@ -74,11 +74,11 @@ src/vibemaxxing/
   keychain.py      C1  KeychainPort, MacKeychain, FileKeychain
   oauth.py         C1  PKCE, authorize URL, exchange, refresh consume gate
   usage.py         C2  usage client + summarize
-  pool.py          C2  pool_remaining, dry_in; decide, Settings, LastSwitch (0.3.0)
+  pool.py          C2  pool_remaining, dry_in
   history.py       C3  SQLite samples, prune
   poll.py          C3  Scheduler (floor, stagger, backoff)
   envelope.py      D   the --json envelope, shared by CLI and web
-  auto.py          H   settings.json, auto.json, tick, undo, status, notify, launchd job
+  auto.py          H   tick (broker, numbers, status.json), status, launchd job; never a switch
   cli.py           D   argparse dispatch
   tui.py           E1  Textual dashboard
   web.py           E2  web dashboard server
@@ -89,7 +89,6 @@ tests/
   fixture_usage.json B copied verbatim from claude-usage-dashboard
 scripts/
   verify_switch_live.py  G  live Keychain round trip — never run from pytest
-  verify_auto_live.py    H  live switch between two throwaway accounts — never run from pytest
 ```
 
 Letters are phases: **B** solo skeleton, **C1/C2/C3** the three Phase-C writers,
@@ -120,9 +119,8 @@ loads nothing else; `auto` writes the file through it. `entry` imports `statusli
 `cli`, never both.
 
 `auto` (0.3.0) sits above `envelope`, which it asks for the numbers, and below `cli`,
-`tui` and `web`, which only read its settings and its last-switch record. The decision
-itself, `pool.decide`, stays in `pool` and imports no I/O: `pool` is below `envelope` and
-cannot name `AccountView`, so `auto` hands it `pool.Reading`s built from the views.
+`tui` and `web`, which call its `publish`. (fork) It decides nothing: the switching decision
+(`pool.decide`) is gone (§17).
 
 ---
 
@@ -298,8 +296,7 @@ Root is `Path.home() / ".vibemaxxing"`. No environment override: tests set `HOME
   locks/<alias>.claim           0600   refresh in-flight claim, with a lease
   usage/<alias>.json            0600   last usage answer and backoff, shared by every process
   active                        0600   one line: the alias whose credential is live
-  settings.json                 0600   automatic switching: on/off, threshold, cooldown, exclusions
-  auto.json                     0600   the last switch, whoever made it (§17)
+  settings.json                 0600   `routing` (connectors, bridge) and `broker` members (§17)
   status.json                   0600   what the status line prints, rewritten by every collect (§18)
   history.db                    0600   the sample series
 ```
@@ -678,7 +675,7 @@ predecessor; that counts as a failure, not a success. A lineage the server rejec
 raises `NeedsLoginError` with `vibe add <alias>`; a refresh that merely could not be
 confirmed (a 5xx, a busy claim, `invalid_client`) raises `NetworkError` with
 `vibe switch <alias>`, because a browser login is the wrong advice for an upstream
-hiccup. `vibe switch` and the auto-switch tick both call it before `store.switch`, so
+hiccup. `vibe switch` calls it before `store.switch`, so
 `vibe switch` to an account with an expired access token now makes one request and no
 longer works offline for that account.
 
@@ -869,25 +866,12 @@ schema. AC17 pins it.
   "resets": [
     {"alias": "work", "at": "2026-09-19T13:00:00+00:00"},
     {"alias": "old", "at": "2026-09-22T21:00:00+00:00"}
-  ],
-  "auto_switch": {
-    "enabled": false,
-    "threshold": 99,
-    "last_switch": {
-      "from": "work", "to": "side", "at": "2026-09-15T10:20:00+00:00",
-      "reason": "work session at 99%; side is at 10%"
-    }
-  }
+  ]
 }
 ```
 
-`auto_switch` (0.3.0) is **additive**: `ENVELOPE_SCHEMA` stays 1 and no existing key moved.
-`enabled` and `threshold` are the effective settings (§17), so a missing or invalid
-`settings.json` shows the defaults, `false` and `99`, and never an error. `last_switch` is
-the record in `auto.json` as `{from, to, at, reason}`, or `null` when there is none; the
-internal `until` field is not part of the envelope. `vibe list --json` and `GET /api/usage`
-build the block the same way from the same two reads. The block is present in every
-envelope, whatever the settings say.
+(fork) The `auto_switch` block of 0.3.0 is gone with automatic switching (§17): no envelope has
+that key any more. `ENVELOPE_SCHEMA` stays 1.
 
 `updated_at` is when that account's numbers were fetched, which can be earlier than
 `generated_at`: §14's shared cache serves an answer up to `USAGE_FRESH_S` old without a
@@ -926,13 +910,10 @@ network round trip the command did not need:
 ```
 
 `action` is the subcommand name; the remaining keys name what it acted on (`alias`, or
-`old`/`new` for `alias`, plus `exit_code` for `run` and `adopted` for `add`). (0.3.0) The
-`vibe auto` subcommands use the same envelope with `action` `"auto <sub>"`: `auto tick`
-adds `switched` and `line`, `auto status` adds `enabled`, `threshold`, `cooldown_s`,
-`excluded`, `live`, `active`, `last_switch` and `next`, `auto install` adds `plist` and
-`load`, `auto uninstall` adds `removed` and `unload`, and `auto exclude|include` add
-`alias` and `excluded`. (fork) `auto status` also adds `policy` (the settings member, or
-`null`), `step` and `next_step` (1-based, or `null`), and `add --from-config-dir` adds
+`old`/`new` for `alias`, plus `exit_code` for `run` and `adopted` for `add`). The
+`vibe auto` subcommands use the same envelope with `action` `"auto <sub>"`: (fork) `auto tick`
+adds `line`, `auto status` adds `live`, `active` and `broker`, `auto install` adds `plist` and
+`load`, `auto uninstall` adds `removed` and `unload`. `add --from-config-dir` adds
 `config_dir`. `vibe statusline` prints its line and has no envelope.
 
 `envelope.py` also owns `collect()`, which does the reads, the refreshes and the usage
@@ -1245,21 +1226,8 @@ inside `envelope.collect`, so the CLI, the TUI and the web dashboard all obey it
   clock stepped back) or more than `USAGE_WAIT_CAP_S` old.
 - The profile request that fills in a missing plan goes out only on a cycle that is
   already fetching usage.
-- (0.3.0) **Faster polling of the live account.** The auto-switch tick (§17) names the live
-  account to `envelope.collect(..., fast=...)` when its cached answer already has a
-  `session` or `weekly_all` row at 90% or more whose reset is still ahead or unknown. For
-  that account only, an answer is reused for `POLL_FLOOR_S` (60 s) instead of
-  `USAGE_FRESH_S`, so it is asked at most once a minute. This is one parameter (`fresh_s`)
-  on the existing `_usage_view` path, not a second fetcher, and the backoff check still
-  comes before any fetch, so a 429 outranks it. Every other surface passes nothing and
-  behaves as before.
-  **Effective cadence is 60 to 120 s, not 60 s.** An answer is reused while `age < 60`, so
-  a tick that a scheduler fires even slightly early reuses it and the next request waits
-  for the tick after: between one and two intervals, by scheduler jitter. Up to 60
-  requests an hour for the hot account at the fast end, against the ~28-30 an hour measured
-  for one identity (above), for as long as it stays at 90% or more. A 429 puts it on the
-  backoff ladder, which is obeyed. This is a known cost of being fast where it matters,
-  not a guarantee that the budget holds; it was not measured against the live endpoint.
+- (fork) The faster polling of the live account (0.3.0) went with automatic switching (§17):
+  every surface reuses an answer for `USAGE_FRESH_S`.
 
 ---
 
@@ -1277,11 +1245,7 @@ vibe remove <alias> [--json]
 vibe alias <old> <new> [--json]
 vibe usage --once [--json]
 vibe usage web [--host 127.0.0.1] [--port N]
-vibe auto on|off [--json]                (0.3.0, §17)
-vibe auto status [--json]
-vibe auto exclude <alias> [--json]
-vibe auto include <alias> [--json]
-vibe auto undo [--json]
+vibe auto status [--json]                (§17)
 vibe auto tick [--json]
 vibe auto install [--json]               macOS only
 vibe auto uninstall [--json]             macOS only
@@ -1354,261 +1318,43 @@ existing tests stay green without one, and an override is how a login gets lost.
 
 ---
 
-## 17. Automatic switching — `auto.py`, `pool.decide` (0.3.0)
+## 17. The background tick — `auto.py` (fork: automatic switching removed)
 
-Off until `vibe auto on`. When it is on and the live account's `session` or `weekly_all`
-row reaches the threshold, a tick switches Claude Code to the eligible account with the
-most room. The unit a scheduler calls is `vibe auto tick`; nothing in the package runs it
-by itself.
+0.3.0 added automatic switching (`vibe auto on|off|exclude|include|undo`, `pool.decide`,
+`auto.json`), and the fork added an ordered policy and the routing of `vibe run auto` (§19).
+The fork removed all of it: vibe never changes the account Claude Code uses by itself, and never
+picks the account for a run. The person switches (`vibe switch`) and names the account
+(`vibe run <alias>`).
 
-### `settings.json`
+What is left is the tick a scheduler calls every minute, `vibe auto tick` (`auto.tick`):
 
-```json
-{"schema": 1, "auto_switch": false, "threshold": 99, "cooldown_s": 900, "excluded": []}
-```
+1. `broker.run` (the token broker's pass, `docs/BROKER.md`), whether or not the broker has
+   anything to do.
+2. The numbers: when `store.live_alias` is known and equals `store.read_active`,
+   `envelope.collect` for every Claude account (the shared caches of §14 decide what is
+   fetched). `cmd_auto_tick` first calls `Context.refresh_cursor_cache` for each Cursor seat.
+   An unknown live login, or a pointer off the live login, fetches nothing: polling would treat
+   the pointer's account as the one in use and refresh the live one's token behind Claude Code's
+   back. The line names the fix, `vibe switch <live>`.
+3. `publish_status` writes `status.json` (§18), and every `LOG_EVERY_S` (300 s) one line goes to
+   `ticks.jsonl` (`at`, `live`, `pct`, `line`).
 
-Written with `fsutil.write_private` (`0600`). `threshold` is an integer 50..100,
-`cooldown_s` an integer >= 0, `excluded` a list of valid aliases. `auto.read_settings` is
-the one place the file is validated, and a file that is missing, unreadable, of another
-`schema`, or wrong **anywhere** is the defaults **as a whole** — never an error, so it
-cannot stop `vibe list`, and never the valid half, so a hand-edit that is wrong in one
-place leaves auto-switch off rather than on. A missing member takes its default.
+The tick writes no login and never calls `store.switch`. It prints one line (`live <alias>`,
+plus `| broker: ...` when the broker did or found something) and exits 0. `vibe auto status`
+prints who is live (and the repair command when the pointer disagrees) and the broker lines; it
+fetches nothing. `vibe auto install` writes the launchd job (`LABEL`
+`de.intra-ai.vibemaxxing-auto`, `[sys.executable, "-m", "vibemaxxing", "auto", "tick"]`, every
+60 s) and never runs `launchctl`; `uninstall` removes the file.
 
-Reading a bad file as the defaults is right for a read and wrong for a write: `on`, `off`,
-`exclude` and `include` go through `auto.settings_for_edit`, which refuses a file that
-exists but is invalid (`UsageError`, recovery `rm <path>`) instead of saving the defaults
-over what someone wrote by hand. `vibe alias` renames an alias inside `excluded` and inside
-`auto.json` (`from`, `to`) with the account, so an exclusion does not silently stop
-applying.
-
-### `auto.json`
-
-```json
-{"schema": 1, "from": "work", "to": "side", "at": 1757930000.0,
- "reason": "work session at 99%; side is at 10%", "until": 1758102800.0}
-```
-
-The last switch, made by a tick or by `vibe auto undo`. `until` is when the rows that
-limited `from` have all reset, or `null` when that was not known; the account just left
-stays out of the running until then, whatever a fresh reading of it says. An unreadable
-file is no record, and so is one whose `at` is not a time a clock could have written
-(`auto.read_last` validates both times, because `vibe list`, the TUI and the web page all
-format `at` and one absurd value would stop every one of them). `until` that is absurd is
-read as unknown. An `at` far in the future is no cooldown at all, rather than one that
-lasts until then; a few seconds of clock skew still counts as just switched. `history.db` holds only the pooled series (§13) and has no place for a
-switch without a schema change, so it records nothing.
-
-### The decision — `pool.decide`
-
-Pure, in `pool.py`, importing no I/O:
-
-```python
-decide(readings: Sequence[Reading], *, settings: Settings, live: str | None,
-       now_s: float, last: LastSwitch | None) -> Decision      # action, target, reason
-next_candidate(...) -> str | None          # where a switch would go, trigger or not
-```
-
-`Reading` is `(alias, state, rows | None, updated_at, identified)`; `rows` is `None` when
-there is no usable answer. `identified` is false for an account stored without a uuid:
-after landing on one, `~/.claude.json` still names the account that was left, so vibe could
-not tell who is live. Such an account is never chosen as a target. Rules, in order; the
-first that applies wins:
-
-1. `auto_switch` is false: stay, `auto-switch is off`.
-2. The live alias is unknown: stay, `live account unknown`.
-3. The **only** trigger is the live account's `session` or `weekly_all` row at or above
-   the threshold; `weekly_scoped` and every other kind never trigger. No usable answer for
-   the live account: stay, `no fresh numbers for <alias>`; below the threshold: stay,
-   `<alias> is below <n>%`. A reading is a floor until its own row resets, since usage
-   only falls when the window rolls over: a trigger row whose reset is still ahead (or
-   unknown) counts however old the reading is, and one whose reset has passed says nothing
-   about now, so it reads as `no fresh numbers`. Nothing is ever switched on a guess.
-4. Within `cooldown_s` of the last switch: stay, `cooldown: last switch <n>s ago`.
-5. A candidate is state `ok` (for a non-active account, `collect` has already refused a
-   lapsed login and refreshed an expiring token, so `ok` is the usability check), not
-   excluded, `identified`, not the live account, with an answer fetched within `USAGE_FRESH_S` and not
-   from the future, with a known percentage on every `session`/`weekly_all` row and none
-   within 5 points of the threshold (at or above `threshold - 5`), and not the account just left before its `until`.
-6. The candidate with the lowest `max(session, weekly_all)` wins, ties by alias; none:
-   stay, `no account with headroom`. Percentages are compared across accounts here and
-   nowhere else.
-
-### The tick — `auto.tick`
-
-```python
-tick(root, *, client, port, now_s, notify) -> TickResult        # line, switched
-```
-
-Order: settings (off: stay, before anything is fetched) → `store.live_alias` (unknown:
-stay) → the pointer check → `collect` with the live account `fast` when its cached answer
-is at 90% on a trigger row (§14) → `pool.decide` → `oauth.ensure_usable` → a re-check that
-the live account and `active` are still the ones decided about → `store.switch` →
-`auto.json` → the notification. (fork) Between the decision and `ensure_usable` sits the
-renewal wait (below). It prints one line, `stay: <reason>` or
-`switched <from> -> <to>: <reason>`, and exits 0 in every case that is not a bug.
-
-- **The pointer check.** If `active` is not the live account the tick runs `store.switch`
-  onto the live account first, which resyncs the live login into its file and writes the
-  pointer, then carries on. Left as it was, polling would treat `active` as the account in
-  use and the live one as any other, whose expired token it would then refresh behind
-  Claude Code's back (§8), while `active` itself was never refreshed and lapsed. A refused
-  repair (`UsageError`, `NeedsLoginError`, `NotFoundError`) is `stay: Claude Code runs as
-  <live> but vibe's active account is <active> and repairing it failed: <message> - run:
-  vibe switch <live>`.
-- **A refused switch is a stay.** `UsageError`, `NeedsLoginError`, `NetworkError` and
-  `NotFoundError` from `ensure_usable` or `store.switch` — a claim held, a login vibe does
-  not know, a target that turned out dead or was removed — become `stay: <message>` and are
-  not retried in the same tick. A `StoreError`, or the plain `VibeError` the Keychain port
-  raises when `security` fails, is not caught here: it reaches `cli.main`'s handler, which
-  prints the message and its recovery and exits non-zero, so a scheduler sees a port or
-  store that is broken rather than a quiet stay. Anything else is a bug and propagates.
-- (fork) **The renewal wait.** `auto.renewal_wait` reads the live login from the port (never the
-  account file, never a refresh) and the tick stays while its access token ends within
-  `RENEWAL_GUARD_S` (600 s): `stay: waiting: <live>'s login renews within 10 min`, or `... ended
-  <n> min ago and a session may be renewing it` up to `RENEWAL_IDLE_S` (900 s) after its end. Past
-  that no session uses it (one would have renewed it) and the switch goes ahead. A port that cannot
-  be read or parsed at this point is a wait. Why: after a switch a running session may hold the
-  outgoing login for up to 30 s (Claude Code 2.1.318's Keychain cache, from its code, not measured);
-  a renewal then writes the outgoing account back over the incoming one, and `store.switch` has just
-  resynced the outgoing file from the port, so that stored refresh token is spent. The wait applies
-  to every switch away, also leaving an account at its limit; not to the pointer repair (same
-  account), `vibe switch` or `vibe auto undo`.
-- **The live account is re-checked before the write.** `collect` and a refresh can take
-  seconds, and a person may have run `vibe switch` meanwhile. If `store.live_alias` or
-  `active` no longer names the account the decision was about, the tick stays
-  (`the live account changed while checking, so <target> was left alone`).
-- **A switch that landed but could not be recorded** still notifies and still counts as
-  switched; the line ends `(not recorded: <ErrorClass>)`, and the cost is that no cooldown
-  or `until` exists for it.
-- **The Keychain** is written only by `store.switch`, which holds the claims (§8). There is
-  no other writer.
-- **The notification** runs only after a switch landed: `/usr/bin/osascript`, the message
-  passed as an argument of the script and never inside its text, a timeout, every failure
-  swallowed, silent off macOS. `cli.Context.notify` carries it so a test never raises one.
-  (fork) `/opt/homebrew/bin/terminal-notifier` first when it is executable, with `-title
-  vibemaxxing -message <message>`, and osascript when it is absent or fails. The message is
-  `Switched to <to>: <reason>`.
-- (fork) **Every tick writes status.json** (§18) on the way out, whatever it decided; an off
-  tick does so without reading the port.
-
-### The other commands
-
-- `vibe auto on|off` flips `auto_switch`. `exclude <alias>` needs an existing account
-  (`NotFoundError`, `vibe list`); `include <alias>` always succeeds.
-- `vibe auto status` prints the state, threshold, cooldown, exclusions, the live account
-  (and, when it differs, the `active` pointer and the `vibe switch` that repairs it), the
-  last switch and `next`, where a switch would go. It collects only when the pointer agrees
-  with the live account, for the reason above.
-- `vibe auto undo` switches back to `from` of the last record through `ensure_usable` and
-  `store.switch`, and records itself as a switch (`reason` `undo`), so the cooldown starts
-  again and the next tick does not walk back out. With no record: `UsageError`,
-  `vibe auto status`.
-- `vibe auto install` (macOS only; otherwise `UsageError`, `vibe auto tick`) writes
-  `~/Library/LaunchAgents/de.intra-ai.vibemaxxing-auto.plist`, label
-  `de.intra-ai.vibemaxxing-auto`, running `<this interpreter> -m vibemaxxing auto tick`
-  with `StartInterval` 60, and **prints** `launchctl bootstrap gui/<uid> <plist>`. It never
-  runs `launchctl`: loading a job is the operator's. `uninstall` removes the file and prints
-  `launchctl bootout gui/<uid>/<label>`; it does not unload anything either.
-
-### Not verified, and not claimed
-
-`scripts/verify_auto_live.py` performs a real switch between two throwaway accounts on a
-real Keychain and asserts that the port holds the incoming blob; it refuses to run without
-`VIBE_LIVE_OK=1` and never runs from pytest. Nothing here has been run against a real
-Keychain, a running `claude` or a loaded launchd job. In particular **untested**: whether
-a `claude` session that is already running picks up a switch, and whether an old session
-refreshing its own token afterwards overwrites the Keychain with the outgoing account.
-
-### Known limits
-
-- The owner of the port's login is read before the claims it joins (§8); a `claude /login`
-  in that instant resyncs into an account whose claim is not held.
-- Marking a lineage dead (§9) is a compare-then-write with no lock; a `vibe add` landing in
-  the microseconds between the two is overwritten.
-- The unknown-login check abstains when any stored account has no uuid (§8, step 1b). So
-  "never overwrites a login vibe does not know" holds only while every stored account has a
-  uuid.
-- Auto-switch needs the active account's stored uuid: without it `store.live_owner`, and so
-  `store.live_alias`, cannot name the live account and every tick stays at `live account
-  unknown`. It is also never switched onto an account stored without one.
-- "Never switches onto a dead account" is proven for a lapsed login, one the server already
-  rejected, and an expired access token that fails to refresh. A refresh token the server
-  would reject but has not been asked about passes until it is.
-- A tick stays while `active` disagrees with the live account (`vibe switch <live>`
-  repairs it). Until then no automatic switch happens.
-- Polls (`collect`, so `vibe list`, the TUI and the web page) treat the account `active`
-  names as the active one. If Claude Code runs another account, that account's expired
-  token can still be refreshed by one of those polls. The tick stays rather than poll in
-  that state; the other surfaces do not.
-- A refresh whose response is lost (a POST that times out after the server rotated the
-  token) still loses its successor. Auto-switch neither causes nor fixes that.
+`settings.json` keeps `routing` (§19) and `broker`. The members automatic switching used
+(`auto_switch`, `threshold`, `cooldown_s`, `excluded`, `policy`) are read by nothing; an existing
+`auto.json` is read by nothing. `auto.renewal_wait` (the live login renews within
+`RENEWAL_GUARD_S`, 10 min, unless it ended more than `RENEWAL_IDLE_S`, 15 min, ago) now guards only
+`vibe broker on`.
 
 ---
 
-## 18. The fork: ordered policy, config-dir import, status line (fork)
-
-### The ordered policy — `settings.json` `policy`, `pool.decide`
-
-```json
-{"mode": "ordered",
- "steps": [{"account": "main", "until": 85}, {"account": "extra", "until": 99},
-           {"account": "main", "until": 99}],
- "then": "earliest_reset", "block_models": ["Fable"]}
-```
-
-Optional. Absent (or `null`) is the §17 rule, unchanged, and `write_settings` then writes no
-`policy` member, so a file without one round-trips byte for byte. `mode` must be `ordered`,
-`steps` a non-empty list of `{account: valid alias, until: integer 1..100}`, `then`
-`earliest_reset` or absent, `block_models` a list of non-empty strings or absent. Anything
-else is a wrong member, so the whole file reads as the defaults (§17). `pool.Policy` holds
-the steps and the models; `Settings.policy` defaults to the empty one.
-
-Rows that count: `session`, `weekly_all`, and a `weekly_scoped` row whose model (its label
-after `Weekly · `, case-insensitive) is in `block_models`. `decide` with steps, in order:
-
-1. Off: stay. Live unknown: stay (§17 rules 1-2).
-2. No usable answer for the live account: stay, `no fresh numbers for <live>`.
-3. The live account is in no step: stay, `<live> is not in the policy`.
-4. Walk the steps. At a step of the live account: over its `until` on a counted row whose
-   reset is ahead or unknown (a floor, any age), go on; else below it on fresh numbers
-   (`USAGE_FRESH_S`, every counted row known): stay, `<live> is below <until>% (step i of
-   n)`; else stay, `no fresh numbers for <live>`. At a step of another account: it
-   qualifies when it is usable (§17 rule 5: `ok`, identified, not excluded, not live), not
-   fenced at this `until`, and fresh numbers put every counted row below `until`.
-5. The first account that qualifies is the target. If the live account is over the limit
-   of any of its own steps, switch now, whatever the cooldown: `<live> at <n>% <session |
-   weekly | weekly Model>`. Otherwise the target outranks a step where the live account
-   still has room, and the cooldown applies: `<target> is at <n>%, below its <until>% step`.
-6. No step qualifies: each policy account that is the live one or usable is ready when
-   every counted row over its highest `until` has reset (`limited_until`), or at its fence,
-   whichever is later; unknown is not a candidate. The soonest wins, ties in step order. It
-   is the live account: stay; another: switch; nothing: stay, `no account with headroom`.
-   The reason is `every account is at its limit; <account> resets first`.
-
-`Decision.limit` is the limit the live account is left at (the highest of its own limits it
-is over, the threshold under §17), and the tick stores it as `auto.json` `limit` with
-`until` computed at it. **The fence holds at that limit and below**: an account left at 85%
-cannot come back at an 85% step before what limited it resets, but its 99% step is open. A
-record without `limit` (0.3.0, an undo) fences every limit.
-
-A `vibe switch` is not recorded, so a person who switches to an account the policy would
-not choose is switched back by the next tick (after the cooldown, when one applies).
-`vibe auto off` holds an account by hand.
-
-(fork) There is no budget of vibe's own (removed 19 Nov 2026): a step switches at `until` on the rows the
-account reports (`session`, `weekly_all`, and `block_models` rows), nothing else. `weekly_budget` on a step
-(and `routing.weekday_budget`, `routing.timezone`, a routing step's `budget`) are still accepted and ignored,
-and `policy_document` never writes them. `pool.Step` is `(account, until)`; `Decision` has no `weekly`,
-`threshold` or `zone`; `blocking`, `limited_until` and `_under` take no weekly limit. A fence is computed
-at the limit the account was left at (`LastSwitch.limit`), and `vibe auto status` renders `main until 99%`.
-
-Fast polling (§14): with a policy, the live account is `fast` while a counted row is within
-`FAST_POLL_MARGIN` (9) below one of its own step limits and not over it.
-
-`vibe auto status` with a policy prints `policy`, `cooldown`, `step` and `next step` in
-place of `threshold`; the step is the first one that qualifies now (for the live account,
-being below its limit), the next step the first one on another account. Both are `unknown`
-while the pointer disagrees, since nothing is collected then.
+## 18. The fork: config-dir import, status line (fork)
 
 ### `vibe add [alias] --from-config-dir DIR`
 
@@ -1627,7 +1373,7 @@ no Keychain write, `active` unchanged, and the alias's stash deleted. It refuses
 (`UsageError`), the active account's alias, and an alias that holds another uuid. A login
 whose refresh token is already stored is reported as that account (and, when that account has no
 `config_dir` yet, converted to one: its stash is deleted and vibe stops refreshing it). Measured once: the item
-for `/Users/stephanplakunov/.claude-extra` is `Claude Code-credentials-702813c4`.
+for `/Users/stephanplakunov/.claude-main` is `Claude Code-credentials-1a9dccb1`.
 
 **Owned accounts (`config_dir`).** The import records `config_dir` (absolute path) in the account file; the key is
 written only when set, so the file of an account vibe owns is unchanged. Such an account's lineage has one
@@ -1635,12 +1381,12 @@ refresher, Claude Code in that dir, and vibe never POSTs a refresh for it:
 
 - `oauth.refresh` returns `RefreshOutcome(None, "owned")` before anything else (no stash, no claim, no request);
   an unreadable account file returns `transient` rather than guessing. `oauth.ensure_usable` and `store.switch`
-  raise `UsageError` (`store.refuse_owned`), so `vibe switch` and auto-switch never copy it into the default login.
+  raise `UsageError` (`store.refuse_owned`), so `vibe switch` never copies it into the default login.
 - `envelope.owned_token` borrows the token from the dir's own item (`port_for(dir)`, read only; the dir's
   `.claude.json` must name the same uuid; the rule of `active_token`). With it expired the view keeps the last
   usage numbers and says Claude Code refreshes it in that dir. `envelope.collect(..., port_for=...)` carries the port
   factory (default `keychain.config_dir_port`).
-- `launch.Plan.config_dir` is set for such an account, by `vibe run <alias>` and by `vibe run auto`. `cmd_run` then
+- `launch.Plan.config_dir` is set for such an account by `vibe run <alias>`. `cmd_run` then
   runs the child with `CLAUDE_CONFIG_DIR=<dir>` and no `CLAUDE_CODE_OAUTH_TOKEN`; the rest of the environment is
   built as for any Claude child (section 19) and the bridge is injected as before. The run is refused, naming
   `CLAUDE_CONFIG_DIR=<dir> claude`, when the dir has no login, or when `<dir>/.claude.json` names another uuid.
@@ -1656,14 +1402,14 @@ refresher, Claude Code in that dir, and vibe never POSTs a refresh for it:
   (verified by reading it back), write the item (verified by reading it back). On failure the mark is taken back only when
   the item is verifiably absent; otherwise it stays and a rerun finishes. `oauth.refresh` checks the mark again after it
   takes the claim, so a refresh that read the account earlier cannot post the handed-over token.
-- `envelope._usable_credential` (every poll: tick, list, TUI, web, `run auto`'s candidates) refreshes only an access
+- `envelope._usable_credential` (every poll: tick, list, TUI, web) refreshes only an access
   token that has ended (buffer 0); `_fresh_token` (`vibe run`) keeps `EXPIRY_BUFFER_MS`.
 - An account vibe owns still runs on `CLAUDE_CODE_OAUTH_TOKEN`; an interactive `claude` on it prints when that token
   ends and that a longer session needs a config dir of its own.
 
 ### `vibe release ALIAS` — `release.py` (fork)
 
-The inverse of `--adopt-stored-login`, for one shared login. For an account with `config_dir`:
+The inverse of `--adopt-stored-login`: vibe holds the login again. For an account with `config_dir`:
 refuse unless it has one (`UsageError`, `vibe list`), the active or live account (`UsageError`);
 then under the alias's refresh claim: re-read the account (changed meanwhile: refuse), refuse while
 any process runs with `CLAUDE_CONFIG_DIR` equal to the dir (`release.ProcessPort`, real one
@@ -1684,23 +1430,23 @@ outcome it must not leave. `<dir>/.claude.json` and the default login are never 
 ### `status.json` and `vibe statusline`
 
 ```json
-{"schema": 1, "written_at": 1757930000.0, "live": "extra", "active": "extra",
+{"schema": 1, "written_at": 1757930000.0, "live": "work", "active": "work",
  "accounts": [{"alias": "main", "state": "ok", "fetched_at": 1757929990.0,
                "rows": [{"kind": "session", "label": "Session", "percent": 100,
                          "resets_at": 1757937000.0}]}],
- "policy": {…} | null,
- "last_switch": {"from": "main", "to": "extra", "at": 1757929000.0, "reason": "…"} | null}
+ "cursor": [...], "codex": [...]}
 ```
 
 `auto.publish_status` builds it from the account files and the shared usage caches (§14),
 never from one command's views, and writes it with `write_private`. Times are epoch
 seconds; `live` is `store.live_alias` when the writer looked, else `null`. Writers: `vibe
-list`, `usage --once`, `vibe --json`, `auto status`, every `auto tick`, every TUI cycle and
-every web snapshot. A failed write is swallowed.
+list`, `usage --once`, `vibe --json`, every `auto tick`, every TUI cycle and every web snapshot.
+A failed write is swallowed. (fork) The `policy` and `last_switch` members went with automatic
+switching (§17).
 
 `vibe statusline` reads that file and nothing else, and prints `▶ <live or active>` and one
-`<alias>: <rows>` per account, joined by ` · `. Rows are `5h` (session), `wk` (weekly_all)
-and a counted model's own row, each `<percent>%` plus `(resets HH:MM)` in local time today or
+`<alias>: <rows>` per account, joined by ` · `. Rows are `5h` (session) and `wk` (weekly_all),
+each `<percent>%` plus `(resets HH:MM)` in local time today or
 `(resets Mon HH:MM)` on another day. A row with no percent, or whose reset has passed, is
 left out; an account with none left reads `<alias>: -`, a `needs_login` one
 `<alias>: needs login`. An enterprise seat (no windows, a `monthly_spend` row carrying
@@ -1718,7 +1464,7 @@ loads `vibemaxxing.cli`, `textual`, `urllib.request` or `importlib.metadata`.
 
 ---
 
-## 19. Cursor accounts and routing (fork)
+## 19. Cursor accounts and the connector map (fork)
 
 ### The account kind
 
@@ -1728,8 +1474,8 @@ A Cursor account is `~/.vibemaxxing/cursor/<alias>.json`
 accounts stay in `accounts/`; the two share one alias namespace, and `auto` is reserved.
 `vibe add [alias] --kind cursor` checks `cursor-agent status --format json` and says to run
 `cursor-agent login` when it is not logged in. `vibe switch` refuses a Cursor alias (there is
-no Claude Code login to switch to) and `vibe auto tick` never targets one: the Keychain login
-cannot point at Cursor, so Cursor is reached only per run (`vibe run`).
+no Claude Code login to switch to): the Keychain login cannot point at Cursor, so Cursor is
+reached only per run (`vibe run`).
 
 ### The envelope
 
@@ -1739,12 +1485,12 @@ the pool. Every key is present: `alias`, `kind` (`"cursor"`), `state` (`ok`, `ne
 `unknown`), `message`, `email`, `team`, `plan`, `included_percent`, `on_demand_used_cents`,
 `on_demand_limit_cents` (0: on-demand off; null: unnamed), `resets_at`, `available`
 (true/false/null) and `available_why`. `/api/usage` carries the same `cursor` member (web.snapshot). The TUI paints a panel per seat; the
-web page shows each as one more ledger entry (two bars, reset, routing line; not in the pool or the
+web page shows each as one more ledger entry (two bars, reset; not in the pool or the
 week chart). `status.json` gains a `cursor` array (alias, fetched_at, included_percent,
 on_demand_used_cents, on_demand_cap_cents = the limit Cursor reports (null when it reports none; vibe adds no limit), cycle_end_s,
 available), written by `auto.publish_status` from the usage cache only (no Keychain, request or
 process), and `vibe statusline` appends `cursor: 0.1% $0/$250` (`?` for no numbers, numbers older than
-15 minutes or a finished cycle; `spent (resets ...)` once routing counts the seat as used up). The
+15 minutes or a finished cycle; `spent (resets ...)` once the seat is at its limit). The
 numbers get there from `vibe list`, the TUI and web cycles, and the background tick, which re-reads a
 seat whose cache is older than three minutes (`Context.refresh_cursor_cache`; a failure leaves the
 old numbers to age into a `?`).
@@ -1758,7 +1504,7 @@ Read the way `cursor-agent`'s own `/usage` reads it: Connect unary JSON POSTs of
 (service `cursor-access-token`, account `cursor-user`; both from the agent's own code), else
 `auth.json`. It is read at the request, held in a `Secret`, revealed in one header, and never
 stored, logged or put in a message. The web cookie (`WorkosCursorSessionToken`) is not used.
-Any other shape, status or failure is **unknown**, and unknown is unavailable. Answers are
+Any other shape, status or failure is **unknown**. Answers are
 cached for 120 s (`usage/<alias>.json`) and shown up to 15 min old, with their time.
 Checked live once (3 Nov 2026, one seat, read-only): the call works with that token and Connect
 JSON. The answer leaves out a field that is zero (proto3 JSON): no `individualUsed` is $0, and
@@ -1766,7 +1512,7 @@ JSON. The answer leaves out a field that is zero (proto3 JSON): no `individualUs
 neither figure it is unknown, never 0. `spendLimitUsage.pooledUsed` is the team's, not ours.
 
 Freshness: an answer is used for 120 s (30 s when within $50 of the reported limit); an older one
-(to 15 min) is shown with its time and never routes. `vibe run <cursor>` is refused at the limit
+(to 15 min) is shown with its time and never decides a run. `vibe run <cursor>` is refused at the limit
 (unknown only warns). Availability: while on-demand spend is 0 the seat is on included usage plus Cursor's bonus
 and is available. Once it is above 0 the limit Cursor reports decides: available while
 `limit - used > 0`, spent after, and a limit of 0 (on-demand off) means spent. When Cursor
@@ -1798,36 +1544,28 @@ Every child `vibe run` starts gets `childenv.build(...)`: the Claude family
 (`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
 Bedrock/Vertex/Foundry switches) is always dropped; a *strict* child (Cursor) also loses every name ending `_TOKEN`, `_API_KEY`, `_SECRET`, `_SECRET_KEY`, `_ACCESS_KEY`,
 `_PASSWORD` not named in `--pass-env`; a Claude credential can never be passed. What the account
-needs is set last. Names are reported, values never. When the shell carries a Claude token or
-config dir (`parent_carries_claude_account`), the chosen Claude account runs on its own token set
-explicitly even if it is the live login. `claude --version` / `claude mcp ...` are passthrough:
-environment untouched.
+needs is set last. Names are reported, values never. A Claude account named in `vibe run` runs on
+its own token (or its own config dir) set explicitly, so a Claude token or config dir the shell
+carries never decides the account.
 
-### Routing — `route.py`, `vibe run auto`
+### The connector map — `route.py`
 
-`settings.json` member `routing` (absent: the defaults; wrong anywhere: `vibe run auto` is
-refused, never guessed; `vibe auto on|off` carries it over untouched): `default_needs` (`["slack","atlassian"]`),
-`no_degrade` (`["m365"]`), `connectors` (main: slack, atlassian, m365; cursor: slack,
-atlassian, gcal; extra: none), `order` per class (`needs`, `no_needs`: lists of
-`{"account", "degraded", "last_resort"}`; `budget` is accepted and ignored), `spent_percent`
-(99), `roles` (role -> alias for `main`, `extra`, `cursor`; steps and `connectors` are written in
-roles; a Claude role naming no stored account makes a run that would end on Cursor refuse),
-(`timezone`, `weekday_budget`, a step's `budget`, `cursor_cap_cents`, `cursor_margin_cents` and a step's `weekly_cap` were removed on 19 Nov 2026: vibe imposes no spending or usage cap of its own, only the limits providers report; the old keys are still accepted and ignored). A Cursor step cannot
-be `last_resort`. Defaults: needs = main, cursor, extra (degraded: runs without the
-connectors, with a warning), main (last resort); no needs = extra, main,
-cursor, main (last resort). Unknown usage is unavailable and printed; only the last resort
-accepts an unknown or spent reading (with a warning), and only a dead login stops it. The
-decision is made at run start and never again; the Claude account that is Claude Code's own
-login runs without a token override. A move between kinds is a fresh run (`--brief`,
-`--handover`). `--claude-only` skips Cursor. `vibe shell-init` prints a zsh snippet and writes
-nothing.
+`settings.json` member `routing` (the name is kept so an existing file reads): `connectors`
+(alias -> the connectors a session on it has of its own; defaults main: slack, atlassian, m365;
+cursor: slack, atlassian, gcal; any other alias: none) and `bridge` (§20). A wrong member is refused
+(`UsageError`), never guessed. `launch._with_bridge` reads the connectors to add vibe-bridge to a
+Claude run, and a Cursor run that declares `--needs` is refused when the seat lacks one. The members of
+the removed `vibe run auto` (`default_needs`, `no_degrade`, `order`, `roles`, `spent_percent`,
+`shared_login`, and the older `timezone`, `weekday_budget`, `cursor_cap_cents`,
+`cursor_margin_cents`) are accepted and ignored. `vibe run auto`, `--no-needs`, `--claude-only`,
+`--brief`, `--handover` and `vibe shell-init` (`cw`/`cs`) are gone; `auto` stays a reserved alias.
 
 ---
 
 ## 20. vibe-bridge v2 (fork)
 
 `vibe bridge serve` (`bridge.py`): a stdio MCP server (newline-delimited JSON-RPC 2.0: `initialize`,
-`ping`, `tools/list`, `tools/call`; notifications get no answer) for the extra account. A call is
+`ping`, `tools/list`, `tools/call`; notifications get no answer) for an account without connectors. A call is
 forwarded by vibe, as an MCP **client** (`mcp_client.py`, Streamable HTTP, JSON or event-stream answers),
 straight to a vendor's own remote MCP server as exactly one upstream tool. **No model is anywhere in the
 path.** (v1 ran a nested `claude -p`/`cursor-agent`; it could not be fenced, because a connector's
@@ -1912,20 +1650,21 @@ process, then one `refused-suppressed`). No arguments, no
 content, no token. `routing.bridge` (`timeout_s`, `max_calls_per_hour`, `max_result_bytes`) cannot add a
 tool or an upstream. Commands: `vibe bridge login <slack|atlassian> [--client-id] [--port]`,
 `logout <upstream|all>`, `status`, `tools <upstream>`, `serve`, `add-command [--config-dir]` (prints the
-`claude mcp add` line for `~/.claude-extra`, runs nothing).
+`claude mcp add` line for a config dir, `~/.claude-<alias>` by default; runs nothing).
 
 **Reaching a `vibe run` session** (`launch._with_bridge`): a Claude run started by `vibe run` has a token
-override and no `CLAUDE_CONFIG_DIR`, so Claude Code reads the default config, not `~/.claude-extra`, and a
+override and no `CLAUDE_CONFIG_DIR`, so Claude Code reads the default config, not `~/.claude-<alias>`, and a
 bridge registered there is never seen. So for a Claude *session* (not `--version`, `mcp ...`, nor a
-non-claude program) on an account whose connectors (`routing.connectors[role or alias]`, default none for
-extra) lack an upstream the bridge has a login for (`mcp_oauth.has_login`: the description file), vibe
+non-claude program) on an account whose connectors (`routing.connectors[alias]`, default none) lack an
+upstream the bridge has a login for (`mcp_oauth.has_login`: the description file), vibe
 prepends `--mcp-config=<root>/bridge/mcp-config.json` (the one-token form: a variadic `--mcp-config` would
 swallow a following prompt) and prints "added vibe-bridge to this run (...)". The file
 (`bridge.write_mcp_config`, 0600 in a 0700 dir, rewritten only on change) is `{"mcpServers": {"vibe-bridge":
 {"type": "stdio", "command": <sys.executable>, "args": ["-m", "vibemaxxing", "bridge", "serve"]}}}`: no
 secret. Not `--strict-mcp-config`; the user's own `--mcp-config` follows ours. Never for Cursor runs;
 `vibe run --no-bridge` turns it off; a wrong `routing` does not stop the run. Verified live once: a real
-`vibe run extra -- claude -p ... --allowedTools mcp__vibe-bridge__atlassian_atlassianUserInfo` called the tool.
+`vibe run <account without connectors> -- claude -p ... --allowedTools mcp__vibe-bridge__atlassian_atlassianUserInfo`
+called the tool.
 
 **Not verified live**: nobody has logged in to either upstream, so the upstreams' actual tool names and
 argument shapes, Slack's redirect-URL rules, Atlassian's
@@ -1973,5 +1712,5 @@ OpenAI's docs for the login methods and storage: developers.openai.com/codex/aut
 - **Status line**: `status.json` has a `codex` array (cached numbers only, never a request); the line
   shows `zvoove-codex: 0/5100 cr` for a spend limit (`?` when the numbers are old) or the windows
   (`5h 12% weekly 34%`).
-- **Never**: `vibe switch`, auto-switch, routing and `vibe run` do not use a Codex account. `vibe remove` deletes the marker and its cache, never the CLI's login.
+- **Never**: `vibe switch` and `vibe run` do not use a Codex account. `vibe remove` deletes the marker and its cache, never the CLI's login.
 

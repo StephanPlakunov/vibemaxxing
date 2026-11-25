@@ -22,8 +22,7 @@ PROFILE_URL: Final = "https://api.anthropic.com/api/oauth/profile"
 BETA_HEADER: Final = "oauth-2025-04-20"
 
 _LABELS: Final = {"session": "Session", "weekly_all": "Weekly · all models"}
-# A weekly_scoped row is labelled with this and its model's name, which is how the
-# ordered policy finds the models it was told to count.
+# A weekly_scoped row is labelled with this and its model's name.
 SCOPED_LABEL_PREFIX: Final = "Weekly · "
 
 

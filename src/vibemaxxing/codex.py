@@ -6,8 +6,8 @@ A Codex account has no credential vibe keeps. ``codex login`` stores it, by defa
 and to ask the usage endpoint what is left. vibe never refreshes it: the Codex CLI renews
 its own tokens, and a second refresher would spend the refresh token the CLI holds. What
 vibe stores is a marker, ``~/.vibemaxxing/codex/<alias>.json``, so `vibe list` knows the
-alias is a Codex one. A Codex account is never a target of `vibe switch` or auto-switch: it
-has no Claude Code login.
+alias is a Codex one. A Codex account is never a target of `vibe switch`: it has no Claude
+Code login.
 """
 
 from __future__ import annotations

@@ -5,6 +5,22 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - fork `stephan/ordered-failover`
 
+### Removed
+
+- **vibe never switches or picks an account by itself any more.** The person switches (`vibe switch`)
+  and names the account (`vibe run <account>`). Gone: automatic switching (`vibe auto on|off|undo|
+  exclude|include`, the ordered `policy`, the faster polling near a limit, the switch notification,
+  `auto.json`), the routing of `vibe run auto` (the order, the roles `main`/`extra`/`cursor`, the
+  shared login, `--no-needs`, `--claude-only`, `--brief`, `--handover`), `vibe shell-init` (`cw`/`cs`),
+  `scripts/switch-to-shared-login.zsh`, `scripts/verify_auto_live.py` and the cutover notes. The
+  `auto_switch` block of the `--json` envelope and the `policy`/`last_switch` members of
+  `status.json` are gone too; the TUI and the web page no longer show an auto-switch line.
+- **Kept:** `vibe auto tick` (the launchd job every minute) still renews the token broker's logins,
+  fetches every account's numbers and writes `status.json`, so the status lines stay current;
+  `vibe auto install|uninstall|status`, `vibe switch`, `vibe run <account>` with vibe-bridge, and
+  `routing.connectors` / `routing.bridge`. An existing `settings.json` keeps working: the members of
+  the removed features are accepted and ignored.
+
 ### Added
 
 - **Codex: the limit a plan reports, in its own unit.** A usage-based business workspace

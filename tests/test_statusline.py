@@ -21,9 +21,7 @@ import pytest
 
 from tests.fakes import FakeHttpClient, FakeKeychain
 from tests.test_auto import NOW_S, world
-from tests.test_policy import ON
-from vibemaxxing import auto, cli, statusline, store
-from vibemaxxing.pool import LastSwitch, Settings
+from vibemaxxing import cli, statusline, store
 
 # Thursday 2026-10-22, noon, local time: the line prints local times.
 NOON = datetime(2026, 10, 22, 12, 0).timestamp()
@@ -52,15 +50,13 @@ def account(
     }
 
 
-def document(*accounts: dict[str, object], live: str | None = "extra") -> dict[str, object]:
+def document(*accounts: dict[str, object], live: str | None = "alt") -> dict[str, object]:
     return {
         "schema": 1,
         "written_at": NOON - 60.0,
         "live": live,
         "active": live,
         "accounts": list(accounts),
-        "policy": None,
-        "last_switch": None,
     }
 
 
@@ -70,53 +66,52 @@ def test_the_line_has_the_documented_shape() -> None:
             "main",
             [("session", 100, _at(22, 19, 30)), ("weekly_all", 93, _at(26, 0, 0))],
         ),
-        # extra's week rolled over since it was read: that number says nothing now.
-        account("extra", [("session", 28, _at(22, 23, 10)), ("weekly_all", 70, NOON - 1)]),
+        # alt's week rolled over since it was read: that number says nothing now.
+        account("alt", [("session", 28, _at(22, 23, 10)), ("weekly_all", 70, NOON - 1)]),
     )
 
     assert statusline.render(doc, now_s=NOON) == (
-        "▶ extra · main: 5h 100% (resets 19:30) wk 93% (resets Mon 00:00)"
-        " · extra: 5h 28% (resets 23:10)"
+        "▶ alt · main: 5h 100% (resets 19:30) wk 93% (resets Mon 00:00)"
+        " · alt: 5h 28% (resets 23:10)"
     )
 
 
 def test_an_account_with_only_its_weekly_window_shows_the_bare_number() -> None:
     doc = document(account("main", [("weekly_all", 53, _at(26, 0, 0))]))
 
-    assert statusline.render(doc, now_s=NOON) == "▶ extra · main: 53%"
+    assert statusline.render(doc, now_s=NOON) == "▶ alt · main: 53%"
 
 
 def test_numbers_older_than_fifteen_minutes_get_a_question_mark() -> None:
     rows = [("session", 28, _at(22, 23, 10))]
-    old = document(account("extra", rows, fetched_at=NOON - 16 * 60))
-    recent = document(account("extra", rows, fetched_at=NOON - 14 * 60))
+    old = document(account("alt", rows, fetched_at=NOON - 16 * 60))
+    recent = document(account("alt", rows, fetched_at=NOON - 14 * 60))
 
-    assert statusline.render(old, now_s=NOON) == "▶ extra · extra: 5h 28%? (resets 23:10)"
-    assert statusline.render(recent, now_s=NOON) == "▶ extra · extra: 5h 28% (resets 23:10)"
+    assert statusline.render(old, now_s=NOON) == "▶ alt · alt: 5h 28%? (resets 23:10)"
+    assert statusline.render(recent, now_s=NOON) == "▶ alt · alt: 5h 28% (resets 23:10)"
 
 
 def test_rows_without_fresh_data_are_left_out() -> None:
     doc = document(
         account("main", [("session", None, _at(22, 19, 30)), ("weekly_all", 5, None)]),
-        account("extra", [("session", 50, NOON - 60.0)]),
+        account("alt", [("session", 50, NOON - 60.0)]),
         account("side", [], fetched_at=None),
         account("gone", [("session", 50, _at(22, 19, 30))], state="needs_login"),
         live=None,
     )
 
-    assert statusline.render(doc, now_s=NOON) == (
-        "main: 5% · extra: - · side: - · gone: needs login"
-    )
+    assert statusline.render(doc, now_s=NOON) == ("main: 5% · alt: - · side: - · gone: needs login")
 
 
-def test_a_model_row_shows_only_when_the_policy_counts_it() -> None:
+def test_a_models_own_row_is_not_shown() -> None:
     main = account("main", [("session", 10, None), ("weekly_scoped", 40, None)])
     main["rows"][1]["label"] = "Weekly · Fable"
     plain = document(main, live="main")
-    counted = dict(plain, policy={"mode": "ordered", "steps": [], "block_models": ["fable"]})
+    # An old status file may still carry a policy that named the model: it changes nothing.
+    old = dict(plain, policy={"mode": "ordered", "steps": [], "block_models": ["fable"]})
 
     assert statusline.render(plain, now_s=NOON) == "▶ main · main: 5h 10%"
-    assert statusline.render(counted, now_s=NOON) == "▶ main · main: 5h 10% Fable 40%"
+    assert statusline.render(old, now_s=NOON) == "▶ main · main: 5h 10%"
 
 
 def test_no_status_yet_is_a_line_not_an_error(tmp_home: Path) -> None:
@@ -153,9 +148,7 @@ def _status(root: Path) -> dict[str, object]:
 def test_list_writes_the_status_owner_only_and_atomically(
     tmp_home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    w = world(tmp_home, {"main": (40, 85), "extra": (10, 10)}, live="main")
-    auto.write_settings(w.root, ON)
-    auto.write_last(w.root, LastSwitch("extra", "main", NOW_S - 50.0, "undo", None))
+    w = world(tmp_home, {"main": (40, 85), "alt": (10, 10)}, live="main")
 
     assert cli.main(["list"], context=w.context()) == 0
 
@@ -166,13 +159,7 @@ def test_list_writes_the_status_owner_only_and_atomically(
     status = _status(w.root)
     assert (status["schema"], status["live"], status["active"]) == (1, "main", "main")
     assert status["written_at"] == NOW_S
-    assert status["policy"] == auto.policy_document(ON.policy)
-    assert status["last_switch"] == {
-        "from": "extra",
-        "to": "main",
-        "at": NOW_S - 50.0,
-        "reason": "undo",
-    }
+    assert "policy" not in status and "last_switch" not in status
     accounts = status["accounts"]
     assert isinstance(accounts, list)
     main = next(a for a in accounts if a["alias"] == "main")
@@ -185,36 +172,20 @@ def test_list_writes_the_status_owner_only_and_atomically(
     assert "main-live" not in path.read_text() and "main-rt" not in path.read_text()
 
 
-def test_every_tick_writes_the_status_even_when_it_stays(tmp_home: Path) -> None:
-    w = world(tmp_home, {"main": (40, 40), "extra": (10, 10)}, live="main", on=False)
+def test_every_tick_writes_the_status(tmp_home: Path) -> None:
+    w = world(tmp_home, {"main": (40, 40), "alt": (10, 10)}, live="main")
 
     w.tick()
 
-    assert _status(w.root)["live"] is None, "an off tick does not look at the Keychain"
+    assert _status(w.root)["live"] == "main", "a tick says who is live"
     assert _status(w.root)["active"] == "main"
-    assert w.port.log == [] and w.client.requests == []
-
-    auto.write_settings(w.root, Settings(auto_switch=True))
-    w.tick()
-    assert _status(w.root)["live"] == "main"
+    assert set(w.port.log) <= {"keychain.read"}
 
 
-def test_a_tick_that_switches_writes_the_new_live_account(tmp_home: Path) -> None:
-    w = world(tmp_home, {"main": (40, 85), "extra": (10, 10)}, live="main")
-    auto.write_settings(w.root, ON)
+def test_usage_once_writes_it_too(tmp_home: Path) -> None:
+    w = world(tmp_home, {"main": (40, 40), "alt": (10, 10)}, live="main")
 
-    assert w.tick().switched
-
-    status = _status(w.root)
-    assert (status["live"], status["active"]) == ("extra", "extra")
-    last = status["last_switch"]
-    assert isinstance(last, dict) and last["to"] == "extra"
-
-
-def test_status_and_usage_once_write_it_too(tmp_home: Path) -> None:
-    w = world(tmp_home, {"main": (40, 40), "extra": (10, 10)}, live="main")
-
-    for argv in (["auto", "status"], ["usage", "--once"], ["--json"]):
+    for argv in (["usage", "--once"], ["--json"]):
         statusline.status_path(w.root).unlink(missing_ok=True)
         assert cli.main(argv, context=w.context()) == 0, argv
         assert _status(w.root)["live"] == "main", argv
@@ -223,7 +194,7 @@ def test_status_and_usage_once_write_it_too(tmp_home: Path) -> None:
 def test_a_status_that_cannot_be_written_costs_nothing(
     tmp_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    w = world(tmp_home, {"main": (40, 40), "extra": (10, 10)}, live="main")
+    w = world(tmp_home, {"main": (40, 40), "alt": (10, 10)}, live="main")
 
     def full(*args: object, **kwargs: object) -> None:
         raise OSError("disk full")
@@ -231,7 +202,7 @@ def test_a_status_that_cannot_be_written_costs_nothing(
     monkeypatch.setattr(statusline, "write", full)
 
     assert cli.main(["list"], context=w.context()) == 0
-    assert w.tick().line == "stay: main is below 99%"
+    assert w.tick().line == "live main"
 
 
 # --- who reads it -------------------------------------------------------------
@@ -240,7 +211,7 @@ def test_a_status_that_cannot_be_written_costs_nothing(
 def test_statusline_reads_the_file_and_nothing_else(
     tmp_home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    w = world(tmp_home, {"main": (40, 85), "extra": (10, 10)}, live="main")
+    w = world(tmp_home, {"main": (40, 85), "alt": (10, 10)}, live="main")
     assert cli.main(["list"], context=w.context()) == 0
     capsys.readouterr()
     client, port = FakeHttpClient(), FakeKeychain()
@@ -248,7 +219,7 @@ def test_statusline_reads_the_file_and_nothing_else(
 
     assert cli.main(["statusline"], context=ctx) == 0
 
-    assert capsys.readouterr().out.startswith("▶ main · extra: 5h 10% (resets ")
+    assert capsys.readouterr().out.startswith("▶ main · alt: 5h 10% (resets ")
     assert client.requests == [] and port.log == []
 
 
@@ -307,9 +278,18 @@ def test_the_console_script_still_runs_every_other_command(tmp_home: Path) -> No
 def test_an_enterprise_seat_shows_its_monthly_spend_like_cursor() -> None:
     from vibemaxxing import statusline
 
-    row = {"kind": "monthly_spend", "label": "Monthly spend", "percent": 0, "resets_at": None,
-           "spend_used": 0.15, "spend_limit": 125.0, "currency": "USD"}
-    doc = {"schema": 1, "accounts": [
-        {"alias": "zvoove-claude", "state": "ok", "fetched_at": 100.0, "rows": [row]}]}
+    row = {
+        "kind": "monthly_spend",
+        "label": "Monthly spend",
+        "percent": 0,
+        "resets_at": None,
+        "spend_used": 0.15,
+        "spend_limit": 125.0,
+        "currency": "USD",
+    }
+    doc = {
+        "schema": 1,
+        "accounts": [{"alias": "zvoove-claude", "state": "ok", "fetched_at": 100.0, "rows": [row]}],
+    }
     assert statusline.render(doc, now_s=110.0) == "zvoove-claude: $0.15/$125"
     assert statusline.render(doc, now_s=100.0 + 3600).endswith("$0.15/$125?")

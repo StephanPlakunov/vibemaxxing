@@ -17,10 +17,8 @@ from typing import Final
 from vibemaxxing.errors import UsageError
 
 TOKEN_VAR: Final = "CLAUDE_CODE_OAUTH_TOKEN"
-# Set on every child `vibe run` starts, for `vibe statusline`: the account this session is, or
-# SESSION_LIVE for a session on Claude Code's own login, which follows the background switch.
+# Set on every child `vibe run` starts, for `vibe statusline`: the account this session is.
 SESSION_VAR: Final = "VIBE_SESSION"
-SESSION_LIVE: Final = "live"
 # What decides which Claude account a Claude Code process is, or which provider it talks to.
 CLAUDE_FAMILY: Final = frozenset(
     {
@@ -55,11 +53,6 @@ class ChildEnv:
     env: dict[str, str]
     # Names (never values) taken out of the parent's environment.
     dropped: tuple[str, ...]
-
-
-def parent_carries_claude_account(environ: Mapping[str, str]) -> bool:
-    """Whether this process was started inside a Claude Code session pinned to an account."""
-    return TOKEN_VAR in environ or "CLAUDE_CONFIG_DIR" in environ
 
 
 def build(

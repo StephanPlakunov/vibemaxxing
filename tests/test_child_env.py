@@ -7,15 +7,15 @@ import sys
 
 import pytest
 
-from tests.test_run_cursor import World, auto_world
+from tests.test_run_cursor import World
 from vibemaxxing import childenv
 from vibemaxxing.errors import UsageError
 
 SECRETS = {
-    "CLAUDE_CODE_OAUTH_TOKEN": "EXTRATOKEN0000000000",
+    "CLAUDE_CODE_OAUTH_TOKEN": "OTHERTOKEN0000000000",
     "ANTHROPIC_API_KEY": "ANTHROPICKEY00000000",
     "ANTHROPIC_AUTH_TOKEN": "ANTHROPICAUTH0000000",
-    "CLAUDE_CONFIG_DIR": "/somewhere/.claude-extra",
+    "CLAUDE_CONFIG_DIR": "/somewhere/.claude-work",
     "GH_TOKEN": "GHTOKEN0000000000",
     "MY_SERVICE_SECRET": "SERVICESECRET00000",
     "VENDOR_API_KEY": "VENDORKEY000000000",
@@ -100,15 +100,6 @@ def test_a_claude_credential_can_never_be_passed_to_a_strict_child() -> None:
         childenv.build({"ANTHROPIC_API_KEY": "x"}, strict=True, pass_env=["ANTHROPIC_API_KEY"])
 
 
-def test_the_parent_carrying_a_claude_account() -> None:
-    assert childenv.parent_carries_claude_account({"CLAUDE_CODE_OAUTH_TOKEN": "t"})
-    assert childenv.parent_carries_claude_account({"CLAUDE_CONFIG_DIR": "/d"})
-    assert not childenv.parent_carries_claude_account({"ANTHROPIC_API_KEY": "k", "PATH": "/bin"})
-
-
-# --- cursor-agent ----------------------------------------------------------------------------
-
-
 def test_cursor_agent_gets_no_secret_and_no_claude_credential(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -157,15 +148,6 @@ def test_a_command_that_is_not_claude_also_gets_the_scrubbed_environment(
     assert capfd.readouterr().out.strip() == "[]"
 
 
-def test_auto_that_picks_cursor_scrubs_too(world: World) -> None:
-    auto_world(world, main_weekly=100)
-
-    world.main("run", "auto", "--needs", "slack", "--", "claude", "-p", "hi", "--model", "haiku")
-
-    (seen,) = world.fake.envs()
-    assert not [name for name in seen if childenv.looks_secret(name)]
-
-
 def test_the_dry_run_names_what_it_would_not_pass(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -182,46 +164,29 @@ def test_the_dry_run_names_what_it_would_not_pass(
 # --- Claude Code: the account is set on purpose --------------------------------------------------
 
 
-def test_a_stale_extra_token_never_decides_the_account(
+def test_a_token_inherited_from_another_session_never_decides_the_account(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Review finding 2: inside an extra session, `run auto` that picks main must run as main."""
-    auto_world(world, main_weekly=10)  # main is the live login
+    """Review finding 2: inside a session on another account, `run main` must run as main."""
+    world.claude_account("main", session=5, weekly=10, active=True)  # main is the live login
 
-    assert world.main("run", "auto", "--needs", "slack", "--", "claude", "-p", "hi") == 0
+    assert world.main("run", "main", "--", "claude", "-p", "hi") == 0
 
     (call,) = world.claude_calls(full=True)
     seen = call["env"]
     assert isinstance(seen, dict)
     assert seen["CLAUDE_CODE_OAUTH_TOKEN"] == "main-live-token"  # main's own, set explicitly
-    assert "EXTRATOKEN" not in json.dumps(seen)
+    assert "OTHERTOKEN" not in json.dumps(seen)
     assert "CLAUDE_CONFIG_DIR" not in seen and "ANTHROPIC_API_KEY" not in seen
     assert seen["GH_TOKEN"] == SECRETS["GH_TOKEN"]  # Claude Code on main keeps the person's own
-    err = capsys.readouterr().err
-    assert err == "vibemaxxing: auto picked main\n" and "EXTRATOKEN" not in err
-
-
-def test_the_live_login_runs_without_an_override_only_when_nothing_is_inherited(
-    tmp_home,
-    monkeypatch,  # type: ignore[no-untyped-def]
-) -> None:
-    for name in ("CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(name, raising=False)
-    world = World(tmp_home, monkeypatch)
-    world.add_cursor()
-    auto_world(world, main_weekly=10)
-
-    world.main("run", "auto", "--needs", "slack", "--", "claude", "-p", "hi")
-
-    (call,) = world.claude_calls(full=True)
-    assert call["has_token"] is False and call["has_config_dir"] is False
+    assert "OTHERTOKEN" not in capsys.readouterr().err
 
 
 def test_a_non_live_account_gets_its_own_token_over_the_inherited_one(world: World) -> None:
     world.claude_account("main", session=5, weekly=5)
-    world.claude_account("extra", session=5, weekly=5, active=True)  # extra is the live login
+    world.claude_account("work", session=5, weekly=5, active=True)  # work is the live login
 
-    world.main("run", "auto", "--needs", "slack", "--", "claude", "-p", "hi")
+    world.main("run", "main", "--", "claude", "-p", "hi")
 
     (call,) = world.claude_calls(full=True)
     seen = call["env"]
@@ -233,21 +198,12 @@ def test_a_non_live_account_gets_its_own_token_over_the_inherited_one(world: Wor
 def test_an_explicit_claude_account_run_is_scrubbed_of_the_inherited_family_too(
     world: World,
 ) -> None:
-    world.claude_account("extra", session=5, weekly=5)
+    world.claude_account("work", session=5, weekly=5)
 
-    world.main("run", "extra", "--", "claude", "-p", "hi")
+    world.main("run", "work", "--", "claude", "-p", "hi")
 
     (call,) = world.claude_calls(full=True)
     seen = call["env"]
     assert isinstance(seen, dict)
-    assert seen["CLAUDE_CODE_OAUTH_TOKEN"] == "extra-file-token"
+    assert seen["CLAUDE_CODE_OAUTH_TOKEN"] == "work-file-token"
     assert "ANTHROPIC_API_KEY" not in seen and "CLAUDE_CONFIG_DIR" not in seen
-
-
-def test_claude_own_commands_keep_the_environment_untouched(world: World) -> None:
-    world.main("run", "auto", "--", "claude", "--version")
-
-    (call,) = world.claude_calls(full=True)
-    seen = call["env"]
-    assert isinstance(seen, dict)
-    assert seen["CLAUDE_CODE_OAUTH_TOKEN"] == SECRETS["CLAUDE_CODE_OAUTH_TOKEN"]  # the person's own

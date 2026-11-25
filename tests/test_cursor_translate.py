@@ -229,16 +229,6 @@ def test_resume_without_an_id_and_continue_are_refused() -> None:
         run("-p", "-c", "x")
 
 
-def test_strip_resume_removes_every_form() -> None:
-    assert cursor_translate.strip_resume(["-p", "--resume", "abc", "go"]) == (["-p", "go"], True)
-    assert cursor_translate.strip_resume(["--resume=abc", "go"]) == (["go"], True)
-    assert cursor_translate.strip_resume(["-c", "-p", "go"]) == (["-p", "go"], True)
-    assert cursor_translate.strip_resume(["-p", "go"]) == (["-p", "go"], False)
-    assert cursor_translate.strip_resume(["--", "--resume"]) == (["--", "--resume"], False)
-    assert cursor_translate.resume_id(["-p", "--resume", "abc"]) == "abc"
-    assert cursor_translate.resume_id(["-p"]) is None
-
-
 # --- refusals --------------------------------------------------------------------------
 
 

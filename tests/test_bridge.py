@@ -838,7 +838,7 @@ sys.exit(cli.main(["bridge", "serve"], context=ctx))
 def test_a_scratch_mcp_client_reads_through_vibe_bridge_serve_as_a_real_process(
     tmp_path: Path,
 ) -> None:
-    """What Claude Code on extra does: start `vibe bridge serve`, list, call, read, try a write."""
+    """What Claude Code on an account without connectors does: serve, list, call, read, write."""
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -980,7 +980,7 @@ def test_an_unknown_upstream_and_microsoft_365_are_not_options(
     assert "invalid choice" in capsys.readouterr().err
 
 
-def test_add_command_prints_the_line_for_extras_config_dir_and_runs_nothing(
+def test_add_command_prints_the_line_for_a_config_dir_and_runs_nothing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     rig = CliRig(tmp_path)
@@ -989,7 +989,7 @@ def test_add_command_prints_the_line_for_extras_config_dir_and_runs_nothing(
 
     out = capsys.readouterr().out
     assert (
-        "CLAUDE_CONFIG_DIR=~/.claude-extra claude mcp add --scope user vibe-bridge -- vibe bridge serve"
+        "CLAUDE_CONFIG_DIR=~/.claude-<alias> claude mcp add --scope user vibe-bridge -- vibe bridge serve"
         in out
     )
     assert "vibe does not" in out
