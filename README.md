@@ -477,7 +477,7 @@ vibe bridge status        # who is logged in, token expiry, allowlist size, whet
 vibe bridge tools slack   # which allowlisted tools the live upstream offers, and whether our
                           # argument names match its own (names only; none of its text)
 vibe bridge logout slack|atlassian|all
-vibe bridge add-command   # prints the line that registers the bridge for a config dir; never runs it
+vibe bridge add-command --config-dir ~/.claude-work   # prints the registration line; never runs it
 ```
 
 **You do not need to register it for `vibe run` sessions.** `vibe run <account> -- claude ...`

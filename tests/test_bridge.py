@@ -985,16 +985,20 @@ def test_add_command_prints_the_line_for_a_config_dir_and_runs_nothing(
 ) -> None:
     rig = CliRig(tmp_path)
 
-    assert rig.main("bridge", "add-command") == 0
+    # No default dir: a placeholder such as ~/.claude-<alias> is no line a shell can run.
+    with pytest.raises(SystemExit) as exc:
+        rig.main("bridge", "add-command")
+    assert exc.value.code == 2
+    capsys.readouterr()
+
+    assert rig.main("bridge", "add-command", "--config-dir", "~/.claude-work") == 0
 
     out = capsys.readouterr().out
     assert (
-        "CLAUDE_CONFIG_DIR=~/.claude-<alias> claude mcp add --scope user vibe-bridge -- vibe bridge serve"
+        "CLAUDE_CONFIG_DIR=~/.claude-work claude mcp add --scope user vibe-bridge -- vibe bridge serve"
         in out
     )
     assert "vibe does not" in out
-    assert rig.main("bridge", "add-command", "--config-dir", "~/.claude-work") == 0
-    assert "CLAUDE_CONFIG_DIR=~/.claude-work claude mcp" in capsys.readouterr().out
 
 
 def test_the_bridge_has_no_model_and_no_nested_claude_left() -> None:

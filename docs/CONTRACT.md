@@ -1335,7 +1335,8 @@ What is left is the tick a scheduler calls every minute, `vibe auto tick` (`auto
    fetched). `cmd_auto_tick` first calls `Context.refresh_cursor_cache` for each Cursor seat.
    An unknown live login, or a pointer off the live login, fetches nothing: polling would treat
    the pointer's account as the one in use and refresh the live one's token behind Claude Code's
-   back. The line names the fix, `vibe switch <live>`.
+   back. The line names the fix, `vibe switch <live>`. This fetch is new with the removal: before,
+   a tick with auto-switch off (the default) stopped after the broker's pass.
 3. `publish_status` writes `status.json` (§18), and every `LOG_EVERY_S` (300 s) one line goes to
    `ticks.jsonl` (`at`, `live`, `pct`, `line`).
 
@@ -1649,8 +1650,8 @@ outcome `ok`, `upstream-error`, `failed`, `timeout`, `too-large`, `limit`, `refu
 process, then one `refused-suppressed`). No arguments, no
 content, no token. `routing.bridge` (`timeout_s`, `max_calls_per_hour`, `max_result_bytes`) cannot add a
 tool or an upstream. Commands: `vibe bridge login <slack|atlassian> [--client-id] [--port]`,
-`logout <upstream|all>`, `status`, `tools <upstream>`, `serve`, `add-command [--config-dir]` (prints the
-`claude mcp add` line for a config dir, `~/.claude-<alias>` by default; runs nothing).
+`logout <upstream|all>`, `status`, `tools <upstream>`, `serve`, `add-command --config-dir <dir>` (prints the
+`claude mcp add` line for that config dir; runs nothing).
 
 **Reaching a `vibe run` session** (`launch._with_bridge`): a Claude run started by `vibe run` has a token
 override and no `CLAUDE_CONFIG_DIR`, so Claude Code reads the default config, not `~/.claude-<alias>`, and a

@@ -67,6 +67,33 @@ def test_the_members_of_the_removed_routing_are_read_and_change_nothing(tmp_path
     assert not hasattr(routing, "order") and not hasattr(routing, "shared_login")
 
 
+def test_an_old_roles_member_keeps_the_connectors_with_the_account_it_named(tmp_path: Path) -> None:
+    # Before, connectors were looked up by role first: with main -> "stephan", the account
+    # "stephan" had main's connectors. That still holds, for the defaults and for given ones.
+    write(
+        tmp_path,
+        {
+            "routing": {
+                "roles": {"main": "stephan", "cursor": "cursor-work", "spare": "solo"},
+                "connectors": {"cursor": ["gcal"]},
+            }
+        },
+    )
+
+    routing = route.read_routing(tmp_path)
+
+    assert route.connectors_of(routing, "stephan") == {"slack", "atlassian", "m365"}
+    assert route.connectors_of(routing, "cursor-work") == {"gcal"}
+    assert route.connectors_of(routing, "solo") == set()
+
+
+@pytest.mark.parametrize("roles", [["main"], {"main": ""}, {"main": 1}])
+def test_a_wrong_roles_member_is_refused(tmp_path: Path, roles: object) -> None:
+    write(tmp_path, {"routing": {"roles": roles}})
+    with pytest.raises(UsageError, match="roles must map"):
+        route.read_routing(tmp_path)
+
+
 def test_the_default_connectors_name_no_account_that_does_not_exist() -> None:
     assert set(route.DEFAULT_CONNECTORS) == {"main", "cursor"}
 

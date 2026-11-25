@@ -1586,7 +1586,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_cmd = bridge_subs.add_parser(
         "add-command", help="print the `claude mcp add` command for a config dir"
     )
-    add_cmd.add_argument("--config-dir", default="~/.claude-<alias>")
+    add_cmd.add_argument(
+        "--config-dir", required=True, help="the config dir to register it in, e.g. ~/.claude-work"
+    )
     add_cmd.set_defaults(handler=cmd_bridge_add)
 
     remove = subs.add_parser("remove", help="forget an account")

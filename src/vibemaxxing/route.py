@@ -4,7 +4,8 @@
 lacks Slack or Atlassian (launch._with_bridge), and to refuse a Cursor run that declares a
 connector (--needs) its seat does not have. vibe never picks an account itself: the person names
 it. The member keeps its old name so an existing settings.json still reads, and the members of
-the removed `vibe run auto` are accepted and ignored.
+the removed `vibe run auto` are accepted and ignored. One of them still counts: `roles`, which
+named the alias a connector key such as "main" stood for, so those connectors stay with it.
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ _IGNORED: Final = frozenset(
         "default_needs",
         "no_degrade",
         "order",
-        "roles",
         "spent_percent",
         "shared_login",
         "timezone",
@@ -73,7 +73,7 @@ def parse_routing(raw: object, path: Path) -> Routing:
         return Routing()
     if not isinstance(raw, dict):
         raise _fail(path, "must be an object")
-    unknown = sorted(set(raw) - {"connectors", "bridge"} - _IGNORED)
+    unknown = sorted(set(raw) - {"connectors", "bridge", "roles"} - _IGNORED)
     if unknown:
         raise _fail(path, f"has unknown members: {', '.join(unknown)}")
     connectors: dict[str, tuple[str, ...]] = dict(DEFAULT_CONNECTORS)
@@ -86,6 +86,18 @@ def parse_routing(raw: object, path: Path) -> Routing:
             if parsed is None or any(name not in CONNECTORS for name in parsed):
                 raise _fail(path, f"connectors.{alias} must be a list of {', '.join(CONNECTORS)}")
             connectors[str(alias)] = parsed
+    roles = raw.get("roles")
+    if roles is not None:
+        if not isinstance(roles, dict) or not all(
+            isinstance(role, str) and isinstance(alias, str) and alias
+            for role, alias in roles.items()
+        ):
+            raise _fail(path, "roles must map a name to an account alias")
+        # An older file wrote its connectors under a role ("main") and named the account it
+        # stood for here; the connectors go with that account, as they did before.
+        by_role = {role: connectors[role] for role in roles if role in connectors}
+        for role, names in by_role.items():
+            connectors[roles[role]] = names
     return Routing(connectors=connectors, bridge=raw.get("bridge"))
 
 

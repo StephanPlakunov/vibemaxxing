@@ -497,6 +497,12 @@ def _config_dir_notes(svc: Services, alias: str, directory: str) -> list[str]:
 
 def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags) -> Plan:
     """The plan for `vibe run <alias> -- <command>`."""
+    if alias == "auto":
+        # Reserved, so never an account: say what replaced it rather than "no such account".
+        raise UsageError(
+            "`vibe run auto` was removed: vibe no longer picks the account, you name it",
+            "vibe run <account> -- claude   (vibe list shows the accounts)",
+        )
     if not command:
         raise UsageError("vibe run needs a command after --", "vibe run work -- claude")
     if codex.is_codex(svc.root, alias):

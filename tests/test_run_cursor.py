@@ -346,12 +346,13 @@ def test_needs_is_refused_on_a_claude_account_and_the_auto_flags_are_gone(
     assert world.claude_calls() == [] and world.fake.calls() == []
 
 
-def test_auto_is_no_account(world: World, capsys: pytest.CaptureFixture[str]) -> None:
+def test_run_auto_says_it_was_removed(world: World, capsys: pytest.CaptureFixture[str]) -> None:
     world.claude_account("main", session=1, weekly=1, active=True)
 
-    assert world.main("run", "auto", "--", "claude", "-p", "hi") == 4  # NotFoundError
+    assert world.main("run", "auto", "--", "claude", "-p", "hi") == 2  # UsageError
 
-    assert 'there is no account named "auto"' in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "`vibe run auto` was removed" in err and "vibe run <account>" in err
     assert world.claude_calls() == [] and world.fake.calls() == []
 
 

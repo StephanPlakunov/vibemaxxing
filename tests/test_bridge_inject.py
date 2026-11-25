@@ -211,7 +211,7 @@ def test_dry_run_shows_the_flag(world: World, capsys: pytest.CaptureFixture[str]
 def test_add_command_says_the_bridge_is_added_automatically(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    CliRig(tmp_path).main("bridge", "add-command")
+    CliRig(tmp_path).main("bridge", "add-command", "--config-dir", "~/.claude-work")
 
     out = capsys.readouterr().out
     assert "claude mcp add --scope user vibe-bridge -- vibe bridge serve" in out

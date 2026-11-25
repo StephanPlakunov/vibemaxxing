@@ -649,7 +649,7 @@ def write_mcp_config(root: Path, *, python: str | None = None) -> Path:
     return path
 
 
-def print_add_command(config_dir: str = "~/.claude-<alias>") -> str:
+def print_add_command(config_dir: str) -> str:
     """The command that registers the bridge with an account's config dir. Printed only."""
     return (
         f"CLAUDE_CONFIG_DIR={config_dir} claude mcp add --scope user {SERVER_NAME} "

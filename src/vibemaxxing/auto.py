@@ -104,7 +104,7 @@ def tick(
     report = broker.run(
         root, client=client, default_port=port, port_for=port_for, now_s=now_s, home=home
     )
-    result, live = _numbers(root, client=client, port=port, now_s=now_s)
+    result, live = _numbers(root, client=client, port=port, now_s=now_s, port_for=port_for)
     said = [*report.lines, *(f"problem: {problem}" for problem in report.problems)]
     if said:
         result = replace(result, line=f"{result.line} | broker: {'; '.join(said)}")
@@ -115,7 +115,12 @@ def tick(
 
 
 def _numbers(
-    root: Path, *, client: HttpClient, port: KeychainPort, now_s: float
+    root: Path,
+    *,
+    client: HttpClient,
+    port: KeychainPort,
+    now_s: float,
+    port_for: Callable[[Path], KeychainPort],
 ) -> tuple[TickResult, str | None]:
     """Fetch every account's numbers, and say who Claude Code runs as.
 
@@ -132,7 +137,7 @@ def _numbers(
             f"Claude Code runs as {live} but vibe's active account is {active or 'unset'}: "
             f"no numbers fetched - run: vibe switch {live}"
         ), live
-    envelope.collect(root, client=client, port=port, now_s=now_s)
+    envelope.collect(root, client=client, port=port, now_s=now_s, port_for=port_for)
     return TickResult(f"live {live}"), live
 
 
