@@ -291,5 +291,26 @@ def test_an_enterprise_seat_shows_its_monthly_spend_like_cursor() -> None:
         "schema": 1,
         "accounts": [{"alias": "zvoove-claude", "state": "ok", "fetched_at": 100.0, "rows": [row]}],
     }
-    assert statusline.render(doc, now_s=110.0) == "zvoove-claude: $0.15/$125"
-    assert statusline.render(doc, now_s=100.0 + 3600).endswith("$0.15/$125?")
+    assert statusline.render(doc, now_s=110.0) == "zvoove-claude: $0.15/$125 (0%)"
+    assert statusline.render(doc, now_s=100.0 + 3600).endswith("$0.15/$125 (0%)?")
+
+
+def test_the_spend_rows_carry_their_percent_in_brackets() -> None:
+    from vibemaxxing import statusline
+
+    spend = {"kind": "monthly_spend", "spend_used": 119.21, "spend_limit": 125.0}
+    claude = {"alias": "zvoove-claude", "state": "ok", "fetched_at": 100.0}
+    codex = {
+        "alias": "zvoove-codex",
+        "fetched_at": 100.0,
+        "spend": {"used": 3570.58, "limit": 5100, "unit": "credit"},
+    }
+    reported = {**claude, "rows": [{**spend, "percent": 95.4}]}
+    computed = {**claude, "rows": [spend]}
+
+    line = statusline.render({"schema": 1, "accounts": [reported], "codex": [codex]}, now_s=110.0)
+    assert "zvoove-claude: $119.21/$125 (95%)" in line
+    assert "zvoove-codex: 3570.58/5100 cr (70%)" in line
+    assert statusline.render({"schema": 1, "accounts": [computed]}, now_s=110.0) == (
+        "zvoove-claude: $119.21/$125 (95%)"
+    )
