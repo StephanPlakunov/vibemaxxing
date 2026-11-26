@@ -8,6 +8,7 @@ stored by vibe.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -16,6 +17,7 @@ import re
 import select
 import shutil
 import struct
+import signal
 import subprocess
 import termios
 import time
@@ -176,6 +178,26 @@ def _query(master: int, *, now_s: float) -> Reading:
     return parse_panel(panel, now_s=now_s)
 
 
+def _stop(child: subprocess.Popen[bytes], master: int) -> None:
+    """End agy and never block on it.
+
+    agy flushes its screen to the terminal while it exits. Nobody reads the
+    pty after the query, so an exiting agy can hang in that write; closing our
+    end first lets it finish. A child that still does not go is left to the
+    OS rather than hanging vibe.
+    """
+    with contextlib.suppress(OSError):
+        os.killpg(child.pid, signal.SIGTERM)
+    os.close(master)
+    try:
+        child.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(child.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            child.wait(timeout=2)
+
+
 class CliUsage:
     def read(self, workspace: Path, *, now_s: float) -> Reading:
         binary = _bin()
@@ -207,14 +229,11 @@ class CliUsage:
                 try:
                     return _query(master, now_s=now_s)
                 finally:
-                    child.terminate()
-                    try:
-                        child.wait(timeout=1)
-                    except subprocess.TimeoutExpired:
-                        child.kill()
-                        child.wait()
+                    _stop(child, master)
+                    master = -1
             finally:
-                os.close(master)
+                if master >= 0:
+                    os.close(master)
         except OSError:
             return Reading("unknown")
 
