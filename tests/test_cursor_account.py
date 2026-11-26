@@ -10,10 +10,8 @@ import pytest
 
 from tests.cursor_fakes import StubAgent, StubToken, usage_answer
 from tests.fakes import FakeHttpClient, FakeKeychain, fixture_usage, make_credential, seed_account
-from vibemaxxing import auto, cli, cursor, store
-from vibemaxxing.credentials import Identity
+from vibemaxxing import cli, cursor, store
 from vibemaxxing.errors import NetworkError
-from vibemaxxing.pool import Policy, Settings, Step
 
 NOW_S = 1_757_930_000.0
 
@@ -304,88 +302,3 @@ def test_the_token_never_reaches_any_output(rig: Rig, capsys: pytest.CaptureFixt
     for path in rig.root.rglob("*"):
         if path.is_file():
             assert str(rig.token.value).encode() not in path.read_bytes()
-
-
-# --- auto never goes to Cursor -----------------------------------------------------------------
-
-
-def _claude_world(
-    tmp_home: Path, rig: Rig, policy: Policy | None = None, *, b_weekly: int = 99
-) -> None:
-    for alias, weekly in (("a", 99), ("b", b_weekly)):
-        seed_account(
-            rig.root,
-            alias,
-            identity=Identity(None, f"u{alias}", None, None, None, None, None),
-            credential=make_credential(access=f"{alias}-file", refresh=f"{alias}-rt"),
-            active=alias == "a",
-        )
-        store.write_usage_cache(
-            rig.root,
-            alias,
-            store.UsageCache(
-                1_757_930_000.0,
-                NOW_S - 10,
-                {
-                    "limits": [
-                        {
-                            "kind": "session",
-                            "percent": 10,
-                            "resets_at": "2099-01-01T00:00:00+00:00",
-                        },
-                        {
-                            "kind": "weekly_all",
-                            "percent": weekly,
-                            "resets_at": "2099-01-01T00:00:00+00:00",
-                        },
-                    ]
-                },
-                None,
-                0,
-                None,
-            ),
-        )
-    (tmp_home / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "ua"}}))
-    from vibemaxxing.credentials import credential_to_blob
-
-    rig.port.blob = credential_to_blob(make_credential(access="a-live", refresh="a-live-rt"))
-    auto.write_settings(rig.root, Settings(auto_switch=True, policy=policy or Policy()))
-
-
-@pytest.mark.parametrize("named", [False, True])
-def test_auto_tick_never_switches_to_cursor_even_when_everything_else_is_spent(
-    tmp_home: Path, rig: Rig, named: bool
-) -> None:
-    rig.main("add", "cursor", "--kind", "cursor")
-    # Cursor has plenty of room; both Claude accounts are at 99%.
-    rig.queue_usage(percent=1.0, on_demand_used=0)
-    policy = Policy(steps=(Step("a", 85), Step("cursor", 99), Step("b", 99))) if named else None
-    _claude_world(tmp_home, rig, policy)
-
-    result = auto.tick(
-        rig.root, client=rig.client, port=rig.port, now_s=NOW_S, notify=lambda _: None
-    )
-
-    assert "cursor" not in result.line
-    assert store.read_active(rig.root) in ("a", "b")
-    assert rig.cursor_client.requests == []  # a tick does not even ask Cursor
-    assert auto.read_last(rig.root) is None or auto.read_last(rig.root).to_alias != "cursor"  # type: ignore[union-attr]
-
-
-def test_control_the_same_world_does_switch_when_a_claude_account_has_room(
-    tmp_home: Path, rig: Rig
-) -> None:
-    rig.main("add", "cursor", "--kind", "cursor")
-    _claude_world(tmp_home, rig, b_weekly=10)
-
-    result = auto.tick(
-        rig.root, client=rig.client, port=rig.port, now_s=NOW_S, notify=lambda _: None
-    )
-
-    assert result.switched and "a -> b" in result.line
-
-
-def test_auto_exclude_and_include_do_not_pretend_cursor_is_a_claude_account(rig: Rig) -> None:
-    rig.main("add", "cursor", "--kind", "cursor")
-
-    assert rig.main("auto", "exclude", "cursor") == 4

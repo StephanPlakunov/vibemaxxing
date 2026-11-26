@@ -472,7 +472,6 @@ def web_envelope() -> dict[str, object]:
         ],
         "pool": {"accounts": 1, "remaining_account_weeks": 0.9, "dry_in_seconds": None},
         "resets": [],
-        "auto_switch": {"enabled": False, "threshold": 99, "last_switch": None},
         "cursor": [
             {
                 "alias": "cursor", "kind": "cursor", "state": "ok", "message": None,

@@ -30,8 +30,8 @@ from vibemaxxing.models import AccountState
 
 NOW_MS = int(NOW_S * 1000)
 FUTURE_MS = NOW_MS + 4 * 3600 * 1000
-EXTRA = Identity(
-    "claude2@intra-ai.de", "uextra", "Intra AI", "org-intra", "team_tier_1", "stripe", "Claude2"
+ALT = Identity(
+    "claude2@intra-ai.de", "ualt", "Intra AI", "org-intra", "team_tier_1", "stripe", "Claude2"
 )
 STORED = dict(access="stored-at-0000", refresh="stored-rt-0000")
 SECRETS = ("stored-at-0000", "stored-rt-0000", "new-at-1111", "new-rt-1111", "stash-rt-2222")
@@ -49,7 +49,7 @@ class WatchedKeychain(FakeKeychain):
 
     def write(self, blob: str) -> None:
         assert self.root is not None
-        self.owned_at_write.append(store.read_account(self.root, "extra").config_dir)
+        self.owned_at_write.append(store.read_account(self.root, "alt").config_dir)
         if self.fail_write:
             raise VibeError("the macOS Keychain refused to write it", "vibe list")
         super().write("{}" if self.garble else blob)
@@ -78,16 +78,16 @@ def world(tmp_home: Path, monkeypatch: pytest.MonkeyPatch) -> World:
 
 
 def setup(world: World, *, credential: Credential | None = None, **account: object) -> Path:
-    """extra, vibe's own, with a stored login; ~/.claude-extra exists with its onboarding state."""
-    directory = world.home / ".claude-extra"
+    """alt, vibe's own, with a stored login; ~/.claude-alt exists with its onboarding state."""
+    directory = world.home / ".claude-alt"
     directory.mkdir(exist_ok=True)
     (directory / ".claude.json").write_text(
         json.dumps({"firstStartTime": "2026-11-03", "mcpServers": {"vibe-bridge": {"x": 1}}})
     )
     seed_account(
         world.root,
-        "extra",
-        identity=EXTRA,
+        "alt",
+        identity=ALT,
         credential=credential or stored_credential(),
         **account,  # type: ignore[arg-type]
     )
@@ -102,7 +102,7 @@ def dir_port(world: World, directory: Path) -> WatchedKeychain:
 
 
 def adopt(world: World, directory: Path) -> int:
-    return world.main("add", "extra", "--from-config-dir", str(directory), "--adopt-stored-login")
+    return world.main("add", "alt", "--from-config-dir", str(directory), "--adopt-stored-login")
 
 
 def token_posts(world: World) -> int:
@@ -111,7 +111,7 @@ def token_posts(world: World) -> int:
 
 def nothing_handed_over(world: World, directory: Path) -> None:
     assert dir_port(world, directory).blob is None
-    assert store.read_account(world.root, "extra").config_dir is None
+    assert store.read_account(world.root, "alt").config_dir is None
     json.loads((directory / ".claude.json").read_text())  # still the file Claude Code wrote
 
 
@@ -122,7 +122,7 @@ def test_the_stored_login_becomes_claude_codes_login_for_the_dir(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     directory = setup(world)
-    stored = store.read_account(world.root, "extra").credential
+    stored = store.read_account(world.root, "alt").credential
 
     assert adopt(world, directory) == 0
 
@@ -138,13 +138,13 @@ def test_the_stored_login_becomes_claude_codes_login_for_the_dir(
     got = parse_blob(port.blob)
     assert got == stored  # access, refresh, expiry, scopes, plan: every member as stored
     profile = json.loads((directory / ".claude.json").read_text())
-    assert profile["oauthAccount"]["accountUuid"] == "uextra"
+    assert profile["oauthAccount"]["accountUuid"] == "ualt"
     assert profile["oauthAccount"]["emailAddress"] == "claude2@intra-ai.de"
     assert profile["oauthAccount"]["organizationUuid"] == "org-intra"
     assert "profileFetchedAt" not in profile["oauthAccount"]  # Claude Code refetches the rest
     assert profile["mcpServers"] == {"vibe-bridge": {"x": 1}}  # what was there stays
     assert profile["firstStartTime"] == "2026-11-03"
-    account = store.read_account(world.root, "extra")
+    account = store.read_account(world.root, "alt")
     assert account.config_dir == str(directory) and account.credential == stored
     out = capsys.readouterr()
     assert not any(secret in out.out + out.err for secret in SECRETS)
@@ -166,14 +166,14 @@ def test_a_refresh_that_read_the_account_before_the_hand_over_cannot_post_after_
     world: World,
 ) -> None:
     directory = setup(world, credential=stored_credential(expires_ms=1_000))
-    before = store.read_account(world.root, "extra").credential  # what a tick read at 08:00
+    before = store.read_account(world.root, "alt").credential  # what a tick read at 08:00
     world.client.queue_json(
         200, {"access_token": "new-at-1111", "refresh_token": "new-rt-1111", "expires_in": 28800}
     )
     assert adopt(world, directory) == 0
     posts_for_adoption = token_posts(world)
 
-    late = oauth.refresh(world.root, "extra", before, world.client, now_ms=NOW_MS)
+    late = oauth.refresh(world.root, "alt", before, world.client, now_ms=NOW_MS)
 
     assert late.error == "owned" and late.credential is None
     assert token_posts(world) == posts_for_adoption  # the late tick sent nothing
@@ -184,7 +184,7 @@ def test_a_refresh_that_passed_the_first_check_sees_the_mark_under_the_claim(
 ) -> None:
     """The window between oauth.refresh's first look and its claim: the hand-over lands in it."""
     directory = setup(world, credential=stored_credential(expires_ms=1_000))
-    before = store.read_account(world.root, "extra").credential
+    before = store.read_account(world.root, "alt").credential
     claim = store.claim_refresh
 
     def claim_then_lose_the_race(root: Path, alias: str, *, now_s: float) -> bool:
@@ -197,10 +197,10 @@ def test_a_refresh_that_passed_the_first_check_sees_the_mark_under_the_claim(
 
     monkeypatch.setattr(store, "claim_refresh", claim_then_lose_the_race)
 
-    outcome = oauth.refresh(world.root, "extra", before, world.client, now_ms=NOW_MS)
+    outcome = oauth.refresh(world.root, "alt", before, world.client, now_ms=NOW_MS)
 
     assert outcome.error == "owned" and world.client.requests == []
-    assert not store._claim_path(world.root, "extra").exists()  # and the claim is let go
+    assert not store._claim_path(world.root, "alt").exists()  # and the claim is let go
 
 
 def test_a_claim_held_by_a_refresh_in_progress_stops_the_hand_over_with_nothing_written(
@@ -208,7 +208,7 @@ def test_a_claim_held_by_a_refresh_in_progress_stops_the_hand_over_with_nothing_
 ) -> None:
     directory = setup(world)
     assert store.claim_refresh(
-        world.root, "extra", now_s=time.time()
+        world.root, "alt", now_s=time.time()
     )  # the claim helper uses the real clock
 
     assert adopt(world, directory) != 0
@@ -226,7 +226,7 @@ def test_after_it_a_run_uses_the_dir_and_vibe_refreshes_nothing(
     assert adopt(world, directory) == 0
     posts = token_posts(world)
 
-    assert world.main("run", "extra", "--", "claude", "-p", "hi") == 0
+    assert world.main("run", "alt", "--", "claude", "-p", "hi") == 0
 
     (call,) = world.claude_calls(full=True)
     env = call["env"]
@@ -254,8 +254,8 @@ def test_an_ended_access_token_is_renewed_once_first_and_claude_code_gets_the_ne
     handed = parse_blob(port.blob)
     assert handed.refresh_token.reveal() == "new-rt-1111"  # the newest, not the spent one
     assert handed.access_token.reveal() == "new-at-1111" and handed.expires_at_ms > NOW_MS
-    assert store.read_account(world.root, "extra").credential == handed
-    assert store.read_stash(world.root, "extra") is None
+    assert store.read_account(world.root, "alt").credential == handed
+    assert store.read_stash(world.root, "alt") is None
 
 
 def test_a_dead_lineage_is_found_before_anything_is_handed_over(
@@ -287,7 +287,7 @@ def test_a_successor_in_the_stash_is_what_gets_handed_over(world: World) -> None
     directory = setup(world)
     store.write_stash(
         world.root,
-        "extra",
+        "alt",
         stored_credential(
             access="stash-at-2222", refresh="stash-rt-2222", expires_ms=FUTURE_MS + 1
         ),
@@ -299,7 +299,7 @@ def test_a_successor_in_the_stash_is_what_gets_handed_over(world: World) -> None
     assert port.blob is not None
     assert parse_blob(port.blob).refresh_token.reveal() == "stash-rt-2222"
     assert world.client.requests == []  # recovered from the stash: no request
-    assert store.read_stash(world.root, "extra") is None
+    assert store.read_stash(world.root, "alt") is None
 
 
 # --- refusals: nothing is written -----------------------------------------------------------------
@@ -307,19 +307,17 @@ def test_a_successor_in_the_stash_is_what_gets_handed_over(world: World) -> None
 
 def test_the_active_account_is_refused(world: World) -> None:
     directory = setup(world)
-    store.write_active(world.root, "extra")
+    store.write_active(world.root, "alt")
 
     assert adopt(world, directory) != 0
 
     assert dir_port(world, directory).blob is None
-    assert store.read_account(world.root, "extra").config_dir is None
+    assert store.read_account(world.root, "alt").config_dir is None
 
 
 def test_the_account_claude_code_runs_as_is_refused(world: World) -> None:
     directory = setup(world)
-    (world.home / ".claude.json").write_text(
-        json.dumps({"oauthAccount": {"accountUuid": "uextra"}})
-    )
+    (world.home / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "ualt"}}))
     world.port.blob = credential_to_blob(make_credential(access="live-at", refresh="live-rt"))
 
     assert adopt(world, directory) != 0
@@ -337,8 +335,8 @@ def test_a_dir_that_already_has_a_login_is_never_overwritten(
     assert adopt(world, directory) != 0
 
     assert dir_port(world, directory).blob == mine
-    assert store.read_account(world.root, "extra").config_dir is None
-    assert f"vibe add extra --from-config-dir {directory}" in capsys.readouterr().err
+    assert store.read_account(world.root, "alt").config_dir is None
+    assert f"vibe add alt --from-config-dir {directory}" in capsys.readouterr().err
 
 
 def test_a_dir_whose_profile_names_another_account_is_refused(world: World) -> None:
@@ -356,7 +354,7 @@ def test_a_dir_whose_profile_names_another_account_is_refused(world: World) -> N
 @pytest.mark.parametrize("state", ["needs_login", "lapsed", "no_uuid"])
 def test_a_stored_login_that_cannot_be_handed_over_is_refused(world: World, state: str) -> None:
     directory = setup(world)
-    account = store.read_account(world.root, "extra")
+    account = store.read_account(world.root, "alt")
     if state == "needs_login":
         account = replace(account, state=AccountState.NEEDS_LOGIN)
     elif state == "lapsed":
@@ -369,7 +367,7 @@ def test_a_stored_login_that_cannot_be_handed_over_is_refused(world: World, stat
     assert adopt(world, directory) != 0
 
     assert dir_port(world, directory).blob is None
-    assert store.read_account(world.root, "extra").config_dir is None
+    assert store.read_account(world.root, "alt").config_dir is None
 
 
 def test_an_account_that_lives_in_another_dir_is_refused(world: World) -> None:
@@ -378,14 +376,14 @@ def test_an_account_that_lives_in_another_dir_is_refused(world: World) -> None:
     assert adopt(world, directory) != 0
 
     assert dir_port(world, directory).blob is None
-    assert store.read_account(world.root, "extra").config_dir == "/somewhere/.claude-else"
+    assert store.read_account(world.root, "alt").config_dir == "/somewhere/.claude-else"
 
 
 def test_it_needs_an_account_and_a_dir_and_a_claude_account(world: World) -> None:
     setup(world)
 
     assert world.main("add", "--from-config-dir", "/x", "--adopt-stored-login") != 0
-    assert world.main("add", "extra", "--adopt-stored-login") != 0
+    assert world.main("add", "alt", "--adopt-stored-login") != 0
     assert (
         world.main(
             "add", "cursor", "--kind", "cursor", "--from-config-dir", "/x", "--adopt-stored-login"
@@ -406,7 +404,7 @@ def test_a_refused_keychain_write_gives_the_lineage_back_to_vibe(world: World) -
 
     # The item is not there, so nobody else holds the lineage: vibe may refresh it again.
     assert dir_port(world, directory).blob is None
-    assert store.read_account(world.root, "extra").config_dir is None
+    assert store.read_account(world.root, "alt").config_dir is None
 
 
 def test_a_write_that_may_have_landed_keeps_the_mark_and_a_rerun_finishes_it(
@@ -419,15 +417,15 @@ def test_a_write_that_may_have_landed_keeps_the_mark_and_a_rerun_finishes_it(
     assert adopt(world, directory) != 0
 
     assert port.blob is not None  # it did land
-    assert store.read_account(world.root, "extra").config_dir == str(
+    assert store.read_account(world.root, "alt").config_dir == str(
         directory
     )  # a second holder is worse
     # vibe never refreshes it meanwhile
     assert (
         oauth.refresh(
             world.root,
-            "extra",
-            store.read_account(world.root, "extra").credential,
+            "alt",
+            store.read_account(world.root, "alt").credential,
             world.client,
             now_ms=NOW_MS,
         ).error
@@ -444,13 +442,13 @@ def test_a_garbled_read_back_is_a_failure_and_keeps_the_mark(world: World) -> No
 
     assert adopt(world, directory) != 0
 
-    assert store.read_account(world.root, "extra").config_dir == str(directory)
+    assert store.read_account(world.root, "alt").config_dir == str(directory)
 
 
 def test_a_crash_after_the_mark_is_finished_by_running_it_again(world: World) -> None:
-    """Marked as the dir's, item never written: `vibe run extra` says no login; this fixes it."""
+    """Marked as the dir's, item never written: `vibe run alt` says no login; this fixes it."""
     directory = setup(world, config_dir=None)
-    account = store.read_account(world.root, "extra")
+    account = store.read_account(world.root, "alt")
     store.write_account(world.root, replace(account, config_dir=str(directory)))
 
     assert adopt(world, directory) == 0
@@ -467,7 +465,7 @@ def test_a_corrupt_profile_stops_before_the_login_is_written(world: World) -> No
     assert adopt(world, directory) != 0
 
     assert dir_port(world, directory).blob is None
-    assert store.read_account(world.root, "extra").config_dir is None
+    assert store.read_account(world.root, "alt").config_dir is None
     assert (directory / ".claude.json").read_text() == "{ not json"  # Claude Code's file, as found
 
 
@@ -475,10 +473,10 @@ def test_a_corrupt_profile_stops_before_the_login_is_written(world: World) -> No
 
 
 def vibe_owned(world: World, *, ends_in_s: int) -> None:
-    world.claude_account("extra", session=5, weekly=5)  # a fresh usage cache: polls ask nothing
-    account = store.read_account(world.root, "extra")
+    world.claude_account("alt", session=5, weekly=5)  # a fresh usage cache: polls ask nothing
+    account = store.read_account(world.root, "alt")
     credential = make_credential(
-        access="extra-at-0", refresh="extra-rt-0", expires_at_ms=NOW_MS + ends_in_s * 1000
+        access="alt-at-0", refresh="alt-rt-0", expires_at_ms=NOW_MS + ends_in_s * 1000
     )
     store.write_account(world.root, replace(account, credential=credential))
 
@@ -491,7 +489,7 @@ def test_a_poll_leaves_a_token_alone_that_still_works(world: World) -> None:
     assert world.main("list") == 0
 
     assert token_posts(world) == 0
-    assert store.read_account(world.root, "extra").credential.access_token.reveal() == "extra-at-0"
+    assert store.read_account(world.root, "alt").credential.access_token.reveal() == "alt-at-0"
 
 
 def test_a_poll_refreshes_a_token_that_has_ended(world: World) -> None:
@@ -512,7 +510,7 @@ def test_a_run_still_refreshes_inside_the_window_because_its_child_cannot(world:
         200, {"access_token": "new-at-1111", "refresh_token": "new-rt-1111", "expires_in": 28800}
     )
 
-    assert world.main("run", "extra", "--", "claude", "-p", "hi") == 0
+    assert world.main("run", "alt", "--", "claude", "-p", "hi") == 0
 
     assert token_posts(world) == 1
     (call,) = world.claude_calls(full=True)

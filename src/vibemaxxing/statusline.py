@@ -24,14 +24,13 @@ SCHEMA_VERSION: Final = 1
 STALE_S: Final = 15 * 60
 NO_STATUS: Final = "vibe: no status yet"
 _LABELS: Final = {"session": "5h", "weekly_all": "wk"}
-_SCOPED_KIND: Final = "weekly_scoped"
-_SCOPED_PREFIX: Final = "Weekly · "  # usage.SCOPED_LABEL_PREFIX, not imported: see above
 # English, whatever the locale: strftime("%a") follows LC_TIME.
 _WEEKDAYS: Final = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
-# childenv.SESSION_VAR and SESSION_LIVE, and what pins an account: not imported, see above.
+# childenv.SESSION_VAR, and what pins an account: not imported, see above.
 SESSION_VAR: Final = "VIBE_SESSION"
+# The mark sessions on Claude Code's own login carried while vibe could start them that way.
 SESSION_LIVE: Final = "live"
 _TOKEN_VAR: Final = "CLAUDE_CODE_OAUTH_TOKEN"
 _CONFIG_VAR: Final = "CLAUDE_CONFIG_DIR"
@@ -84,24 +83,9 @@ def _when(at_s: float, now_s: float) -> str:
     return clock if at.date() == now.date() else f"{_WEEKDAYS[at.weekday()]} {clock}"
 
 
-def _models(document: Mapping[str, object]) -> set[str]:
-    policy = document.get("policy")
-    models = policy.get("block_models") if isinstance(policy, dict) else None
-    if not isinstance(models, list):
-        return set()
-    return {model.casefold() for model in models if isinstance(model, str)}
-
-
-def _label(row: Mapping[str, object], models: set[str]) -> str | None:
+def _label(row: Mapping[str, object]) -> str | None:
     kind = row.get("kind")
-    if isinstance(kind, str) and kind in _LABELS:
-        return _LABELS[kind]
-    label = _text(row.get("label"))
-    if kind != _SCOPED_KIND or label is None or not label.startswith(_SCOPED_PREFIX):
-        return None
-    model = label.removeprefix(_SCOPED_PREFIX)
-    # A model's own row shows only when the policy counts it, like the rows that move it.
-    return model if model.casefold() in models else None
+    return _LABELS[kind] if isinstance(kind, str) and kind in _LABELS else None
 
 
 def _spend(rows: object, fetched: float | None, now_s: float) -> str | None:
@@ -121,7 +105,7 @@ def _spend(rows: object, fetched: float | None, now_s: float) -> str | None:
     return None
 
 
-def _account(entry: Mapping[str, object], models: set[str], now_s: float) -> str | None:
+def _account(entry: Mapping[str, object], now_s: float) -> str | None:
     alias = _text(entry.get("alias"))
     if alias is None:
         return None
@@ -136,7 +120,7 @@ def _account(entry: Mapping[str, object], models: set[str], now_s: float) -> str
     for row in rows if isinstance(rows, list) and fetched is not None else []:
         if not isinstance(row, dict):
             continue
-        label, percent = _label(row, models), _number(row.get("percent"))
+        label, percent = _label(row), _number(row.get("percent"))
         resets = _number(row.get("resets_at"))
         # A row whose window rolled over since it was read says nothing about now.
         if label is None or percent is None or (resets is not None and resets <= now_s):
@@ -281,7 +265,7 @@ def session_account(
     """The account of the session this status line belongs to, and whether it is fixed.
 
     ``(None, False)`` is a session on Claude Code's own login: it is whatever account that
-    login is now, and follows the background switch. Claude Code and Cursor run the status
+    login is now (`vibe switch` changes it). Claude Code and Cursor run the status
     line command with their own environment, which `vibe run` marked (``VIBE_SESSION``); a
     session vibe did not start is told apart by the variables that pin an account.
     """
@@ -309,9 +293,8 @@ def render(
 ) -> str:
     """One line: this session's account, then each account's session and weekly rows.
 
-    ``session`` comes from `session_account`: a session on the shared login shows the account
-    that login is now (the one the background switch last moved it to); a fixed one shows its
-    own account and says so.
+    ``session`` comes from `session_account`: a session on Claude Code's own login shows the
+    account that login is now; a fixed one shows its own account and says so.
     """
     if document is None:
         return NO_STATUS
@@ -325,11 +308,10 @@ def render(
     else:
         # Every session vibe pins says so, a Cursor seat's too: `vibe run <account>` means fixed.
         parts.append(f"▶ {alias}" + (" (fixed)" if fixed else ""))
-    models = _models(document)
     accounts = document.get("accounts")
     for entry in accounts if isinstance(accounts, list) else []:
         if isinstance(entry, dict):
-            text = _account(entry, models, now_s)
+            text = _account(entry, now_s)
             if text is not None:
                 parts.append(text)
     for seat in seats if isinstance(seats, list) else []:

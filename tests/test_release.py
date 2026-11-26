@@ -1,9 +1,9 @@
 """`vibe release ALIAS`: a config dir's login moves into vibe's store, and the dir keeps none.
 
-The inverse of `--adopt-stored-login`, for one shared login: once vibe holds extra, auto-switch can
-put it into Claude Code's default login. One login must only ever live in one place, so the dir's
-own Keychain item is deleted, and a failed delete puts the account file back. Fakes only: a fake
-Keychain per dir, a fake process listing, no request, no real login.
+The inverse of `--adopt-stored-login`: once vibe holds alt, the token broker renews it and
+`vibe switch` can put it into Claude Code's default login. One login must only ever live in one
+place, so the dir's own Keychain item is deleted, and a failed delete puts the account file back.
+Fakes only: a fake Keychain per dir, a fake process listing, no request, no real login.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from vibemaxxing.models import AccountState
 
 NOW_MS = int(NOW_S * 1000)
 FUTURE_MS = NOW_MS + 4 * 3600 * 1000
-EXTRA = Identity("claude2@intra-ai.de", "uextra", "Intra AI", "org-intra", None, None, "Claude2")
+ALT = Identity("claude2@intra-ai.de", "ualt", "Intra AI", "org-intra", None, None, "Claude2")
 MAIN = Identity("me@intra-ai.de", "umain", None, None, None, None, None)
 SECRETS = ("stored-at-0000", "stored-rt-0000", "dir-at-1111", "dir-rt-1111", "main-live-at")
 
@@ -104,13 +104,13 @@ def dir_credential(**kw: object) -> Credential:
 def setup(
     world: World,
     *,
-    uuid: str = "uextra",
+    uuid: str = "ualt",
     credential: Credential | None = None,
     port: FakeKeychain | None = None,
     **account: object,
 ) -> Path:
-    """extra, imported from ~/.claude-extra: the stored copy is old, the dir's is Claude Code's."""
-    directory = world.home / ".claude-extra"
+    """alt, imported from ~/.claude-alt: the stored copy is old, the dir's is Claude Code's."""
+    directory = world.home / ".claude-alt"
     directory.mkdir(exist_ok=True)
     (directory / ".claude.json").write_text(
         json.dumps({"oauthAccount": {"accountUuid": uuid}, "mcpServers": {"vibe-bridge": {}}})
@@ -119,8 +119,8 @@ def setup(
     fields.update(account)
     seed_account(
         world.root,
-        "extra",
-        identity=EXTRA,
+        "alt",
+        identity=ALT,
         credential=make_credential(
             access="stored-at-0000", refresh="stored-rt-0000", expires_at_ms=1_000
         ),
@@ -158,24 +158,24 @@ def test_the_dirs_login_moves_into_vibe_and_the_dir_keeps_none(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     directory = setup(world)
-    store.write_stash(world.root, "extra", make_credential(refresh="stash-rt-old"))
+    store.write_stash(world.root, "alt", make_credential(refresh="stash-rt-old"))
     before = snapshot(world, directory)
 
-    assert run(world, "extra") == 0
+    assert run(world, "alt") == 0
 
     out = capsys.readouterr()
     assert out.out == (
-        "released extra: vibe holds its login now; ~/.claude-extra has no login any more\n"
+        "released alt: vibe holds its login now; ~/.claude-alt has no login any more\n"
     )
     assert not any(secret in out.out + out.err for secret in SECRETS)
-    account = store.read_account(world.root, "extra")
+    account = store.read_account(world.root, "alt")
     assert account.config_dir is None
     assert account.credential == dir_credential()  # the dir's login, not the stale stored copy
-    assert account.state is AccountState.OK and account.identity == EXTRA
-    assert "config_dir" not in json.loads(store.account_path(world.root, "extra").read_text())
+    assert account.state is AccountState.OK and account.identity == ALT
+    assert "config_dir" not in json.loads(store.account_path(world.root, "alt").read_text())
     assert world.dirs[str(directory)].blob is None
     assert "keychain.delete" in world.dirs[str(directory)].log
-    assert store.read_stash(world.root, "extra") is None  # an old lineage's successor is gone
+    assert store.read_stash(world.root, "alt") is None  # an old lineage's successor is gone
     after = snapshot(world, directory)
     # Nothing else: the default login, ~/.claude.json, the dir's profile, main, the pointer.
     for key in ("active", "default_blob", "home_profile", "dir_profile"):
@@ -188,27 +188,27 @@ def test_the_dirs_login_moves_into_vibe_and_the_dir_keeps_none(
 def test_json_says_what_was_released(world: World, capsys: pytest.CaptureFixture[str]) -> None:
     directory = setup(world)
 
-    assert run(world, "extra", "--json") == 0
+    assert run(world, "alt", "--json") == 0
 
     out = json.loads(capsys.readouterr().out)
     assert (out["ok"], out["action"], out["alias"], out["config_dir"]) == (
         True,
         "release",
-        "extra",
+        "alt",
         str(directory),
     )
 
 
 def test_after_it_vibe_may_refresh_it_and_switch_to_it(world: World) -> None:
     setup(world, credential=dir_credential(expires_at_ms=1_000))
-    assert run(world, "extra") == 0
+    assert run(world, "alt") == 0
     world.client.queue_json(
         200, {"access_token": "new-at-2222", "refresh_token": "new-rt-2222", "expires_in": 28800}
     )
 
-    account = store.read_account(world.root, "extra")
-    outcome = oauth.refresh(world.root, "extra", account.credential, world.client, now_ms=NOW_MS)
-    store.refuse_owned(store.read_account(world.root, "extra"))  # no longer refused
+    account = store.read_account(world.root, "alt")
+    outcome = oauth.refresh(world.root, "alt", account.credential, world.client, now_ms=NOW_MS)
+    store.refuse_owned(store.read_account(world.root, "alt"))  # no longer refused
 
     assert outcome.error is None and outcome.credential is not None
     (request,) = world.client.requests
@@ -223,18 +223,18 @@ def refused(
 ) -> None:
     before = snapshot(world, directory)
 
-    assert run(world, "extra", processes=processes) == code
+    assert run(world, "alt", processes=processes) == code
 
     assert snapshot(world, directory) == before
     assert world.client.requests == []
 
 
-@pytest.mark.parametrize("value", ["{dir}", "{dir}/", "{link}", "~/.claude-extra", "relative/dir"])
+@pytest.mark.parametrize("value", ["{dir}", "{dir}/", "{link}", "~/.claude-alt", "relative/dir"])
 def test_a_session_running_in_the_dir_is_refused_and_named(
     world: World, capsys: pytest.CaptureFixture[str], value: str
 ) -> None:
     directory = setup(world)
-    link = world.home / "extra-link"
+    link = world.home / "alt-link"
     link.symlink_to(directory)
     setting = value.format(dir=directory, link=link)
     listing = FakeProcesses(
@@ -247,7 +247,7 @@ def test_a_session_running_in_the_dir_is_refused_and_named(
 
     err = capsys.readouterr().err
     assert "4711" in err and "4712" not in err
-    assert "Close those sessions" in err and "vibe release extra" in err
+    assert "Close those sessions" in err and "vibe release alt" in err
 
 
 def test_a_process_list_that_cannot_be_read_is_refused(
@@ -279,7 +279,7 @@ def test_a_lapsed_or_rejected_login_is_refused(world: World, how: str) -> None:
         directory = setup(world, credential=dir_credential(refresh_expires_at_ms=NOW_MS - 1))
     else:
         directory = setup(world, credential=dir_credential(refresh="stored-rt-0000"))
-        stored = store.read_account(world.root, "extra")
+        stored = store.read_account(world.root, "alt")
         store.write_account(world.root, replace(stored, state=AccountState.NEEDS_LOGIN))
 
     refused(world, directory, 3)
@@ -304,17 +304,15 @@ def test_an_account_vibe_holds_already_is_refused(
 
 def test_the_active_account_is_refused(world: World) -> None:
     directory = setup(world)
-    store.write_active(world.root, "extra")
+    store.write_active(world.root, "alt")
 
     refused(world, directory, 2)
 
 
 def test_the_account_claude_code_runs_as_is_refused(world: World) -> None:
     directory = setup(world)
-    # `active` still says main, but ~/.claude.json and the port say Claude Code runs as extra.
-    (world.home / ".claude.json").write_text(
-        json.dumps({"oauthAccount": {"accountUuid": "uextra"}})
-    )
+    # `active` still says main, but ~/.claude.json and the port say Claude Code runs as alt.
+    (world.home / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "ualt"}}))
 
     refused(world, directory, 2)
 
@@ -325,7 +323,7 @@ def test_an_unknown_account_is_not_found(world: World) -> None:
 
 def test_a_claim_held_by_a_refresh_stops_it_with_nothing_written(world: World) -> None:
     directory = setup(world)
-    assert store.claim_refresh(world.root, "extra", now_s=NOW_S + 10**6)
+    assert store.claim_refresh(world.root, "alt", now_s=NOW_S + 10**6)
 
     refused(world, directory, 2)
 
@@ -337,15 +335,15 @@ def test_a_refused_delete_puts_the_account_file_back(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     directory = setup(world, port=StubbornKeychain(refuse=True))
-    store.write_stash(world.root, "extra", make_credential(refresh="stash-rt-old"))
+    store.write_stash(world.root, "alt", make_credential(refresh="stash-rt-old"))
     before = snapshot(world, directory)
 
-    assert run(world, "extra") == 5
+    assert run(world, "alt") == 5
 
     assert snapshot(world, directory) == before  # config_dir and the old credential are back
-    assert store.read_account(world.root, "extra").config_dir == str(directory)
+    assert store.read_account(world.root, "alt").config_dir == str(directory)
     assert world.dirs[str(directory)].blob is not None  # the dir still holds its login, alone
-    assert store.read_stash(world.root, "extra") is not None  # nothing else changed either
+    assert store.read_stash(world.root, "alt") is not None  # nothing else changed either
     err = capsys.readouterr().err
     assert "could not delete" in err and "back as it was" in err
     assert not any(secret in err for secret in SECRETS)
@@ -354,9 +352,9 @@ def test_a_refused_delete_puts_the_account_file_back(
 def test_a_delete_that_says_it_failed_but_removed_the_item_is_a_release(world: World) -> None:
     directory = setup(world, port=StubbornKeychain(late=True))
 
-    assert run(world, "extra") == 0
+    assert run(world, "alt") == 0
 
-    assert store.read_account(world.root, "extra").config_dir is None
+    assert store.read_account(world.root, "alt").config_dir is None
     assert world.dirs[str(directory)].blob is None
 
 
@@ -365,13 +363,13 @@ def test_a_delete_whose_outcome_cannot_be_told_gives_the_login_back_to_the_dir(
 ) -> None:
     directory = setup(world, port=StubbornKeychain(late=True, unreadable_after=True))
 
-    assert run(world, "extra") == 5
+    assert run(world, "alt") == 5
 
-    account = store.read_account(world.root, "extra")
+    account = store.read_account(world.root, "alt")
     # vibe must not believe it holds a login that may still be in the dir: it never refreshes it.
     assert account.config_dir == str(directory)
     assert account.credential == dir_credential()  # with the newest copy, should the item be gone
-    outcome = oauth.refresh(world.root, "extra", account.credential, world.client, now_ms=NOW_MS)
+    outcome = oauth.refresh(world.root, "alt", account.credential, world.client, now_ms=NOW_MS)
     assert outcome.error == "owned"
     assert "could not tell whether" in capsys.readouterr().err
 
@@ -385,9 +383,9 @@ def test_an_interrupted_delete_leaves_the_login_with_the_dir(world: World) -> No
     directory = setup(world, port=Interrupted())
 
     with pytest.raises(KeyboardInterrupt):
-        run(world, "extra")
+        run(world, "alt")
 
-    account = store.read_account(world.root, "extra")
+    account = store.read_account(world.root, "alt")
     assert account.config_dir == str(directory) and account.credential == dir_credential()
     assert world.dirs[str(directory)].blob is not None
 
@@ -396,13 +394,13 @@ def test_an_interrupted_delete_leaves_the_login_with_the_dir(world: World) -> No
 
 
 def test_holders_reads_the_variable_from_each_process_environment(tmp_path: Path) -> None:
-    directory = tmp_path / ".claude-extra"
+    directory = tmp_path / ".claude-alt"
     directory.mkdir()
     listing = (
         "  101 claude CLAUDE_CONFIG_DIR=" + str(directory) + "\n"
         "  102 claude CLAUDE_CONFIG_DIR=" + str(directory) + "-2\n"
         "  103 claude XCLAUDE_CONFIG_DIR=" + str(directory) + "\n"
-        "  104 /usr/bin/python vibe release extra CLAUDE_CONFIG_DIR=" + str(directory) + "\n"
+        "  104 /usr/bin/python vibe release alt CLAUDE_CONFIG_DIR=" + str(directory) + "\n"
         "  105 zsh CLAUDE_CONFIG_DIR=\n"
         "garbage line\n"
     )
@@ -458,7 +456,7 @@ def test_mac_keychain_delete_removes_that_item_only(
         return subprocess.CompletedProcess(argv, code, "", "")
 
     monkeypatch.setattr(subprocess, "run", run)
-    directory = tmp_home / ".claude-extra"
+    directory = tmp_home / ".claude-alt"
     port = keychain.config_dir_port(directory)
     assert isinstance(port, MacKeychain)
 
@@ -475,7 +473,7 @@ def test_mac_keychain_delete_removes_that_item_only(
 
 
 def test_file_keychain_delete_removes_the_file(tmp_home: Path) -> None:
-    path = tmp_home / ".claude-extra" / ".credentials.json"
+    path = tmp_home / ".claude-alt" / ".credentials.json"
     port = FileKeychain(path)
     port.write('{"claudeAiOauth": {}}')
 
@@ -487,9 +485,9 @@ def test_file_keychain_delete_removes_the_file(tmp_home: Path) -> None:
 
 def test_the_released_credential_round_trips(world: World) -> None:
     setup(world)
-    assert run(world, "extra") == 0
+    assert run(world, "alt") == 0
 
-    blob = credential_to_blob(store.read_account(world.root, "extra").credential)
+    blob = credential_to_blob(store.read_account(world.root, "alt").credential)
 
     assert parse_blob(blob) == dir_credential()
 
@@ -497,7 +495,7 @@ def test_the_released_credential_round_trips(world: World) -> None:
 def test_only_claude_code_holds_the_dir_not_what_a_session_started() -> None:
     from vibemaxxing.release import holders, is_claude_code
 
-    env = "CLAUDE_CONFIG_DIR=/Users/x/.claude-extra"
+    env = "CLAUDE_CONFIG_DIR=/Users/x/.claude-alt"
     listing = "\n".join(
         [
             f"101 claude --mcp-config=/x.json {env}",
@@ -507,5 +505,5 @@ def test_only_claude_code_holds_the_dir_not_what_a_session_started() -> None:
             f"105 /usr/bin/python3 -m vibemaxxing bridge serve {env}",
         ]
     )
-    assert holders(listing, Path("/Users/x/.claude-extra"), own_pid=1) == (101, 102)
+    assert holders(listing, Path("/Users/x/.claude-alt"), own_pid=1) == (101, 102)
     assert is_claude_code("claude -p hi") and not is_claude_code("python3 claude_helper.py")

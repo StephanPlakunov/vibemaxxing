@@ -2,9 +2,9 @@
 
 The inverse of `--adopt-stored-login` (adopt.py). An account imported with `--from-config-dir`
 records its dir, and Claude Code in that dir is the one refresher of its lineage
-(`store.Account.config_dir`). For one shared login instead (auto-switch puts each stored account
-into Claude Code's default login in turn), vibe has to hold that lineage itself, and the dir must
-stop holding it: a refresh token has one holder, and a second copy that a session in the dir
+(`store.Account.config_dir`). For vibe to hold that lineage itself instead (the token broker
+renews it, `vibe switch` can put it into Claude Code's default login), the dir must stop holding
+it: a refresh token has one holder, and a second copy that a session in the dir
 renews spends the copy vibe keeps, and reusing that can revoke the whole login.
 
 So the move is one way and in this order:
@@ -159,7 +159,7 @@ def release(
         # could start in the dir and renew the login is this function, milliseconds.
         _refuse_sessions(directory, processes, own_pid, recovery)
         credential = _dir_login(before, directory, dir_port, now_ms)
-        # vibe holds it from here: it may refresh it, and auto-switch may put it into the
+        # vibe holds it from here: it may refresh it, and `vibe switch` may put it into the
         # default login. Under the claim, so no refresh can start before the item is gone.
         released = replace(
             before, credential=credential, config_dir=None, state=AccountState.OK, message=None

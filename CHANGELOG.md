@@ -5,6 +5,29 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - fork `stephan/ordered-failover`
 
+### Removed
+
+- **vibe never switches or picks an account by itself any more.** The person switches (`vibe switch`)
+  and names the account (`vibe run <account>`). Gone: automatic switching (`vibe auto on|off|undo|
+  exclude|include`, the ordered `policy`, the faster polling near a limit, the switch notification,
+  `auto.json`), the routing of `vibe run auto` (the order, the roles, the
+  shared login, `--no-needs`, `--claude-only`, `--brief`, `--handover`), `vibe shell-init` (`cw`/`cs`),
+  `scripts/switch-to-shared-login.zsh`, `scripts/verify_auto_live.py` and the cutover notes. The
+  `auto_switch` block of the `--json` envelope and the `policy`/`last_switch` members of
+  `status.json` are gone too; the TUI and the web page no longer show an auto-switch line.
+- **Kept:** `vibe auto tick` (the launchd job every minute) renews the token broker's logins and
+  writes `status.json` as before; `vibe auto install|uninstall|status`, `vibe switch`,
+  `vibe run <account>` with vibe-bridge, and `routing.connectors` / `routing.bridge`. An existing
+  `settings.json` keeps working: the members of the removed features are accepted and ignored,
+  except `routing.roles`, which still gives a connector key such as `main` to the account it named.
+- **Changed:** the tick now fetches every account's numbers on every run, so the status lines stay
+  current. Before, only a tick with auto-switch on fetched any; with it off (the default), the
+  installed job ran only the broker. Like every poll (`vibe list`, the TUI, the web page), it
+  renews a vibe-owned account's access token once that has ended. When vibe's active pointer is off the live login, the tick no longer repairs it by
+  switching: it fetches nothing and its line says `vibe switch <live>`.
+- **Changed:** `vibe bridge add-command` needs `--config-dir`; its old default was a placeholder
+  no shell could run. `vibe run auto` now says it was removed, instead of "no account named auto".
+
 ### Added
 
 - **Codex: the limit a plan reports, in its own unit.** A usage-based business workspace

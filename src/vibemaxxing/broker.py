@@ -8,8 +8,8 @@ calls the token endpoint for it (evidence: docs/BROKER.md). Mirrors:
 - one fixed config dir per account (``~/.claude-<alias>`` unless settings name another), its own
   Claude Code Keychain item: `vibe run <alias>` starts Claude Code there, and that session stays on
   that account for good;
-- Claude Code's default item (``~/.claude``): whichever account the switch made live, so `cs`,
-  `cw` and a plain `claude` follow the background switch.
+- Claude Code's default item (``~/.claude``): whichever account `vibe switch` made live, which a
+  plain `claude` uses.
 
 The tick (every minute) refreshes an account once less than ``refresh_left`` of its access
 token's lifetime is left (half by default, and never later than ``MIN_LEAD_MS`` before its end,
@@ -452,8 +452,8 @@ def _adopt(root: Path, alias: str, mirror: Mirror, *, now_ms: int, home: Path) -
 def dead_login_text(alias: str) -> str:
     """What to say about a login the server rejected, with the broker on.
 
-    Not "run vibe add": that is a new browser sign-in, which an account may not allow (extra's
-    mailbox cannot be reached), and a wrong dead mark is cleared by looking, not by a new login.
+    Not "run vibe add": that is a new browser sign-in, which an account may not allow,
+    and a wrong dead mark is cleared by looking, not by a new login.
     """
     return (
         f'the server rejected the refresh token of "{alias}" - report it; do not run '

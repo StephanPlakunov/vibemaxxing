@@ -22,8 +22,8 @@ from vibemaxxing.credentials import Identity, credential_to_blob
 from vibemaxxing.keychain import FileKeychain, MacKeychain
 
 NOW_S = 1_757_930_000.0
-EXTRA = Identity(
-    "claude2@intra-ai.de", "uextra", "Intra AI", "org-intra", "team", "stripe", "Claude Two"
+ALT = Identity(
+    "claude2@intra-ai.de", "ualt", "Intra AI", "org-intra", "team", "stripe", "Claude Two"
 )
 
 
@@ -74,23 +74,23 @@ def _profile(directory: Path, identity: Identity | None) -> None:
 
 @pytest.fixture
 def rig(tmp_home: Path) -> Rig:
-    directory = tmp_home / ".claude-extra"
-    _profile(directory, EXTRA)
+    directory = tmp_home / ".claude-alt"
+    _profile(directory, ALT)
     found = Rig(tmp_home, directory)
     found.imported.blob = credential_to_blob(
         # Expired an hour ago: the import must store it as it is, not refresh it.
-        make_credential(access="extra-at", refresh="extra-rt", expires_at_ms=1),
+        make_credential(access="alt-at", refresh="alt-rt", expires_at_ms=1),
         base={"mcpOAuth": {"theirs": True}},
     )
     return found
 
 
 def test_the_item_name_is_the_one_claude_code_uses_for_a_config_dir() -> None:
-    # The item Claude Code created for CLAUDE_CONFIG_DIR=/Users/stephanplakunov/.claude-extra
-    # on the machine this fork was made for is "Claude Code-credentials-702813c4".
-    service = keychain.config_dir_service(Path("/Users/stephanplakunov/.claude-extra"))
+    # The item Claude Code created for CLAUDE_CONFIG_DIR=/Users/stephanplakunov/.claude-main
+    # on the machine this fork was made for is "Claude Code-credentials-1a9dccb1".
+    service = keychain.config_dir_service(Path("/Users/stephanplakunov/.claude-main"))
 
-    assert service == "Claude Code-credentials-702813c4"
+    assert service == "Claude Code-credentials-1a9dccb1"
 
 
 def test_import_stores_the_login_and_touches_nothing_else(
@@ -99,16 +99,14 @@ def test_import_stores_the_login_and_touches_nothing_else(
     seed_account(rig.root, "main", active=True)
     before = rig.imported.blob
 
-    code = cli.main(
-        ["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context()
-    )
+    code = cli.main(["add", "alt", "--from-config-dir", str(rig.directory)], context=rig.context())
 
     assert code == 0
-    account = store.read_account(rig.root, "extra")
-    assert account.credential.refresh_token.reveal() == "extra-rt"
+    account = store.read_account(rig.root, "alt")
+    assert account.credential.refresh_token.reveal() == "alt-rt"
     assert account.credential.expires_at_ms == 1, "stored as found: no refresh"
     assert account.identity == Identity(
-        "claude2@intra-ai.de", "uextra", "Intra AI", "org-intra", None, None, "Claude Two"
+        "claude2@intra-ai.de", "ualt", "Intra AI", "org-intra", None, None, "Claude Two"
     )
     assert rig.client.requests == [], "no network"
     assert rig.port.log == [], "Claude Code's own login was not read or written"
@@ -116,19 +114,19 @@ def test_import_stores_the_login_and_touches_nothing_else(
     assert rig.asked == [rig.directory]
     assert store.read_active(rig.root) == "main", "an imported login is not the live one"
     out = capsys.readouterr().out
-    assert "imported the login in" in out and '"extra"' in out
-    assert "extra-at" not in out and "extra-rt" not in out
+    assert "imported the login in" in out and '"alt"' in out
+    assert "alt-at" not in out and "alt-rt" not in out
 
 
 def test_import_records_the_dir_so_vibe_never_refreshes_that_login(rig: Rig) -> None:
     assert (
-        cli.main(["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context())
+        cli.main(["add", "alt", "--from-config-dir", str(rig.directory)], context=rig.context())
         == 0
     )
 
-    account = store.read_account(rig.root, "extra")
+    account = store.read_account(rig.root, "alt")
     assert account.config_dir == str(rig.directory)
-    assert json.loads(store.account_path(rig.root, "extra").read_text())["config_dir"] == str(
+    assert json.loads(store.account_path(rig.root, "alt").read_text())["config_dir"] == str(
         rig.directory
     )
 
@@ -137,21 +135,19 @@ def test_a_fresh_login_in_the_dir_replaces_the_copy_vibe_owned_and_its_stash(rig
     """The way back after the 3 Nov incident: log in again in the dir, import over the alias."""
     seed_account(
         rig.root,
-        "extra",
-        identity=EXTRA,
+        "alt",
+        identity=ALT,
         credential=make_credential(access="old-at", refresh="old-rt"),
     )
-    store.write_stash(rig.root, "extra", make_credential(access="stash-at", refresh="stash-rt"))
+    store.write_stash(rig.root, "alt", make_credential(access="stash-at", refresh="stash-rt"))
 
-    code = cli.main(
-        ["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context()
-    )
+    code = cli.main(["add", "alt", "--from-config-dir", str(rig.directory)], context=rig.context())
 
     assert code == 0
-    account = store.read_account(rig.root, "extra")
-    assert account.credential.refresh_token.reveal() == "extra-rt"  # the dir's, not the old copy's
+    account = store.read_account(rig.root, "alt")
+    assert account.credential.refresh_token.reveal() == "alt-rt"  # the dir's, not the old copy's
     assert account.config_dir == str(rig.directory)
-    assert store.read_stash(rig.root, "extra") is None  # a stale successor would undo the import
+    assert store.read_stash(rig.root, "alt") is None  # a stale successor would undo the import
     assert rig.client.requests == []
 
 
@@ -161,9 +157,9 @@ def test_import_resolves_the_dir_as_claude_code_was_given_it(
     monkeypatch.chdir(rig.home)
 
     # The second and third are the same login again, so only the first one stores it.
-    for spelled in ("~/.claude-extra/", ".claude-extra", str(rig.directory) + "/"):
+    for spelled in ("~/.claude-alt/", ".claude-alt", str(rig.directory) + "/"):
         rig.asked.clear()
-        assert cli.main(["add", "extra", "--from-config-dir", spelled], context=rig.context()) == 0
+        assert cli.main(["add", "alt", "--from-config-dir", spelled], context=rig.context()) == 0
         assert rig.asked == [rig.directory], spelled
 
 
@@ -174,7 +170,7 @@ def test_import_without_a_name_takes_one_from_the_email(rig: Rig) -> None:
 
 
 def test_import_speaks_json(rig: Rig, capsys: pytest.CaptureFixture[str]) -> None:
-    argv = ["add", "extra", "--from-config-dir", str(rig.directory), "--json"]
+    argv = ["add", "alt", "--from-config-dir", str(rig.directory), "--json"]
 
     assert cli.main(argv, context=rig.context()) == 0
 
@@ -182,7 +178,7 @@ def test_import_speaks_json(rig: Rig, capsys: pytest.CaptureFixture[str]) -> Non
         "schema": 1,
         "ok": True,
         "action": "add",
-        "alias": "extra",
+        "alias": "alt",
         "adopted": True,
         "config_dir": str(rig.directory),
     }
@@ -191,10 +187,10 @@ def test_import_speaks_json(rig: Rig, capsys: pytest.CaptureFixture[str]) -> Non
 def test_a_login_already_stored_is_not_stored_twice(
     rig: Rig, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    seed_account(rig.root, "other", credential=make_credential(refresh="extra-rt"))
+    seed_account(rig.root, "other", credential=make_credential(refresh="alt-rt"))
 
     assert (
-        cli.main(["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context())
+        cli.main(["add", "alt", "--from-config-dir", str(rig.directory)], context=rig.context())
         == 0
     )
 
@@ -205,7 +201,7 @@ def test_a_login_already_stored_is_not_stored_twice(
 
     # The second time there is nothing left to do
     assert (
-        cli.main(["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context())
+        cli.main(["add", "alt", "--from-config-dir", str(rig.directory)], context=rig.context())
         == 0
     )
     assert 'already stored as "other"' in capsys.readouterr().out
@@ -216,9 +212,7 @@ def test_a_dir_with_no_login_names_the_item_and_the_way_to_log_in(
 ) -> None:
     rig.imported.blob = None
 
-    code = cli.main(
-        ["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context()
-    )
+    code = cli.main(["add", "alt", "--from-config-dir", str(rig.directory)], context=rig.context())
 
     assert code == 3
     err = capsys.readouterr().err
@@ -230,12 +224,10 @@ def test_a_dir_with_no_login_names_the_item_and_the_way_to_log_in(
 def test_a_profile_without_an_account_id_is_refused(
     rig: Rig, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Stored without a uuid, auto-switch could never tell this account apart (CONTRACT §17).
+    # Stored without a uuid, vibe could never tell this account from the live one.
     _profile(rig.directory, None)
 
-    code = cli.main(
-        ["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context()
-    )
+    code = cli.main(["add", "alt", "--from-config-dir", str(rig.directory)], context=rig.context())
 
     assert code == 2
     assert ".claude.json" in capsys.readouterr().err
@@ -245,46 +237,40 @@ def test_a_profile_without_an_account_id_is_refused(
 def test_the_active_account_is_never_overwritten(
     rig: Rig, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    seed_account(rig.root, "extra", active=True)
+    seed_account(rig.root, "alt", active=True)
 
-    code = cli.main(
-        ["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context()
-    )
+    code = cli.main(["add", "alt", "--from-config-dir", str(rig.directory)], context=rig.context())
 
     assert code == 2
     assert "active" in capsys.readouterr().err
-    assert store.read_account(rig.root, "extra").credential.refresh_token.reveal() != "extra-rt"
+    assert store.read_account(rig.root, "alt").credential.refresh_token.reveal() != "alt-rt"
 
 
 def test_another_account_under_that_name_is_never_overwritten(rig: Rig) -> None:
     other = Identity("x@example.com", "uother", None, None, None, None, None)
-    seed_account(rig.root, "extra", identity=other)
+    seed_account(rig.root, "alt", identity=other)
 
-    code = cli.main(
-        ["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context()
-    )
+    code = cli.main(["add", "alt", "--from-config-dir", str(rig.directory)], context=rig.context())
 
     assert code == 2
-    assert store.read_account(rig.root, "extra").identity.account_uuid == "uother"
+    assert store.read_account(rig.root, "alt").identity.account_uuid == "uother"
 
 
 def test_the_same_account_is_replaced_and_its_old_stash_dropped(rig: Rig) -> None:
-    seed_account(rig.root, "extra", identity=EXTRA, credential=make_credential(refresh="old-rt"))
-    store.write_stash(rig.root, "extra", make_credential(refresh="old-successor"))
+    seed_account(rig.root, "alt", identity=ALT, credential=make_credential(refresh="old-rt"))
+    store.write_stash(rig.root, "alt", make_credential(refresh="old-successor"))
 
     assert (
-        cli.main(["add", "extra", "--from-config-dir", str(rig.directory)], context=rig.context())
+        cli.main(["add", "alt", "--from-config-dir", str(rig.directory)], context=rig.context())
         == 0
     )
 
-    assert store.read_account(rig.root, "extra").credential.refresh_token.reveal() == "extra-rt"
-    assert store.read_stash(rig.root, "extra") is None, "a stash would be consumed as a successor"
+    assert store.read_account(rig.root, "alt").credential.refresh_token.reveal() == "alt-rt"
+    assert store.read_stash(rig.root, "alt") is None, "a stash would be consumed as a successor"
 
 
 def test_an_invalid_alias_is_refused(rig: Rig) -> None:
-    code = cli.main(
-        ["add", "Extra", "--from-config-dir", str(rig.directory)], context=rig.context()
-    )
+    code = cli.main(["add", "Alt", "--from-config-dir", str(rig.directory)], context=rig.context())
 
     assert code == 2
     assert store.list_aliases(rig.root) == []
@@ -304,7 +290,7 @@ def test_config_dir_port_reads_the_hashed_item_on_macos(
         return subprocess.CompletedProcess(argv, 0, '{"claudeAiOauth": {}}\n', "")
 
     monkeypatch.setattr(subprocess, "run", run)
-    directory = tmp_home / ".claude-extra"
+    directory = tmp_home / ".claude-alt"
 
     port = keychain.config_dir_port(directory)
 
@@ -319,7 +305,7 @@ def test_config_dir_port_reads_the_dirs_own_file_elsewhere(
     monkeypatch: pytest.MonkeyPatch, tmp_home: Path
 ) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
-    directory = tmp_home / ".claude-extra"
+    directory = tmp_home / ".claude-alt"
     directory.mkdir()
     (directory / ".credentials.json").write_text('{"claudeAiOauth": {}}')
 

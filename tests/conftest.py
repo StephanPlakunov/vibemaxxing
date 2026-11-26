@@ -23,7 +23,7 @@ BLOCKED_PATHS: Final = (
     REAL_HOME / ".claude.json",
     # The token broker's mirror dirs: a test that reached one would be next to a live login.
     REAL_HOME / ".claude-main",
-    REAL_HOME / ".claude-extra",
+    REAL_HOME / ".claude-zvoove-claude",
     # The Codex CLI's home: its auth.json is a live ChatGPT login.
     REAL_HOME / ".codex",
 )
@@ -126,8 +126,8 @@ def clean_secret_registry() -> Iterator[None]:
     redact._registry.clear()
 
 
-# What the session running the suite may carry (a `vibe run extra` session has
-# CLAUDE_CONFIG_DIR=~/.claude-extra and VIBE_SESSION=extra): every test starts without them, or a
+# What the session running the suite may carry (a `vibe run work` session has
+# CLAUDE_CONFIG_DIR=~/.claude-work and VIBE_SESSION=work): every test starts without them, or a
 # test reads the live config dir through them and its answer depends on who runs the suite.
 INHERITED_SESSION_VARS: Final = (
     "VIBE_SESSION",

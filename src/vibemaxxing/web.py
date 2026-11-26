@@ -162,8 +162,6 @@ def snapshot(ctx: Context, recorder: Recorder | None = None) -> dict[str, object
         views,
         now_s=now_s,
         dry_in=forecast,
-        auto=auto.read_settings(ctx.root),
-        last_switch=auto.read_last(ctx.root),
         cursor=[launch.cursor_entry(seat) for seat in seats],
         codex=[launch.codex_entry(reading) for reading in codex_seen],
     )
