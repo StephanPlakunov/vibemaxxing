@@ -133,7 +133,7 @@ def test_cli_tick_and_statusline(
     capsys.readouterr()
     assert cli.main(["statusline"], context=later) == 0
     assert capsys.readouterr().out.strip() == (
-        "antigravity: Gemini 9% Claude 0%"
+        "antigravity: Gemini 5h 40% wk 9%, Claude/GPT 5h 100% wk 0%"
     )
     assert stub.calls == [NOW, NOW + 60]
 

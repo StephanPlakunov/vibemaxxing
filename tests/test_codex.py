@@ -823,8 +823,8 @@ def test_the_status_line_says_the_credit_limit_and_marks_old_numbers(
     auto.publish_status(rig.root, live=None, now_s=rig.now_s)
     document = statusline.read(rig.root)
 
-    assert "zvoove-codex: 0/5100 cr (0%)" in statusline.render(document, now_s=rig.now_s)
-    assert "zvoove-codex: 0/5100 cr (0%)?" in statusline.render(document, now_s=rig.now_s + 3600)
+    assert "zvoove-codex: 0%" in statusline.render(document, now_s=rig.now_s)
+    assert "zvoove-codex: 0%?" in statusline.render(document, now_s=rig.now_s + 3600)
 
 
 def test_the_status_line_shows_windows_for_a_plan_that_has_them(

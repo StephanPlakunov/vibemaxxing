@@ -107,7 +107,8 @@ def _spend(rows: object, fetched: float | None, now_s: float) -> str | None:
         stale = "" if 0 <= now_s - fetched <= STALE_S else "?"
         reported = _number(row.get("percent"))
         share = f"{round(reported)}%" if reported is not None else _share(used, limit)
-        return f"{sign}{used:,.2f}/{sign}{limit:,.0f} ({share}){stale}"
+        # Only the share: every row of the line reads as the percent used (Stephan, 26 Nov).
+        return f"{share}{stale}"
     return None
 
 
@@ -178,10 +179,13 @@ def _cursor(entry: Mapping[str, object], now_s: float) -> str | None:
     cells: list[str] = []
     if percent is not None:
         cells.append(
-            f"{percent:.1f}%".replace(".0%", "%") if percent < 10 else f"{round(percent)}%"
+            "incl "
+            + (f"{percent:.1f}%".replace(".0%", "%") if percent < 10 else f"{round(percent)}%")
         )
     if used is not None:
-        cells.append(_dollars(used) + (f"/{_dollars(cap)}" if cap else ""))
+        cells.append(
+            f"on-demand {_share(used, cap)}" if cap else f"on-demand {_dollars(used)}"
+        )
     if not cells or entry.get("available") is None:
         return f"{alias}: {' '.join(cells) or '-'}{stale or '?'}"
     return f"{alias}: {' '.join(cells)}{stale}"
@@ -212,8 +216,7 @@ def _codex(entry: Mapping[str, object], now_s: float) -> str | None:
         )
         if used is not None and limit is not None and unit is not None:
             short = "cr" if unit.casefold() == "credit" else unit
-            share = f" ({_share(used, limit)})" if limit > 0 else ""
-            cells.append(f"{_plain(used)}/{_plain(limit)} {short}{share}")
+            cells.append(_share(used, limit) if limit > 0 else f"{_plain(used)} {short}")
     windows = entry.get("windows")
     for window in windows if isinstance(windows, list) else []:
         if isinstance(window, dict):
@@ -232,16 +235,21 @@ def _antigravity(entry: Mapping[str, object], now_s: float) -> str | None:
     fetched = _number(entry.get("fetched_at"))
     stale = fetched is None or not 0 <= now_s - fetched <= STALE_S
     windows = entry.get("windows")
-    # Like every other row: the weekly window, as the share already used.
-    cells: list[str] = []
+    # Every row reads as the share used; Antigravity has a 5-hour and a weekly window per group.
+    groups: dict[str, list[str]] = {}
     for window in windows if isinstance(windows, list) else []:
-        if isinstance(window, dict) and _text(window.get("period")) == "wk":
-            group = _text(window.get("group"))
+        if isinstance(window, dict):
+            group, period = _text(window.get("group")), _text(window.get("period"))
             percent = _number(window.get("remaining_percent"))
-            if group is not None and percent is not None and 0 <= percent <= 100:
-                cells.append(f"{group.split('/')[0]} {_plain(round(100 - percent))}%")
-    if cells:
-        return f"{alias}: {' '.join(cells)}" + ("?" if stale else "")
+            if group is not None and period is not None and percent is not None and 0 <= percent <= 100:
+                groups.setdefault(group, []).append(f"{period} {_plain(round(100 - percent))}%")
+    if groups:
+        order = {"5h": 0, "wk": 1}
+        cells = [
+            f"{group} {' '.join(sorted(limits, key=lambda cell: order.get(cell.split()[0], 9)))}"
+            for group, limits in groups.items()
+        ]
+        return f"{alias}: {', '.join(cells)}" + ("?" if stale else "")
     message = _text(entry.get("message"))
     return f"{alias}: {message if message and not stale else '?'}"
 
@@ -342,10 +350,22 @@ def render(
     else:
         # Every session vibe pins says so, a Cursor seat's too: `vibe run <account>` means fixed.
         parts.append(f"▶ {alias}" + (" (fixed)" if fixed else ""))
+    # Order (Stephan, 26 Nov): plan accounts, Antigravity, Cursor, Codex, then spend-only seats.
     accounts = document.get("accounts")
+    plans: list[str] = []
+    spends: list[str] = []
     for entry in accounts if isinstance(accounts, list) else []:
         if isinstance(entry, dict):
             text = _account(entry, now_s)
+            if text is not None:
+                fetched = _number(entry.get("fetched_at"))
+                is_spend = _spend(entry.get("rows"), fetched, now_s) is not None
+                (spends if is_spend else plans).append(text)
+    parts.extend(plans)
+    agy = document.get("antigravity")
+    for account in agy if isinstance(agy, list) else []:
+        if isinstance(account, dict):
+            text = _antigravity(account, now_s)
             if text is not None:
                 parts.append(text)
     for seat in seats if isinstance(seats, list) else []:
@@ -359,12 +379,7 @@ def render(
             text = _codex(account, now_s)
             if text is not None:
                 parts.append(text)
-    agy = document.get("antigravity")
-    for account in agy if isinstance(agy, list) else []:
-        if isinstance(account, dict):
-            text = _antigravity(account, now_s)
-            if text is not None:
-                parts.append(text)
+    parts.extend(spends)
     return " · ".join(parts) or NO_STATUS
 
 

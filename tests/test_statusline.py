@@ -291,8 +291,8 @@ def test_an_enterprise_seat_shows_its_monthly_spend_like_cursor() -> None:
         "schema": 1,
         "accounts": [{"alias": "zvoove-claude", "state": "ok", "fetched_at": 100.0, "rows": [row]}],
     }
-    assert statusline.render(doc, now_s=110.0) == "zvoove-claude: $0.15/$125 (0%)"
-    assert statusline.render(doc, now_s=100.0 + 3600).endswith("$0.15/$125 (0%)?")
+    assert statusline.render(doc, now_s=110.0) == "zvoove-claude: 0%"
+    assert statusline.render(doc, now_s=100.0 + 3600).endswith("zvoove-claude: 0%?")
 
 
 def test_the_spend_rows_carry_their_percent_in_brackets() -> None:
@@ -309,8 +309,8 @@ def test_the_spend_rows_carry_their_percent_in_brackets() -> None:
     computed = {**claude, "rows": [spend]}
 
     line = statusline.render({"schema": 1, "accounts": [reported], "codex": [codex]}, now_s=110.0)
-    assert "zvoove-claude: $119.21/$125 (95%)" in line
-    assert "zvoove-codex: 3570.58/5100 cr (70%)" in line
+    assert "zvoove-claude: 95%" in line
+    assert "zvoove-codex: 70%" in line
     assert statusline.render({"schema": 1, "accounts": [computed]}, now_s=110.0) == (
-        "zvoove-claude: $119.21/$125 (95%)"
+        "zvoove-claude: 95%"
     )
