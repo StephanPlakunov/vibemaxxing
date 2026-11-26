@@ -558,6 +558,7 @@ def build(
     dry_in: timedelta | None = None,
     cursor: Sequence[Mapping[str, object]] = (),
     codex: Sequence[Mapping[str, object]] = (),
+    antigravity: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     document: dict[str, object] = {
         "schema": ENVELOPE_SCHEMA,
@@ -579,6 +580,8 @@ def build(
         # Additive and only when a Codex account is stored; like Cursor, never in `accounts` or
         # the pool: it has no Claude Code login and its windows are not Claude's.
         document["codex"] = [dict(entry) for entry in codex]
+    if antigravity:
+        document["antigravity"] = [dict(entry) for entry in antigravity]
     return document
 
 

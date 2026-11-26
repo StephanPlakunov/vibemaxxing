@@ -420,6 +420,22 @@ and the credits balance. Rules:
   "unknown", never as a number.
 - Not on the status line yet.
 
+## Antigravity accounts
+
+Sign in to the Google Antigravity CLI with `agy`, then register that login in vibe.
+
+```sh
+vibe add --kind antigravity
+vibe usage
+```
+
+`vibe list`, the terminal and web dashboards, and `vibe statusline` show the weekly and
+5-hour quota that [`agy /usage`](https://antigravity.google/docs/cli-reference) reports for
+each model group. The quota rows include a reset if agy shows a countdown.
+`vibe auto tick` refreshes the shared cache for the status line. vibe stores the alias
+and parsed quota values. The agy CLI manages the login and opens its usage panel without
+submitting a model prompt. Use `vibe remove antigravity` to remove the entry.
+
 ## The connector bridge (`vibe-bridge`)
 
 A session on an account without Slack or Atlassian connectors (by `routing.connectors`) has neither.

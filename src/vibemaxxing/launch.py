@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Final
 
 from vibemaxxing import (
+    antigravity,
     bridge,
     broker,
     codex,
@@ -511,6 +512,8 @@ def plan_run(svc: Services, alias: str, command: Sequence[str], flags: RunFlags)
             "Claude Code on it",
             "codex",
         )
+    if antigravity.has_account(svc.root, alias):
+        raise UsageError(f'"{alias}" is an Antigravity account: start it with agy', "agy")
     if cursor.is_cursor(svc.root, alias):
         needs = _check_needs(svc.root, alias, flags)
         notes: list[str] = []

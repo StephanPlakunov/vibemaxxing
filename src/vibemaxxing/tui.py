@@ -27,7 +27,7 @@ from textual.containers import VerticalScroll
 from textual.content import Content
 from textual.widgets import Static
 
-from vibemaxxing import auto, codex_usage, cursor, envelope, history, launch, store
+from vibemaxxing import antigravity, auto, codex_usage, cursor, envelope, history, launch, store
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.poll import DASHBOARD_INTERVAL_S
 from vibemaxxing.pool import dry_in
@@ -371,6 +371,9 @@ class Dashboard(App[None]):
         codex_seen = await loop.run_in_executor(
             self._pool, partial(ctx.codex_readings, now_s=now_s)
         )
+        agy_seen = await loop.run_in_executor(
+            self._pool, partial(ctx.antigravity_entries, now_s=now_s)
+        )
         # It reads the Keychain to say who is live, so off the event loop as well.
         await loop.run_in_executor(
             self._pool, partial(auto.publish, ctx.root, port=ctx.port, now_s=now_s)
@@ -383,7 +386,7 @@ class Dashboard(App[None]):
             if views and all(view.summary is not None for view in views):
                 history.record(self._conn, at_s=now_s, pool=weeks)
             forecast = dry_in(history.samples(self._conn, since_s=now_s - _WINDOW_S))
-        rebuilt = await self._reshape(views, readings, codex_seen)
+        rebuilt = await self._reshape(views, readings, codex_seen, agy_seen)
         # A panel's height follows its shape, so a cycle that only changes
         # values — a bar, a percent, a reset time — needs no layout pass.
         for view in views:
@@ -392,6 +395,9 @@ class Dashboard(App[None]):
             self.panels[reading.alias].update(cursor_content(reading, now_s=now_s), layout=rebuilt)
         for seen in codex_seen:
             self.panels[seen.alias].update(codex_content(seen, now_s=now_s), layout=rebuilt)
+        for entry in agy_seen:
+            content = Content("\n".join(antigravity.human_lines(entry)))
+            self.panels[entry["alias"]].update(content, layout=rebuilt)
         self.query_one("#footer", Static).update(
             footer_content(
                 weeks=weeks,
@@ -406,11 +412,20 @@ class Dashboard(App[None]):
         views: Sequence[AccountView],
         readings: Sequence[launch.CursorReading],
         codex_seen: Sequence[launch.CodexReading] = (),
+        agy_seen: Sequence[antigravity.Entry] = (),
     ) -> bool:
         shapes = (
             [_shape(view) for view in views]
             + [_cursor_shape(r) for r in readings]
             + [_codex_shape(r) for r in codex_seen]
+            + [
+                (
+                    entry["alias"],
+                    False,
+                    tuple(w["group"] + w["period"] for w in entry["windows"]),
+                )
+                for entry in agy_seen
+            ]
         )
         if shapes == self._shapes:
             return False
@@ -421,6 +436,7 @@ class Dashboard(App[None]):
             [view.alias for view in views]
             + [r.alias for r in readings]
             + [r.alias for r in codex_seen]
+            + [entry["alias"] for entry in agy_seen]
         )
         self.panels = {alias: Static(classes="account") for alias in aliases}
         self.query_one("#empty", Static).display = not aliases
