@@ -228,6 +228,21 @@ def _codex(entry: Mapping[str, object], now_s: float) -> str | None:
     return f"{alias}: {' '.join(cells)}{stale}"
 
 
+def _until(resets_at: str | None, now_s: float) -> str | None:
+    """Time left until an ISO reset, as ``3h05m`` or ``42m``; None when unknown or past."""
+    if resets_at is None:
+        return None
+    try:
+        seconds = datetime.fromisoformat(resets_at).timestamp() - now_s
+    except ValueError:
+        return None
+    if seconds <= 0:
+        return None
+    minutes = int(seconds // 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m"
+
+
 def _antigravity(entry: Mapping[str, object], now_s: float) -> str | None:
     alias = _text(entry.get("alias"))
     if alias is None:
@@ -242,11 +257,16 @@ def _antigravity(entry: Mapping[str, object], now_s: float) -> str | None:
             group, period = _text(window.get("group")), _text(window.get("period"))
             percent = _number(window.get("remaining_percent"))
             if group is not None and period is not None and percent is not None and 0 <= percent <= 100:
-                groups.setdefault(group, []).append(f"{period} {_plain(round(100 - percent))}%")
+                used = f"{_plain(round(100 - percent))}%"
+                if period == "wk":
+                    groups.setdefault(group, []).append((1, f"wk {used}"))
+                else:
+                    # The short window shows how long until it resets (Stephan, 26 Nov).
+                    left = _until(_text(window.get("resets_at")), now_s)
+                    groups.setdefault(group, []).append((0, f"{left or period} {used}"))
     if groups:
-        order = {"5h": 0, "wk": 1}
         cells = [
-            f"{group} {' '.join(sorted(limits, key=lambda cell: order.get(cell.split()[0], 9)))}"
+            f"{group} {' '.join(text for _, text in sorted(limits))}"
             for group, limits in groups.items()
         ]
         return f"{alias}: {', '.join(cells)}" + ("?" if stale else "")
