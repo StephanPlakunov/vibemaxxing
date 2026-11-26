@@ -232,22 +232,16 @@ def _antigravity(entry: Mapping[str, object], now_s: float) -> str | None:
     fetched = _number(entry.get("fetched_at"))
     stale = fetched is None or not 0 <= now_s - fetched <= STALE_S
     windows = entry.get("windows")
-    groups: dict[str, list[str]] = {}
+    # Like every other row: the weekly window, as the share already used.
+    cells: list[str] = []
     for window in windows if isinstance(windows, list) else []:
-        if isinstance(window, dict):
+        if isinstance(window, dict) and _text(window.get("period")) == "wk":
             group = _text(window.get("group"))
-            period = _text(window.get("period"))
             percent = _number(window.get("remaining_percent"))
-            if (
-                group is not None
-                and period is not None
-                and percent is not None
-                and 0 <= percent <= 100
-            ):
-                groups.setdefault(group, []).append(f"{period} {_plain(percent)}%")
-    if groups:
-        cells = " | ".join(f"{group} {' '.join(limits)}" for group, limits in groups.items())
-        return f"{alias}: {cells} left" + ("?" if stale else "")
+            if group is not None and percent is not None and 0 <= percent <= 100:
+                cells.append(f"{group.split('/')[0]} {_plain(round(100 - percent))}%")
+    if cells:
+        return f"{alias}: {' '.join(cells)}" + ("?" if stale else "")
     message = _text(entry.get("message"))
     return f"{alias}: {message if message and not stale else '?'}"
 
