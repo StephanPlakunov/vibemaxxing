@@ -89,16 +89,16 @@ def line(**kw: object) -> str | None:
 
 
 def test_the_status_line_segment_is_compact() -> None:
-    assert line() == "cursor: 0.1% $0/$250"
-    assert line(included_percent=42.4, on_demand_used_cents=1250) == "cursor: 42% $12.5/$250"
-    assert line(included_percent=100.0, on_demand_used_cents=500) == "cursor: 100% $5/$250"
+    assert line() == "cursor: incl 0.1% on-demand 0%"
+    assert line(included_percent=42.4, on_demand_used_cents=1250) == "cursor: incl 42% on-demand 5%"
+    assert line(included_percent=100.0, on_demand_used_cents=500) == "cursor: incl 100% on-demand 2%"
 
 
 def test_unknown_and_old_numbers_get_a_question_mark() -> None:
     assert line(fetched_at=None) == "cursor: ?"
-    assert line(fetched_at=NOW_S - 1000) == "cursor: 0.1% $0/$250?"  # older than 15 minutes
+    assert line(fetched_at=NOW_S - 1000) == "cursor: incl 0.1% on-demand 0%?"  # older than 15 minutes
     assert line(cycle_end_s=NOW_S - 1) == "cursor: ?"  # the cycle those numbers describe is over
-    assert line(available=None, on_demand_used_cents=None) == "cursor: 0.1%?"
+    assert line(available=None, on_demand_used_cents=None) == "cursor: incl 0.1%?"
     assert line(included_percent=None, on_demand_used_cents=None, available=None) == "cursor: -?"
     assert statusline._cursor({"fetched_at": NOW_S}, NOW_S) is None  # no alias
 
@@ -128,9 +128,9 @@ def test_the_line_has_the_claude_accounts_then_the_seat() -> None:
     rendered = statusline.render(document, now_s=NOW_S)
 
     assert rendered.startswith("▶ main · main: 5h 5%")
-    assert rendered.endswith(" · cursor: 0.1% $0/$250")
+    assert rendered.endswith(" · cursor: incl 0.1% on-demand 0%")
     only_seat = statusline.render({"schema": 1, "accounts": [], "cursor": [seat()]}, now_s=NOW_S)
-    assert only_seat == "cursor: 0.1% $0/$250"
+    assert only_seat == "cursor: incl 0.1% on-demand 0%"
     assert "cursor" not in statusline.render(
         {"schema": 1, "accounts": [], "cursor": []}, now_s=NOW_S
     )
@@ -185,7 +185,7 @@ def test_list_writes_the_seat_into_status_json_with_its_fresh_numbers(
     assert entry["alias"] == "cursor" and entry["included_percent"] == 42.4
     assert entry["on_demand_used_cents"] == 1250 and entry["on_demand_cap_cents"] == 25_000
     assert entry["available"] is True and entry["fetched_at"] == NOW_S
-    assert statusline.render(rig.status(), now_s=NOW_S).endswith("cursor: 42% $12.5/$250")
+    assert statusline.render(rig.status(), now_s=NOW_S).endswith("cursor: incl 42% on-demand 5%")
 
 
 def test_status_json_holds_the_limit_cursor_reports(
@@ -198,7 +198,7 @@ def test_status_json_holds_the_limit_cursor_reports(
     entry = cursor.status_entry(rig.root, "cursor")
 
     assert entry["on_demand_cap_cents"] == 75_000
-    assert statusline.render(rig.status(), now_s=NOW_S).endswith("$1/$750")
+    assert statusline.render(rig.status(), now_s=NOW_S).endswith("on-demand 0%")
 
 
 def test_a_seat_nobody_has_read_has_no_figures_and_the_line_says_so(rig: Rig) -> None:
@@ -244,7 +244,7 @@ def test_the_tick_refreshes_a_stale_seat_and_leaves_a_fresh_one_alone(
     rig.queue(percent=5.0)
     assert cli.main(["auto", "tick"], context=rig.ctx()) == 0
     assert len(rig.cursor_client.requests) == 2  # no cache yet: read
-    assert statusline.render(rig.status(), now_s=NOW_S).endswith("cursor: 5% $0/$250")
+    assert statusline.render(rig.status(), now_s=NOW_S).endswith("cursor: incl 5% on-demand 0%")
 
     rig.now_s = NOW_S + 100  # inside three minutes: nothing is requested
     cli.main(["auto", "tick"], context=rig.ctx())
@@ -254,7 +254,7 @@ def test_the_tick_refreshes_a_stale_seat_and_leaves_a_fresh_one_alone(
     rig.queue(percent=6.0)
     cli.main(["auto", "tick"], context=rig.ctx())
     assert len(rig.cursor_client.requests) == 4
-    assert statusline.render(rig.status(), now_s=rig.now_s).endswith("cursor: 6% $0/$250")
+    assert statusline.render(rig.status(), now_s=rig.now_s).endswith("cursor: incl 6% on-demand 0%")
     capsys.readouterr()
 
 
@@ -268,9 +268,9 @@ def test_a_failing_refresh_never_fails_the_tick_and_the_old_numbers_age_into_a_q
 
     assert cli.main(["auto", "tick"], context=rig.ctx()) == 0
 
-    assert statusline.render(rig.status(), now_s=rig.now_s).endswith("cursor: 5% $0/$250")
+    assert statusline.render(rig.status(), now_s=rig.now_s).endswith("cursor: incl 5% on-demand 0%")
     late = NOW_S + 2000
-    assert statusline.render(rig.status(), now_s=late).endswith("cursor: 5% $0/$250?")
+    assert statusline.render(rig.status(), now_s=late).endswith("cursor: incl 5% on-demand 0%?")
     capsys.readouterr()
 
 
@@ -372,7 +372,7 @@ async def test_the_dashboard_paints_the_seat_next_to_the_claude_accounts(tmp_hom
         assert "pool" in str(app.query_one("#footer", Static).visual.plain)  # type: ignore[union-attr]
 
     # the same cycle left the numbers where the status line reads them
-    assert statusline.render(rig.status(), now_s=NOW_S).endswith("cursor: 42% $12.5/$250")
+    assert statusline.render(rig.status(), now_s=NOW_S).endswith("cursor: incl 42% on-demand 5%")
 
 
 async def test_a_seat_alone_is_not_the_empty_screen(tmp_home: Path) -> None:
@@ -402,7 +402,7 @@ def test_the_snapshot_carries_the_seat_and_the_claude_only_one_does_not(
     (entry,) = envelope["cursor"]  # type: ignore[misc]
     assert entry["alias"] == "cursor" and entry["included_percent"] == 10.0
     assert [a["alias"] for a in envelope["accounts"]] == ["main"]  # type: ignore[attr-defined]
-    assert statusline.render(rig.status(), now_s=NOW_S).endswith("cursor: 10% $3/$250")
+    assert statusline.render(rig.status(), now_s=NOW_S).endswith("cursor: incl 10% on-demand 1%")
 
     cursor.delete_marker(rig.root, "cursor")
     rig.client.queue_json(200, fixture_usage())
