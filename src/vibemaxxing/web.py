@@ -148,6 +148,7 @@ def snapshot(ctx: Context, recorder: Recorder | None = None) -> dict[str, object
     # Cursor seats before the publish, so status.json has their numbers (cached two minutes).
     seats = ctx.cursor_readings(now_s=now_s)
     codex_seen = ctx.codex_readings(now_s=now_s)
+    agy_seen = ctx.antigravity_entries(now_s=now_s)
     auto.publish(ctx.root, port=ctx.port, now_s=now_s)
     # A cycle where an account failed to fetch reports a pool that is missing
     # that account's headroom. Recording it would store a transient 429 as a
@@ -164,6 +165,7 @@ def snapshot(ctx: Context, recorder: Recorder | None = None) -> dict[str, object
         dry_in=forecast,
         cursor=[launch.cursor_entry(seat) for seat in seats],
         codex=[launch.codex_entry(reading) for reading in codex_seen],
+        antigravity=agy_seen,
     )
 
 

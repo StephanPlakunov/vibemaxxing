@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Final
 
 from vibemaxxing import (
+    antigravity,
     broker,
     codex,
     codex_usage,
@@ -94,6 +95,7 @@ def tick(
     now_s: float,
     port_for: Callable[[Path], KeychainPort] = config_dir_port,
     home: Path | None = None,
+    antigravity_port: antigravity.UsagePort | None = None,
 ) -> TickResult:
     """One pass: the token broker, then fresh numbers, then status.json. Safe every minute.
 
@@ -108,6 +110,11 @@ def tick(
     said = [*report.lines, *(f"problem: {problem}" for problem in report.problems)]
     if said:
         result = replace(result, line=f"{result.line} | broker: {'; '.join(said)}")
+    antigravity.entries(
+        root,
+        now_s=now_s,
+        port=antigravity.CliUsage() if antigravity_port is None else antigravity_port,
+    )
     publish_status(root, live=live, now_s=now_s)
     if int(now_s) // LOG_EVERY_S != int(now_s - TICK_INTERVAL_S) // LOG_EVERY_S:
         log_tick(root, result, live=live, now_s=now_s)
@@ -241,6 +248,8 @@ def publish_status(root: Path, *, live: str | None, now_s: float) -> None:
         "cursor": _status_cursor(root),
         "codex": _status_codex(root),
     }
+    if entries := antigravity.entries(root, now_s=now_s):
+        document["antigravity"] = entries
     with contextlib.suppress(OSError):
         statusline.write(root, document)
 

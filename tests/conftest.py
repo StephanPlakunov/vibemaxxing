@@ -27,7 +27,7 @@ BLOCKED_PATHS: Final = (
     # The Codex CLI's home: its auth.json is a live ChatGPT login.
     REAL_HOME / ".codex",
 )
-BLOCKED_BINARIES: Final = ("security",)
+BLOCKED_BINARIES: Final = ("security", "agy")
 
 
 class RealPathAccessError(AssertionError):
@@ -55,7 +55,7 @@ def _check_argv(args: object, node_id: str) -> None:
     name = os.path.basename(os.fspath(first))
     name = name.decode() if isinstance(name, bytes) else name
     if name in BLOCKED_BINARIES:
-        raise RealPathAccessError(f"{node_id} invoked the real Keychain via {name!r}")
+        raise RealPathAccessError(f"{node_id} invoked the live binary {name!r}")
 
 
 @pytest.fixture(autouse=True)

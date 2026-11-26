@@ -1,0 +1,29 @@
+└ Models & Quota
+
+  Account: agy-fixture@example.com
+
+GEMINI MODELS
+
+  Models within this group: Gemini 4 Neon, Gemini 4 Carbon
+
+  Weekly Limit Remaining
+[██████████] 91.25%
+Refreshes in 6d 23h 56m
+
+  Five Hour Limit Remaining
+[██████░░░░] 60.50%
+Refreshes in 4h 56m
+
+CLAUDE AND GPT MODELS
+
+  Models within this group: Claude Opus 5.5, GPT-OSS 120B
+
+  Weekly Limit Remaining
+[██████████] 100.00%
+Quota available
+
+  Five Hour Limit Remaining
+[░░░░░░░░░░] 0.00%
+Refreshes in 1h 5m
+
+  ↑/↓ Scroll · pgup/pgdown Page · ctrl+end Bottom · ctrl+home Top · esc Close

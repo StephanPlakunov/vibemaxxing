@@ -358,6 +358,17 @@
              plan: 'Codex' + (entry.plan ? ' \u00b7 ' + entry.plan : ''), rows: rows, breakdown: [] };
   }
 
+  function antigravityAsAccount(entry) {
+    var rows = (entry.windows || []).map(function (w) {
+      var used = Math.round((100 - w.remaining_percent) * 100) / 100;
+      return { label: w.group + ' ' + (w.period === 'wk' ? 'weekly' : w.period) + ' used',
+               percent: used, severity: used >= 100 ? 'warn' : 'normal', resets_at: w.resets_at };
+    });
+    return { alias: entry.alias, active: false, state: entry.state, message: entry.message,
+             email: null, display_name: null, organization: null,
+             plan: 'Antigravity', rows: rows, breakdown: [] };
+  }
+
   function buildAccount(account) {
     var item = el('li', 'account');
     var identity = el('div');
@@ -557,9 +568,10 @@
   // --- wiring ----------------------------------------------------------------
 
   function render(envelope) {
-    // Claude accounts, then any Cursor seat (envelope.cursor exists only when one is stored).
+    // Providers contribute their own rows to the ledger.
     var shown = envelope.accounts.concat((envelope.cursor || []).map(cursorAsAccount),
-                                         (envelope.codex || []).map(codexAsAccount));
+                                         (envelope.codex || []).map(codexAsAccount),
+                                         (envelope.antigravity || []).map(antigravityAsAccount));
     // Rebuild only when the shape changes; otherwise every value is repainted
     // into the nodes that already exist, so a page left open for days neither
     // grows nor flickers.

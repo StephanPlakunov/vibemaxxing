@@ -21,6 +21,7 @@ from typing import Final
 from vibemaxxing import (
     __version__,
     adopt,
+    antigravity,
     auto,
     bridge,
     broker,
@@ -96,6 +97,7 @@ class Context:
     # file (read only). Fields so a test hands it fakes.
     codex_client: HttpClient = field(default_factory=lambda: UrllibClient(CODEX_HOSTS))
     codex_auth: codex.CodexAuthPort = field(default_factory=codex.FileAuth)
+    antigravity_port: antigravity.UsagePort = field(default_factory=antigravity.CliUsage)
     # The bridge: the client that may reach only the upstreams' hosts, the Keychain for its tokens
     # (created on first use), a hidden prompt, and the one-shot listener for the browser redirect.
     bridge_client: HttpClient = field(default_factory=lambda: UrllibClient(BRIDGE_HOSTS))
@@ -173,6 +175,11 @@ class Context:
             except (VibeError, OSError):
                 continue
 
+    def antigravity_entries(self, *, now_s: float | None = None) -> list[antigravity.Entry]:
+        return antigravity.entries(
+            self.root, now_s=self.now_s if now_s is None else now_s, port=self.antigravity_port
+        )
+
 
 def default_context() -> Context:
     return Context(
@@ -238,6 +245,7 @@ def _taken(root: Path) -> set[str]:
         *store.list_aliases(root),
         *cursor.list_cursor_aliases(root),
         *codex.list_codex_aliases(root),
+        *antigravity.aliases(root),
         *cursor.RESERVED_ALIASES,
     }
 
@@ -447,6 +455,7 @@ def _require_unused(root: Path, alias: str) -> None:
         alias in cursor.RESERVED_ALIASES
         or cursor.is_cursor(root, alias)
         or codex.is_codex(root, alias)
+        or antigravity.has_account(root, alias)
     ):
         raise UsageError(f'"{alias}" is already used (or reserved)', "vibe list")
 
@@ -556,20 +565,28 @@ def _adopt_stored(ctx: Context, alias: str | None, given: Path | None, as_json: 
 
 
 def cmd_add(args: argparse.Namespace, ctx: Context) -> int:
+    if args.kind != cursor.KIND_CLAUDE and (
+        args.from_config_dir is not None or args.adopt_stored_login
+    ):
+        raise UsageError(
+            "--from-config-dir and --adopt-stored-login are for Claude accounts",
+            "vibe add --help",
+        )
     if args.kind == cursor.KIND_CURSOR:
-        if args.from_config_dir is not None or args.adopt_stored_login:
-            raise UsageError(
-                "--from-config-dir and --adopt-stored-login are for Claude accounts",
-                "vibe add --help",
-            )
         return _add_cursor(ctx, args.alias, args.json)
     if args.kind == codex.KIND_CODEX:
-        if args.from_config_dir is not None or args.adopt_stored_login:
-            raise UsageError(
-                "--from-config-dir and --adopt-stored-login are for Claude accounts",
-                "vibe add --help",
-            )
         return _add_codex(ctx, args.alias, args.json)
+    if args.kind == antigravity.KIND:
+        alias = args.alias if args.alias is not None else antigravity.KIND
+        if alias in _taken(ctx.root):
+            raise UsageError(f'"{alias}" is already used (or reserved)', "vibe list")
+        antigravity.write_marker(ctx.root, alias, added_at=ctx.now_s)
+        _emit(
+            _action("add", alias=alias, kind=antigravity.KIND),
+            as_json=args.json,
+            human=f'added Antigravity account "{alias}" (uses the agy login)\n',
+        )
+        return 0
     if args.adopt_stored_login:
         return _adopt_stored(ctx, args.alias, args.from_config_dir, args.json)
     if args.from_config_dir is not None:
@@ -662,13 +679,15 @@ def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
     # Cursor first: the status file `_collect_and_record` writes should hold these numbers.
     readings = ctx.cursor_readings()
     codex_seen = ctx.codex_readings()
+    agy_seen = ctx.antigravity_entries()
     views, dry = _collect_and_record(ctx)
     human = _render_accounts(views, now_s=ctx.now_s, dry=dry)
     for problem in broker.problems(ctx.root):
         human += f"broker problem: {problem}\n"
-    if readings or codex_seen:
+    if readings or codex_seen or agy_seen:
         shown = [line for reading in readings for line in (*_render_cursor(reading), "")]
         shown += [line for reading in codex_seen for line in (*_render_codex(reading), "")]
+        shown += [line for entry in agy_seen for line in (*antigravity.human_lines(entry), "")]
         if views:
             head, _, tail = human.rpartition("\n\npool")
             human = head + "\n\n" + "\n".join(shown) + "\npool" + tail
@@ -681,6 +700,7 @@ def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
             dry_in=None if dry is None else timedelta(seconds=dry),
             cursor=[launch.cursor_entry(reading) for reading in readings],
             codex=[launch.codex_entry(reading) for reading in codex_seen],
+            antigravity=agy_seen,
         ),
         as_json=args.json,
         human=human,
@@ -732,6 +752,11 @@ def cmd_switch(args: argparse.Namespace, ctx: Context) -> int:
             f'"{args.alias}" is a Codex account: it has no Claude Code login to switch to',
             "vibe list",
         )
+    if antigravity.has_account(ctx.root, args.alias):
+        raise UsageError(
+            f'"{args.alias}" is an Antigravity account: it has no Claude Code login to switch to',
+            "vibe list",
+        )
     oauth.ensure_usable(ctx.root, args.alias, ctx.client, now_ms=int(ctx.now_s * 1000))
     store.switch(ctx.root, args.alias, ctx.port, now_s=ctx.now_s)
     _emit(
@@ -775,6 +800,7 @@ def cmd_auto_tick(args: argparse.Namespace, ctx: Context) -> int:
         port=ctx.port,
         now_s=ctx.now_s,
         port_for=ctx.port_for,
+        antigravity_port=ctx.antigravity_port,
     )
     _emit(
         _action("auto tick", line=result.line),
@@ -826,6 +852,8 @@ def cmd_remove(args: argparse.Namespace, ctx: Context) -> int:
         cursor.delete_marker(ctx.root, args.alias)  # the Cursor login itself is cursor-agent's
     elif codex.is_codex(ctx.root, args.alias):
         codex.delete_marker(ctx.root, args.alias)  # the Codex login itself is the CLI's
+    elif antigravity.has_account(ctx.root, args.alias):
+        antigravity.remove(ctx.root, args.alias)
     else:
         if broker.is_on(ctx.root) and store.read_active(ctx.root) == args.alias:
             # With the broker on, vibe's store holds the only refresh token of the live login;
@@ -1016,6 +1044,10 @@ def cmd_alias(args: argparse.Namespace, ctx: Context) -> int:
         if args.new in store.list_aliases(ctx.root):
             raise UsageError(f'there is already an account named "{args.new}"', "vibe list")
         codex.rename_marker(ctx.root, args.old, args.new)
+    elif antigravity.has_account(ctx.root, args.old):
+        if args.new in _taken(ctx.root):
+            raise UsageError(f'"{args.new}" is already used (or reserved)', "vibe list")
+        antigravity.rename(ctx.root, args.old, args.new)
     else:
         _require_unused(ctx.root, args.new)
         store.rename_account(ctx.root, args.old, args.new)
@@ -1408,6 +1440,8 @@ Every day
                               a Cursor seat (log in with `cursor-agent login` first)
   vibe add codex --kind codex
                               a Codex account's plan usage (log in with `codex login` first)
+  vibe add antigravity --kind antigravity
+                              the quota of the Google account signed in to agy
   vibe usage web              the same dashboard in a browser, http://127.0.0.1:8787
 
 Connector bridge (for a session on an account without connectors)
@@ -1505,11 +1539,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add.add_argument(
         "--kind",
-        choices=(*cursor.KINDS, codex.KIND_CODEX),
+        choices=(*cursor.KINDS, codex.KIND_CODEX, antigravity.KIND),
         default=cursor.KIND_CLAUDE,
         help=(
-            "claude (default), cursor (a Cursor seat, logged in with `cursor-agent login`) or "
-            "codex (the Codex CLI's login, `codex login`: its plan usage is shown, never switched)"
+            "claude (default), cursor (a Cursor seat, logged in with `cursor-agent login`), "
+            "codex (the Codex CLI's login, `codex login`) or antigravity (the agy login)"
         ),
     )
     _add_json(add)

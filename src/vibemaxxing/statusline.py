@@ -225,6 +225,27 @@ def _codex(entry: Mapping[str, object], now_s: float) -> str | None:
     return f"{alias}: {' '.join(cells)}{stale}"
 
 
+def _antigravity(entry: Mapping[str, object], now_s: float) -> str | None:
+    alias = _text(entry.get("alias"))
+    if alias is None:
+        return None
+    fetched = _number(entry.get("fetched_at"))
+    stale = fetched is None or not 0 <= now_s - fetched <= STALE_S
+    windows = entry.get("windows")
+    # Like every other row: the weekly window, as the share already used.
+    cells: list[str] = []
+    for window in windows if isinstance(windows, list) else []:
+        if isinstance(window, dict) and _text(window.get("period")) == "wk":
+            group = _text(window.get("group"))
+            percent = _number(window.get("remaining_percent"))
+            if group is not None and percent is not None and 0 <= percent <= 100:
+                cells.append(f"{group.split('/')[0]} {_plain(round(100 - percent))}%")
+    if cells:
+        return f"{alias}: {' '.join(cells)}" + ("?" if stale else "")
+    message = _text(entry.get("message"))
+    return f"{alias}: {message if message and not stale else '?'}"
+
+
 def _broker_mirrors(root: Path) -> dict[str, str] | None:
     """The token broker's mirror dirs named in settings.json; None while the broker is off.
 
@@ -336,6 +357,12 @@ def render(
     for account in codex if isinstance(codex, list) else []:
         if isinstance(account, dict):
             text = _codex(account, now_s)
+            if text is not None:
+                parts.append(text)
+    agy = document.get("antigravity")
+    for account in agy if isinstance(agy, list) else []:
+        if isinstance(account, dict):
+            text = _antigravity(account, now_s)
             if text is not None:
                 parts.append(text)
     return " · ".join(parts) or NO_STATUS
