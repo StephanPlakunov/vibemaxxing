@@ -89,7 +89,11 @@ def _label(row: Mapping[str, object]) -> str | None:
 
 
 def _spend(rows: object, fetched: float | None, now_s: float) -> str | None:
-    """An enterprise seat's monthly spend, ``$0.15/$125``: its only row, from the usage payload."""
+    """An enterprise seat's monthly spend, ``$0.15/$125 (0%)``: its only row, from the payload.
+
+    The share of the limit is in brackets, so it reads like the percent of the other accounts:
+    the percent the provider reports (the one `vibe list` shows), else used / limit.
+    """
     if not isinstance(rows, list) or fetched is None:
         return None
     for row in rows:
@@ -101,8 +105,15 @@ def _spend(rows: object, fetched: float | None, now_s: float) -> str | None:
         currency = _text(row.get("currency"))
         sign = "$" if currency in (None, "USD") else f"{currency} "
         stale = "" if 0 <= now_s - fetched <= STALE_S else "?"
-        return f"{sign}{used:,.2f}/{sign}{limit:,.0f}{stale}"
+        reported = _number(row.get("percent"))
+        share = f"{round(reported)}%" if reported is not None else _share(used, limit)
+        return f"{sign}{used:,.2f}/{sign}{limit:,.0f} ({share}){stale}"
     return None
+
+
+def _share(used: float, limit: float) -> str:
+    """How much of ``limit`` is used, as a whole percent (``95%``); ``limit`` is above 0."""
+    return f"{round(used / limit * 100)}%"
 
 
 def _account(entry: Mapping[str, object], now_s: float) -> str | None:
@@ -181,8 +192,9 @@ def _plain(value: float) -> str:
 
 
 def _codex(entry: Mapping[str, object], now_s: float) -> str | None:
-    """One Codex account from the cached numbers: ``zvoove-codex: 0/5100 cr`` (the limit the plan
-    reports, in the unit it names), or its windows (``5h 12% weekly 34%``). ``?`` when old."""
+    """One Codex account from the cached numbers: ``zvoove-codex: 0/5100 cr (0%)`` (the limit the
+    plan reports, in the unit it names, and its share in brackets), or its windows
+    (``5h 12% weekly 34%``). ``?`` when old."""
     alias = _text(entry.get("alias"))
     if alias is None:
         return None
@@ -200,7 +212,8 @@ def _codex(entry: Mapping[str, object], now_s: float) -> str | None:
         )
         if used is not None and limit is not None and unit is not None:
             short = "cr" if unit.casefold() == "credit" else unit
-            cells.append(f"{_plain(used)}/{_plain(limit)} {short}")
+            share = f" ({_share(used, limit)})" if limit > 0 else ""
+            cells.append(f"{_plain(used)}/{_plain(limit)} {short}{share}")
     windows = entry.get("windows")
     for window in windows if isinstance(windows, list) else []:
         if isinstance(window, dict):
