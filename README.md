@@ -1,17 +1,16 @@
 # vibemaxxing
 
-Run several Claude Code accounts from one machine, switch between them in a second, and
-see all their plan limits in one place.
-
-If you have more than one Claude subscription, you already know the problem: the only way
-to change account is `/logout`, `/login`, browser, paste. And nothing anywhere tells you
-how much weekly headroom you have left across all of them.
+Two things, for every AI coding account you have (Claude subscriptions and enterprise seats,
+Cursor, Codex, Antigravity):
 
 ```
-vibe switch work
+vibe                 # the usage of every account, one bar per limit
+vibe statusline      # the same as one line, for Claude Code's status bar
+vibe main            # start an agent on the account you pick: `vibe claude`, `vibe cursor`, ...
 ```
 
-![The dashboard: every account's limits on the left, the week ahead on the right](https://raw.githubusercontent.com/jskarbecki/vibemaxxing/main/docs/media/dashboard.png)
+vibe never picks or switches an account by itself: you name the account, and only that session
+runs on it.
 
 ## Install
 
@@ -26,8 +25,8 @@ macOS and Linux. Python 3.11+. Two commands, same program: `vibe` and `vibemaxxi
 ```
 vibe add                  # store the account you are already logged in to
 vibe add side             # log a second one in, in the browser
-vibe list                 # see both, and what is left on them
-vibe switch side          # Claude Code is now that account
+vibe                      # see both, and what is left on them
+vibe side                 # a Claude Code session on side
 ```
 
 `vibe add` with no name takes the login already in Claude Code, no browser and no
@@ -56,7 +55,7 @@ Claude variables are still dropped and the bridge is still handed over), so Clau
 the dir's own Keychain item, and a session in it keeps working for as long as the login lives, whatever else vibe
 starts or polls. (Before this, vibe copied the login, refreshed the copy itself and ran sessions on a bare access
 token: a refresh on either side logged the other out, and a long session died with "OAuth token revoked".)
-`vibe list`, the TUI and the web page read that account's usage with the token in the dir's item; once it has expired
+`vibe` reads that account's usage with the token in the dir's item; once it has expired
 they show the last numbers until the next session in the dir renews it. `vibe switch work` is refused (it would copy
 the refresh token into the default login): use `vibe run work -- claude`. A
 dir with no login, or logged in as another account, stops the run and names the command that fixes it.
@@ -110,7 +109,7 @@ or rejected login, a profile naming another account, and **any process running w
 refusal too). If the delete fails, the account file is put back as it was. No request, no token
 printed; `--json` works.
 
-**Polls and refreshes, until an account is adopted.** The tick, `vibe list`, the TUI and the web page refresh an account
+**Polls and refreshes, until an account is adopted.** The tick and `vibe` (`vibe list`, `vibe usage`) refresh an account
 vibe owns only once its access token has really ended, never in the five minutes before (a session started with that
 token may still be using it); `vibe run`, whose child cannot renew a token, keeps the window. That is as seldom as a
 refresh can be: once per access token. It cannot keep a `CLAUDE_CODE_OAUTH_TOKEN` session alive past that token's
@@ -121,7 +120,7 @@ end, which no refresh can; an adopted account can.
 ```
 vibe broker mirror main          # ~/.claude-main: created, CLAUDE.md/settings/skills/projects linked
 vibe broker on                   # vibe renews every login; Claude Code reads mirrors
-vibe run main                    # ▶ main (fixed), for good
+vibe main                        # ▶ main (fixed), for good
 vibe broker status               # when each token ends and is renewed, its mirrors, any problem
 ```
 
@@ -149,18 +148,17 @@ first.
 ## Every day
 
 ```
-vibe                          open the dashboard in the terminal
-vibe usage web                open it in a browser at http://127.0.0.1:8787
-vibe list                     every account, its limits, the pooled total
-vibe switch <name>            change the active account
-vibe run <name>               a session on one account: `claude`, or Cursor's agent for `cursor`
-vibe run <name> -- <cmd>      run one command as one account (`cursor`: translated for Cursor)
+vibe                          every account, its limits, the pooled total (= vibe list, vibe usage)
+vibe statusline               one line for Claude Code's status line, see below
+vibe <name>                   a session on one account: `claude`, or Cursor's agent for `cursor`
+vibe <name> -- <cmd>          run one command as one account (`cursor`: translated for Cursor)
+vibe run <name> [-- <cmd>]    the same; an account named like a command (`list`) needs this form
+vibe switch <name>            point Claude Code's own login at another account (only you run it)
 vibe remove <name>            forget an account
 vibe release <name>           move a --from-config-dir login into vibe (the dir keeps none)
 vibe broker on|off|status     vibe renews every login, Claude Code reads mirrors, see above
 vibe alias <old> <new>        rename one
 vibe auto status|install      the background tick: renewal and fresh numbers, see below
-vibe statusline               one line for Claude Code's status line, see below
 vibe help                     what each command is for
 ```
 
@@ -207,7 +205,7 @@ Their members in an existing `~/.vibemaxxing/settings.json` (`auto_switch`, `thr
 
 ### Status line
 
-Every command that collects usage (`vibe list`, the dashboards) and every `vibe auto tick`
+Every command that collects usage (`vibe`, `vibe list`, `vibe usage`) and every `vibe auto tick`
 writes `~/.vibemaxxing/status.json`: the live account, each account's rows with their reset
 times, and when they were fetched. `vibe statusline` prints one line from that file and nothing else: no Keychain, no
 request, about 25 ms.
@@ -258,11 +256,11 @@ session is always the seat:
 ### See what is left
 
 ```
-$ vibe usage
+$ vibe
   claude  you@corp.example  enterprise
     Monthly spend           ████████████████████ 100%  $125.03 of $125
 
-* main  you@example.com  max 20x
+  main  you@example.com  max 20x
     Weekly · all models     ████████████████████  98%  resets in 2d
     Weekly · Fable          ░░░░░░░░░░░░░░░░░░░░   0%  resets in 2d
 
@@ -284,21 +282,17 @@ pool  0.02 account-weeks across 2 accounts
 Every limit of every account type is one row of the same shape: label, a bar, the percent
 USED, the amount for a dollar or credit limit (`$750.17 of $750`), and when it resets. On a
 terminal the row is yellow from 80% (or when the provider flags it) and red at 100%; `NO_COLOR`
-turns that off. Antigravity reports what is left; vibe shows it as used, like the rest. The
-terminal dashboard (`vibe`) draws the same rows.
+turns that off. Antigravity reports what is left; vibe shows it as used, like the rest. No
+account is marked as "active": `vibe --json` still says which account Claude Code's own login
+is (`"active": true`), for scripts.
 
 **account-weeks** is the pooled number: one account with a fresh weekly limit is `1.00`.
 Two accounts each 50% spent is also `1.00`. It answers "how much Claude do I have left in
 total", which no single account's percentage can.
 
-The web dashboard adds the week ahead: one lane per account, a marker where that
-account's weekly limit resets, in your own timezone. So you can see whether a reset lands
-before your work does.
-
 ### Scripting
 
-`--json` works on every command and prints one documented envelope, the same bytes the
-dashboard serves at `/api/usage`:
+`--json` works on every command and prints one documented envelope:
 
 ```
 vibe list --json | jq '.pool.remaining_account_weeks'
@@ -359,13 +353,13 @@ run a program that relies on Claude Code hooks for its safety policy on Cursor. 
 
 ### Where Cursor shows
 
-The seat appears wherever the Claude accounts do. `vibe` (the TUI) and the web dashboard
-(`vibe usage web`) show it as one more entry: included allowance plus bonus, on-demand against the
-limit Cursor reports (no limit shown when it reports none), and when the cycle resets (it is not in the pool or the week chart).
+The seat appears wherever the Claude accounts do. `vibe` shows it as one more entry: included
+allowance plus bonus, on-demand against the limit Cursor reports (no limit shown when it reports
+none), and when the cycle resets (it is not in the pool).
 `vibe statusline` shows the seat like every other account, by its included usage: `cursor: 33%`,
 `cursor: 33% (on-demand spent)` once on-demand is at its cap; `?` means no numbers, numbers older
-than 15 minutes, or a finished cycle. The status line and the TUI never make a request or read a Keychain on a redraw: the
-line reads `~/.vibemaxxing/status.json`, which `vibe list`, the TUI, the web page and the background
+than 15 minutes, or a finished cycle. The status line never makes a request or reads a Keychain on a redraw: the
+line reads `~/.vibemaxxing/status.json`, which `vibe`, `vibe list` and the background
 tick (`vibe auto tick`, via launchd) keep current; the tick re-reads a seat's usage only when its cached
 numbers are older than three minutes. Unknown usage is shown as unknown, never as a number. If your
 Claude Code status line already runs `vibe statusline`, the new segment needs no change to it.
@@ -422,8 +416,8 @@ is logged in to it, so check `--needs` runs on Cursor before relying on them.
 ## Codex accounts
 
 Fork feature. A Codex account (the OpenAI Codex CLI, signed in with ChatGPT) is a third kind of
-account that vibe only **shows**: its plan usage appears in `vibe list`, `vibe list --json`, the
-TUI and the web dashboard next to the Claude and Cursor accounts.
+account that vibe only **shows**: its plan usage appears in `vibe`, `vibe list --json` and the
+status line next to the Claude and Cursor accounts.
 
 ```
 curl -fsSL https://chatgpt.com/codex/install.sh | sh   # OpenAI's documented install on macOS and Linux
@@ -460,7 +454,7 @@ vibe add --kind antigravity
 vibe usage
 ```
 
-`vibe list`, the terminal and web dashboards, and `vibe statusline` show the weekly and
+`vibe` and `vibe statusline` show the weekly and
 5-hour quota that [`agy /usage`](https://antigravity.google/docs/cli-reference) reports for
 each model group. The quota rows include a reset if agy shows a countdown.
 `vibe auto tick` refreshes the shared cache for the status line. vibe stores the alias
@@ -569,8 +563,8 @@ It talks to three hosts and no others — `claude.ai`, `platform.claude.com`,
 `api.anthropic.com` — and refuses to contact anything else, redirects included. (Fork: with a
 Cursor account stored, a second client also reaches `api2.cursor.sh`, for the seat's usage, and
 only that host.) No
-version pings, no analytics, no telemetry. The web dashboard binds `127.0.0.1`, and
-`--host` with anything else is a hard error.
+version pings, no analytics, no telemetry. vibe opens no listening socket of its own except
+the one-shot `127.0.0.1` redirect listener of `vibe bridge login`.
 
 It is not a third-party client. Claude Code goes on talking to Anthropic as itself, using
 a credential you got by logging in the normal way — the same state you would reach by
@@ -632,7 +626,7 @@ reuses one answer per account for about 3 minutes. An account that gets rate lim
 and shows its last numbers and the time they are from in the meantime. Numbers more than
 an hour old are not shown at all.
 
-**The active account's token is Claude Code's to refresh.** Neither the dashboard nor
+**The active account's token is Claude Code's to refresh.** Neither `vibe` nor
 `vibe run` refreshes it, because refreshing one token from two places kills whichever side
 goes second. If no Claude Code session has run since the token expired (about 8 hours),
 the active account shows its last numbers for up to an hour and then a message saying

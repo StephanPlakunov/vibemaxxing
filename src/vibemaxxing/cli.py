@@ -41,8 +41,6 @@ from vibemaxxing import (
     route,
     statusline,
     store,
-    tui,
-    web,
 )
 from vibemaxxing.credentials import Credential
 from vibemaxxing.cursor import AgentPort, CliAgent
@@ -64,10 +62,7 @@ from vibemaxxing.httpclient import (
 from vibemaxxing.keychain import KeychainPort, default_port
 from vibemaxxing.models import AccountState
 from vibemaxxing.pool import dry_in
-from vibemaxxing.redact import Secret, err, install_excepthook, out
-from vibemaxxing.web import LOOPBACK
-
-DEFAULT_PORT: Final = 8787
+from vibemaxxing.redact import Secret, err, install_excepthook, out, scrub
 
 
 @dataclass
@@ -200,12 +195,11 @@ def _render_accounts(
         return "no accounts yet — run: vibe add\n"
     lines: list[str] = []
     for view in views:
-        marker = "*" if view.active else " "
         who = view.identity.email or view.identity.display_name or "—"
         plan = view.plan or "—"
         summary = view.summary
         lines += display.block(
-            f"{marker} {view.alias}  {who}  {plan}",
+            f"  {view.alias}  {who}  {plan}",
             [view.message] if view.message else [],
             display.claude_limits(view),
             now_s=now_s,
@@ -616,7 +610,7 @@ def _render_cursor(reading: launch.CursorReading, *, now_s: float, colour: bool)
     if not reading.logged_in:
         return [header, f"    not logged in — run: {cursor.AGENT_LOGIN}"]
     if reading.usage is None:
-        return [header, f"    usage: unknown ({reading.note}); see cursor.com/dashboard"]
+        return [header, scrub(f"    usage: unknown ({reading.note}); see cursor.com/dashboard")]
     return display.block(
         header,
         [reading.note] if reading.note else [],
@@ -632,10 +626,10 @@ def _render_codex(reading: launch.CodexReading, *, now_s: float, colour: bool) -
     plan = f" · {reading.plan}" if reading.plan else ""
     header = f"  {reading.alias}  {who}  Codex{plan}"
     if reading.state in ("needs_login", "api_key"):
-        return [header, f"    {reading.note}"]
+        return [header, scrub(f"    {reading.note}")]
     usage = reading.usage
     if usage is None:
-        return [header, f"    usage: unknown ({reading.note})"]
+        return [header, scrub(f"    usage: unknown ({reading.note})")]
     lines = display.block(
         header,
         [reading.note] if reading.note else [],
@@ -710,36 +704,8 @@ def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
-def check_loopback(host: str) -> None:
-    if host != LOOPBACK:
-        raise UsageError(
-            f"--host {host} is refused: the dashboard binds loopback ({LOOPBACK}) only, "
-            "because it has no authentication and no TLS",
-            f"vibe usage web --host {LOOPBACK}",
-        )
-
-
-def cmd_dashboard(args: argparse.Namespace, ctx: Context) -> int:
-    if not args.json and not sys.stdin.isatty():
-        # Textual would take the alt screen and wait forever for input that is
-        # never coming: ssh without -t, cron, a pipeline, a CI step.
-        raise UsageError(
-            "the dashboard needs a terminal, and stdin is not one",
-            "vibe list",
-        )
-    # Bare `vibe` opens the dashboard; `vibe --json` stays machine-readable.
-    return cmd_list(args, ctx) if args.json else tui.run(ctx)
-
-
 def cmd_usage(args: argparse.Namespace, ctx: Context) -> int:
-    if args.mode == "web":
-        if args.once:
-            raise UsageError(
-                "vibe usage web serves continuously; --once fetches and exits",
-                "vibe usage --once",
-            )
-        check_loopback(args.host)
-        return web.serve(ctx, port=args.port)
+    # `vibe usage` (and `vibe usage --once`, what it used to need) is bare `vibe`.
     return cmd_list(args, ctx)
 
 
@@ -1425,73 +1391,58 @@ def cmd_bridge_add(args: argparse.Namespace, ctx: Context) -> int:
 
 # --- parser ------------------------------------------------------------------
 
-HELP: Final = """vibe — several Claude Code accounts, one pooled view of the plan limits.
+HELP: Final = """vibe — the usage of every AI coding account, and an agent on the one you pick.
 
-Getting started
+What it is for
+  vibe                        every account's usage: Claude, Cursor, Codex, Antigravity
+                              (`vibe usage` and `vibe list` print the same)
+  vibe statusline             the same as one line, for Claude Code's status bar
+  vibe <account>              start an agent on that account: `vibe main`, `vibe cursor`
+  vibe <account> -- <cmd>     run that command on that account instead
+                              (`vibe run <account> ...` is the same and keeps working)
+
+Accounts
   vibe add                    adopt the login Claude Code already has here (no browser)
   vibe add work               log in to another account; opens a browser, you paste a code
   vibe add work --from-config-dir ~/.claude-work
                               import the login Claude Code keeps for that config dir
-  vibe switch work            point Claude Code at that account, then run `claude` normally
-
-Every day
-  vibe                        the dashboard, in the terminal
-  vibe list                   each account's limits and the pooled headroom
-  vibe run <alias>            a session on that account (`-- <cmd>` runs something else)
   vibe add cursor --kind cursor
                               a Cursor seat (log in with `cursor-agent login` first)
   vibe add codex --kind codex
                               a Codex account's plan usage (log in with `codex login` first)
   vibe add antigravity --kind antigravity
                               the quota of the Google account signed in to agy
-  vibe usage web              the same dashboard in a browser, http://127.0.0.1:8787
+  vibe list                   the same as bare `vibe` (`--json`: the envelope, docs/CONTRACT.md)
+  vibe alias old new          rename an account
+  vibe remove work            forget an account (the login itself is not revoked)
+  vibe release work           move a --from-config-dir login into vibe, so the token broker
+                              renews it; the dir's own login is deleted
+  vibe switch work            point Claude Code's own login at that account (you run it;
+                              vibe never switches by itself)
+  vibe --version              the installed version
 
 Connector bridge (for a session on an account without connectors)
   vibe bridge login atlassian|slack     your own OAuth login, in the browser (run it yourself)
   vibe bridge status|tools|logout       who is logged in; what the upstream offers; forget a login
   vibe bridge add-command               print the `claude mcp add` line (it never runs it)
 
-Status line
-  vibe statusline             one line: who is live and each account's limits, from the
-                              numbers the last command or tick saw (no request); for
-                              Claude Code's statusLine setting
-
-Housekeeping
-  vibe alias old new          rename an account
-  vibe remove work            forget an account (the login itself is not revoked)
-  vibe release work           move a --from-config-dir login into vibe, so the token broker
-                              renews it; the dir's own login is deleted
-  vibe usage --once           fetch the numbers once and print them
-  vibe --version              the installed version
-
 Token broker (off until you turn it on; docs/BROKER.md)
   vibe broker on              vibe renews every login; Claude Code reads mirrors with no
-                              refresh token, so `vibe run main` stays on main for good;
+                              refresh token, so `vibe main` stays on main for good;
                               `off` gives the login back
   vibe broker mirror main     create ~/.claude-main (links CLAUDE.md, settings, skills, projects)
   vibe broker status          when each token ends and is renewed, its mirrors, any problem
 
-Background tick (vibe never switches accounts by itself)
+Background tick (it renews logins and fetches numbers; it never switches accounts)
   vibe auto tick              renew the broker's logins and fetch every account's numbers
-                              once, for the status lines; a scheduler runs this
+                              once, for the status line; a scheduler runs this
   vibe auto install           macOS: write the launchd job that does that every minute, and
                               print the one command that loads it
-  vibe auto status            who is live, and the token broker's state
-
-switch or run?
-  `switch` is global and lasts: every shell, until you switch again. It swaps the
-  credential Claude Code itself reads, so a session started afterwards is on the new
-  account -- one already running is not.
-  `run` is one command only, on a token handed to that child process alone. Use it to
-  borrow headroom from another account without disturbing what you are logged in as.
+  vibe auto status            whose login Claude Code has, and the token broker's state
 
 Good to know
-  Limits are per account. `vibe list` shows session, weekly-all-models and weekly-Fable,
-  plus how many account-weeks the pool has left and roughly when it runs dry.
-  Accounts share one ~/.claude history and one MCP config -- only the credential is
-  swapped, exactly as if you had logged out and in by hand.
-  `--json` works on every command and emits the envelope documented in docs/CONTRACT.md.
-  The web dashboard refetches at most every 3 minutes; `vibe list` always fetches now."""
+  An account named like a command (`list`, `add`, ...) starts with `vibe run <name>`.
+  `--json` works on every command and emits the envelope documented in docs/CONTRACT.md."""
 
 
 def _add_json(parser: argparse.ArgumentParser, *, root: bool = False) -> None:
@@ -1520,7 +1471,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=__version__)
     _add_json(parser, root=True)
-    parser.set_defaults(handler=cmd_dashboard, alias=None, mode=None)
+    parser.set_defaults(handler=cmd_list, alias=None)
     subs = parser.add_subparsers(dest="command_name")
 
     add = subs.add_parser("add", help="adopt the current Claude Code login, or log in fresh")
@@ -1668,15 +1619,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json(rename)
     rename.set_defaults(handler=cmd_alias)
 
-    use = subs.add_parser("usage", help="fetch usage once, or serve the web dashboard")
-    use.add_argument(
-        "mode", nargs="?", choices=["web"], help="omit to fetch once; 'web' serves the dashboard"
-    )
-    use.add_argument(
-        "--once", action="store_true", help="fetch once and print (the default without 'web')"
-    )
-    use.add_argument("--host", default=LOOPBACK)
-    use.add_argument("--port", type=int, default=DEFAULT_PORT)
+    use = subs.add_parser("usage", help="every account's usage (the same as bare `vibe`)")
+    use.add_argument("--once", action="store_true", help=argparse.SUPPRESS)  # what it once needed
     _add_json(use)
     use.set_defaults(handler=cmd_usage)
 
@@ -1761,9 +1705,35 @@ def split_run_command(argv: Sequence[str]) -> tuple[list[str], list[str] | None]
     return items[:end], items[end:]
 
 
+def _commands() -> frozenset[str]:
+    parser = build_parser()
+    return frozenset(
+        name
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+        for name in action.choices
+    )
+
+
+def account_shorthand(argv: Sequence[str]) -> list[str]:
+    """`vibe main [...]` is `vibe run main [...]`: a first word that is no command names an account.
+
+    Only vibe's own root options may come before it (`vibe --json main`); a command name always
+    wins, so an account called `list` is started with `vibe run list`.
+    """
+    items = list(argv)
+    first = next((index for index, token in enumerate(items) if not token.startswith("-")), None)
+    if first is None or items[first] in _commands():
+        return items
+    if any(token not in ("--json",) for token in items[:first]):
+        return items  # `--version`, `-h` and friends: argparse answers those
+    return [*items[:first], "run", *items[first:]]
+
+
 def main(argv: Sequence[str] | None = None, *, context: Context | None = None) -> int:
     install_excepthook()
-    head, command = split_run_command(sys.argv[1:] if argv is None else argv)
+    given = sys.argv[1:] if argv is None else argv
+    head, command = split_run_command(account_shorthand(given))
     args = build_parser().parse_args(head)
     if command is not None:
         args.command = ["--", *command]  # cmd_run strips the one separator that is ours

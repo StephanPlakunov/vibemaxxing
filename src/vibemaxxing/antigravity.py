@@ -368,21 +368,3 @@ def _read(root: Path, alias: str, *, now_s: float, port: UsagePort | None) -> En
 def entries(root: Path, *, now_s: float, port: UsagePort | None = None) -> list[Entry]:
     """All registered accounts, from cache only when the caller supplies no port."""
     return [_read(root, alias, now_s=now_s, port=port) for alias in aliases(root)]
-
-
-def human_lines(entry: Entry) -> list[str]:
-    lines = [f"{entry['alias']}  {NAME}"]
-    if entry["message"]:
-        lines.append(f"  {entry['message']}")
-    for window in entry["windows"]:
-        reset = ""
-        if isinstance(window["resets_at"], str):
-            try:
-                stamp = datetime.fromisoformat(window["resets_at"]).astimezone()
-                reset = f"  resets {stamp:%a %d %b %H:%M}"
-            except ValueError:
-                pass
-        lines.append(
-            f"  {window['group']} {window['period']}: {window['remaining_percent']:g}% left{reset}"
-        )
-    return lines

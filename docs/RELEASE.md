@@ -42,8 +42,8 @@ both in place, so **the only thing left before going public is the decision itse
       it is the maintainer contact in `pyproject.toml` and `SECURITY.md`.
 
 - [x] **Screenshot confirmed the demo one.** Shows `you@example.com` / `side@example.com`
-      / `team@example.com`, never real accounts. Regenerate with
-      `uv run python scripts/demo_dashboard.py`.
+      / `team@example.com`, never real accounts. (The web dashboard and its demo script have
+      been removed; there is no screenshot to regenerate.)
 - [x] **Topics and homepage set.** `claude`, `claude-code`, `anthropic`, `cli`,
       `developer-tools`, `account-switcher`, `oauth`; homepage points at the PyPI page.
 - [ ] **Turn on branch protection for `main`** once other people can open PRs: require the
@@ -71,7 +71,6 @@ both in place, so **the only thing left before going public is the decision itse
       | `vibe list --json`, empty HOME | valid envelope, `resets: []` |
       | `vibe add`, no Claude Code login | names the problem and `claude /login`, exit 3 |
       | `vibe help` | renders |
-      | `vibe usage web` | `GET / -> 200`, page served from package data |
       | against the real accounts | 5 accounts, plans, pooled total and all 5 resets |
 
       `--extra-index-url https://pypi.org/simple/` is required: TestPyPI has no `textual`.

@@ -404,17 +404,33 @@ def test_a_headless_run_is_read_only_by_default(
     assert "--mode" not in world.fake.calls()[-1]
 
 
-def test_on_demand_at_the_reported_limit_refuses_a_named_cursor_run_and_starts_nothing(
+def test_on_demand_and_included_used_up_refuse_a_named_cursor_run_and_start_nothing(
     tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     world = World(tmp_home, monkeypatch)
     world.add_cursor()
-    world.cursor_usage(on_demand_used=25_000, on_demand_limit=25_000)  # at the limit Cursor reports
+    # at the limit Cursor reports, and nothing included left
+    world.cursor_usage(percent=100.0, on_demand_used=25_000, on_demand_limit=25_000)
 
     assert world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku") == 2
 
     assert "on-demand limit" in capsys.readouterr().err
     assert world.fake.calls() == []
+
+
+def test_on_demand_used_up_with_included_usage_left_still_runs_and_says_so(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = World(tmp_home, monkeypatch)
+    world.add_cursor()
+    world.cursor_usage(percent=33.0, on_demand_used=25_017, on_demand_limit=25_000)
+
+    assert world.main("run", "cursor", "--", "claude", "-p", "x", "--model", "haiku") == 0
+
+    assert len(world.fake.calls()) == 1
+    said = capsys.readouterr()
+    assert "on-demand is used up" in said.out + said.err
+    assert "included usage is at 33%" in said.out + said.err
 
 
 def test_a_higher_cap_cursor_reports_is_the_cap(

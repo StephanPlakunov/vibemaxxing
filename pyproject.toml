@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Jan Skarbecki", email = "jan@intra-ai.de" }]
-keywords = ["claude", "claude-code", "oauth", "account-switcher", "cli", "tui"]
+keywords = ["claude", "claude-code", "oauth", "account-switcher", "cli"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -20,9 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Utilities",
 ]
-dependencies = [
-    "textual>=8.2.8,<8.3",
-]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/jskarbecki/vibemaxxing"

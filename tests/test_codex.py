@@ -6,15 +6,11 @@ answers in the shape the Codex CLI's own backend client reads.
 
 from __future__ import annotations
 
-import asyncio
 import json
-import shutil
 import stat
-import subprocess
 from pathlib import Path
 
 import pytest
-from textual.widgets import Static
 
 from tests.codex_fakes import (
     FAKE_ACCESS,
@@ -27,8 +23,7 @@ from tests.codex_fakes import (
     write_auth,
 )
 from tests.fakes import FakeHttpClient, FakeKeychain, fixture_usage, make_credential, seed_account
-from tests.test_cursor_display import DOM_SHIM, REPORT
-from vibemaxxing import cli, codex, codex_usage, launch, store, tui, web
+from vibemaxxing import cli, codex, codex_usage, launch, store
 from vibemaxxing.errors import NetworkError
 from vibemaxxing.httpclient import CODEX_HOSTS, HTTPError, UrllibClient
 
@@ -558,21 +553,9 @@ def test_a_damaged_marker_does_not_stop_list(rig: Rig, capsys: pytest.CaptureFix
 # --- the dashboard -----------------------------------------------------------------------
 
 
-def test_the_snapshot_carries_the_account_and_the_claude_only_one_does_not(rig: Rig) -> None:
-    seed_account(rig.root, "main", credential=make_credential(), active=True)
-    rig.add()
-    rig.client.queue_json(200, fixture_usage())
-    rig.codex_client.queue_json(200, usage_answer())
-
-    envelope = web.snapshot(rig.ctx())
-
-    (entry,) = envelope["codex"]  # type: ignore[misc]
-    assert entry["alias"] == "zvoove-codex" and entry["windows"][0]["percent"] == 12  # type: ignore[index]
-    assert [a["alias"] for a in envelope["accounts"]] == ["main"]  # type: ignore[attr-defined]
-
-    codex.delete_marker(rig.root, "zvoove-codex")
-    rig.client.queue_json(200, fixture_usage())
-    assert "codex" not in web.snapshot(rig.ctx())
+def _panel(reading: launch.CodexReading, *, now_s: float, colour: bool = False) -> str:
+    """The account's block in `vibe usage`, as text."""
+    return "\n".join(cli._render_codex(reading, now_s=now_s, colour=colour))
 
 
 def reading(**kw: object) -> launch.CodexReading:
@@ -589,7 +572,7 @@ def reading(**kw: object) -> launch.CodexReading:
 
 
 def test_the_codex_panel_shows_a_bar_per_window_and_its_reset() -> None:
-    text = tui.codex_content(reading(), now_s=NOW_S).plain
+    text = _panel(reading(), now_s=NOW_S)
 
     assert "zvoove-codex" in text and "dev@example.com" in text and "Codex · plus" in text
     assert "5h" in text and " 12%" in text and "weekly" in text and " 34%" in text
@@ -597,19 +580,17 @@ def test_the_codex_panel_shows_a_bar_per_window_and_its_reset() -> None:
 
 
 def test_the_codex_panel_for_unknown_logged_out_and_limit_reached() -> None:
-    unknown = tui.codex_content(
+    unknown = _panel(
         reading(usage=None, state="unknown", note="usage unknown (HTTP 500)"), now_s=NOW_S
-    ).plain
+    )
     assert "usage: unknown (usage unknown (HTTP 500))" in unknown and "%" not in unknown
 
-    out = tui.codex_content(
-        reading(usage=None, state="needs_login", note="run: codex login"), now_s=NOW_S
-    ).plain
+    out = _panel(reading(usage=None, state="needs_login", note="run: codex login"), now_s=NOW_S)
     assert "run: codex login" in out
 
     reached = codex_usage.parse_usage(usage_answer(limit_reached=True, weekly_percent=100))
-    styled = tui.codex_content(reading(usage=reached), now_s=NOW_S)
-    marked = " ".join(styled.plain[s.start : s.end] for s in styled.spans if s.style)
+    styled = _panel(reading(usage=reached), now_s=NOW_S, colour=True)
+    marked = " ".join(line for line in styled.splitlines() if line.startswith("\x1b["))
     assert "100%" in marked  # elevated: the used-up window stands out
 
 
@@ -617,111 +598,9 @@ def test_the_panel_scrubs_what_the_note_might_carry() -> None:
     from vibemaxxing.redact import Secret
 
     Secret(FAKE_ACCESS)  # registers it, as a real read would
-    text = tui.codex_content(
-        reading(usage=None, state="unknown", note=f"boom {FAKE_ACCESS}"), now_s=NOW_S
-    ).plain
+    text = _panel(reading(usage=None, state="unknown", note=f"boom {FAKE_ACCESS}"), now_s=NOW_S)
 
     assert FAKE_ACCESS not in text
-
-
-async def test_the_dashboard_paints_the_account_next_to_the_claude_ones(tmp_home: Path) -> None:
-    rig = Rig(tmp_home)
-    seed_account(rig.root, "main", credential=make_credential(), active=True)
-    rig.add()
-    rig.client.queue_json(200, fixture_usage())
-    rig.codex_client.queue_json(200, usage_answer())
-    app = tui.Dashboard(rig.ctx())
-
-    async with app.run_test() as pilot:
-        await asyncio.wait_for(app.first_paint.wait(), timeout=10)
-        await pilot.pause()
-        assert set(app.panels) == {"main", "zvoove-codex"}
-        text = app.panels["zvoove-codex"].visual.plain  # type: ignore[union-attr]
-        assert "5h" in text and "weekly" in text and "34%" in text
-        assert "pool" in str(app.query_one("#footer", Static).visual.plain)  # type: ignore[union-attr]
-
-
-def web_envelope() -> dict[str, object]:
-    return {
-        "schema": 1,
-        "generated_at": "2026-11-19T12:00:00+00:00",
-        "accounts": [
-            {
-                "alias": "main", "active": True, "state": "ok", "message": None,
-                "email": "me@example.com", "display_name": None, "organization": None,
-                "plan": "max", "updated_at": None,
-                "rows": [{"kind": "session", "label": "Session", "percent": 3,
-                          "severity": "normal", "resets_at": "2026-11-19T15:00:00+00:00"}],
-                "breakdown": [],
-            }
-        ],
-        "pool": {"accounts": 1, "remaining_account_weeks": 0.9, "dry_in_seconds": None},
-        "resets": [],
-        "codex": [
-            {
-                "alias": "zvoove-codex", "kind": "codex", "state": "ok", "message": None,
-                "email": "dev@example.com", "plan": "plus", "limit_reached": False,
-                "credits_balance": "0", "credits_unlimited": False,
-                "windows": [
-                    {"label": "5h", "percent": 12, "window_minutes": 300,
-                     "resets_at": "2026-11-19T15:00:00+00:00"},
-                    {"label": "weekly", "percent": 34, "window_minutes": 10080,
-                     "resets_at": "2026-11-23T15:00:00+00:00"},
-                ],
-            }
-        ],
-    }  # fmt: skip
-
-
-def run_page(tmp_path: Path, envelope: dict[str, object]) -> list[str]:
-    page = web.page()
-    script = page[page.index("<script>") + len("<script>") : page.rindex("</script>")]
-    harness = tmp_path / "page.js"
-    harness.write_text(f"const ENVELOPE = {json.dumps(envelope)};{DOM_SHIM}{script}{REPORT}")
-    done = subprocess.run(
-        ["node", str(harness)], capture_output=True, text=True, timeout=30, check=False
-    )
-    assert done.returncode == 0, done.stderr
-    return done.stdout.strip().splitlines()
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-def test_the_page_renders_the_account_as_a_ledger_entry(tmp_path: Path) -> None:
-    texts, widths, rest = run_page(tmp_path, web_envelope())
-
-    shown = json.loads(texts)
-    assert len(shown) == 2  # main, then the Codex account
-    text = shown[1]
-    assert "zvoove-codex" in text and "dev@example.com" in text and "Codex · plus" in text
-    assert "5h" in text and "12%" in text and "weekly" in text and "34%" in text
-    assert json.loads(widths)[1] == ["12%", "34%"]  # both bars painted
-    assert rest.startswith("true updated")
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-@pytest.mark.parametrize("state", ["unknown", "needs_login", "api_key"])
-def test_the_page_says_unknown_or_logged_out_without_inventing_numbers(
-    tmp_path: Path, state: str
-) -> None:
-    envelope = web_envelope()
-    entries = envelope["codex"]
-    assert isinstance(entries, list)
-    entries[0].update(state=state, windows=[], message="usage unknown (HTTP 500)")
-
-    out = json.loads(run_page(tmp_path, envelope)[0])[1]
-
-    assert "usage unknown (HTTP 500)" in out
-    assert "%" not in out  # no number is invented
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-def test_a_claude_only_envelope_renders_as_before(tmp_path: Path) -> None:
-    envelope = web_envelope()
-    del envelope["codex"]
-
-    texts, _, rest = run_page(tmp_path, envelope)
-
-    assert len(json.loads(texts)) == 1 and rest.startswith("true updated")
 
 
 # --- a usage-based workspace: a spend limit in credits, no windows ---------------------------
@@ -804,7 +683,7 @@ def test_list_json_carries_the_spend_limit(rig: Rig, capsys: pytest.CaptureFixtu
 def test_the_codex_panel_shows_the_credit_limit_as_one_bar() -> None:
     usage = codex_usage.parse_usage(spend_answer(used="510.0", used_percent=10))
 
-    text = tui.codex_content(reading(usage=usage), now_s=1_795_000_000.0).plain
+    text = _panel(reading(usage=usage), now_s=1_795_000_000.0)
 
     assert "Credits " in text and "█" in text and " 10%  510 of 5,100 credits" in text
     assert "in 13d" in text
