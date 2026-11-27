@@ -17,7 +17,7 @@ import asyncio
 import sqlite3
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from functools import partial
 from typing import TYPE_CHECKING, ClassVar, Final
 
@@ -27,7 +27,7 @@ from textual.containers import VerticalScroll
 from textual.content import Content
 from textual.widgets import Static
 
-from vibemaxxing import antigravity, auto, codex_usage, cursor, envelope, history, launch, store
+from vibemaxxing import antigravity, auto, cursor, display, envelope, history, launch, store
 from vibemaxxing.envelope import AccountView
 from vibemaxxing.poll import DASHBOARD_INTERVAL_S
 from vibemaxxing.pool import dry_in
@@ -39,8 +39,8 @@ if TYPE_CHECKING:  # cli imports tui; the annotation must not import it back.
 
 # The floor is 60 s; the cadence is not. See poll.DASHBOARD_INTERVAL_S.
 REFRESH_S: Final = DASHBOARD_INTERVAL_S
-BAR_WIDTH: Final = 20
-LABEL_WIDTH: Final = 22
+BAR_WIDTH: Final = display.BAR_WIDTH
+LABEL_WIDTH: Final = display.LABEL_WIDTH
 
 _CALM: Final = ""
 _ELEVATED: Final = "$warning"
@@ -48,53 +48,44 @@ _WINDOW_S: Final = history.RETENTION_DAYS * 86_400.0
 _EMPTY: Final = "no accounts yet — run: vibe add"
 
 
+_STYLES: Final = {"ok": _CALM, "high": _ELEVATED, "full": "$error"}
+
+
 def _relative(resets_at: str | None, now_s: float) -> str:
-    if resets_at is None:
-        return ""
-    try:
-        when = datetime.fromisoformat(resets_at)
-    except ValueError:
-        # A timestamp from the network, so its shape is not ours to trust.
-        return ""
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    left_s = when.timestamp() - now_s
-    if left_s <= 0:
-        return "resets now"
-    if left_s < 3600:
-        return f"resets in {round(left_s / 60)}m"
-    if left_s < 86_400:
-        return f"resets in {round(left_s / 3600)}h"
-    return f"resets in {round(left_s / 86_400)}d"
+    return display.relative(display.iso_to_s(resets_at), now_s)
 
 
 def _bar(percent: int | None) -> str:
-    if percent is None:
-        return "─" * BAR_WIDTH
-    filled = round(min(max(percent, 0), 100) / 100 * BAR_WIDTH)
-    return "█" * filled + "░" * (BAR_WIDTH - filled)
+    return display.bar(percent)
+
+
+def _limit_line(limit: display.Limit, now_s: float) -> Content:
+    return Content.styled(
+        display.row_text(limit, now_s, indent="  "), _STYLES[display.level(limit)]
+    )
 
 
 def _row_line(row: Row, now_s: float) -> tuple[str, str]:
-    percent = "—" if row.percent is None else f"{row.percent}%"
-    line = (
-        f"  {scrub(row.label):<{LABEL_WIDTH}}{_bar(row.percent)} "
-        f"{percent:>4}  {_relative(row.resets_at, now_s)}"
-    )
-    return line, _CALM if row.severity in (None, "normal") else _ELEVATED
+    flagged = row.severity not in (None, "normal")
+    limit = display.Limit(row.label, row.percent, None, display.iso_to_s(row.resets_at), flagged)
+    return display.row_text(limit, now_s, indent="  "), _STYLES[display.level(limit)]
 
 
 def _who(view: AccountView) -> str:
     return view.identity.email or view.identity.display_name or view.alias
 
 
+def _header(alias: str, rest: str, *, active: bool = False) -> Content:
+    return Content.assemble(
+        ("● " if active else "  ", _CALM),
+        (scrub(alias), "bold"),
+        (f"  {scrub(rest)}", "dim"),
+    )
+
+
 def account_content(view: AccountView, *, now_s: float) -> Content:
     lines: list[Content] = [
-        Content.assemble(
-            ("● " if view.active else "  ", _CALM),
-            (scrub(view.alias), "bold"),
-            (f"  {scrub(_who(view))}  {scrub(view.plan or '—')}", "dim"),
-        )
+        _header(view.alias, f"{_who(view)}  {view.plan or '—'}", active=view.active)
     ]
     if view.message is not None:
         # Already carries its literal recovery command; never recomposed here.
@@ -102,31 +93,18 @@ def account_content(view: AccountView, *, now_s: float) -> Content:
     summary = view.summary
     if summary is not None and not summary.rows:
         lines.append(Content.styled("  no limits reported", "dim"))
-    for row in summary.rows if summary is not None else ():
-        line, style = _row_line(row, now_s)
-        lines.append(Content.styled(line, style))
+    lines += [_limit_line(limit, now_s) for limit in display.claude_limits(view)]
     return Content("\n").join(lines)
 
 
-def _money(cents: int) -> str:
-    return f"${cents / 100:,.2f}"
-
-
 def cursor_content(reading: launch.CursorReading, *, now_s: float) -> Content:
-    """A Cursor seat like an account: who, two bars, the reset, and whether routing may use it."""
+    """A Cursor seat like an account: who, then its included and on-demand rows."""
     team = f" · team {reading.team}" if reading.team else ""
-    lines: list[Content] = [
-        Content.assemble(
-            ("  ", _CALM),
-            (scrub(reading.alias), "bold"),
-            (f"  {scrub(reading.email or '—')}  Cursor{scrub(team)}", "dim"),
-        )
-    ]
+    lines: list[Content] = [_header(reading.alias, f"{reading.email or '—'}  Cursor{team}")]
     if not reading.logged_in:
         lines.append(Content.styled(f"  not logged in — run: {cursor.AGENT_LOGIN}", _ELEVATED))
         return Content("\n").join(lines)
-    usage = reading.usage
-    if usage is None:
+    if reading.usage is None:
         lines.append(
             Content.styled(
                 scrub(f"  usage: unknown ({reading.note}); see cursor.com/dashboard"), _ELEVATED
@@ -135,43 +113,14 @@ def cursor_content(reading: launch.CursorReading, *, now_s: float) -> Content:
         return Content("\n").join(lines)
     if reading.note:
         lines.append(Content.styled(f"  {scrub(reading.note)}", _ELEVATED))
-    reset = ""
-    if usage.cycle_end_s is not None:
-        reset = _relative(
-            datetime.fromtimestamp(usage.cycle_end_s, UTC).isoformat(timespec="seconds"), now_s
-        )
-    if usage.included_percent is not None:
-        percent = round(usage.included_percent)
-        lines.append(
-            Content.styled(
-                f"  {'Included + bonus':<{LABEL_WIDTH}}{_bar(percent)} {percent:>3}%  {reset}",
-                _CALM,
-            )
-        )
-    used, cap = usage.on_demand_used_cents, usage.on_demand_limit_cents
-    if used is not None:
-        share = None if not cap else round(min(100, used / cap * 100))
-        of = f" of {_money(cap)}" if cap else " (off)" if cap == 0 else " (no limit reported)"
-        spent = reading.availability.ok is False
-        lines.append(
-            Content.styled(
-                f"  {'On-demand':<{LABEL_WIDTH}}{_bar(share)} {_money(used)}{of}",
-                _ELEVATED if spent else _CALM,
-            )
-        )
+    lines += [_limit_line(limit, now_s) for limit in display.cursor_limits(reading)]
     return Content("\n").join(lines)
 
 
 def codex_content(reading: launch.CodexReading, *, now_s: float) -> Content:
-    """A Codex account like an account: who, the plan, one bar per usage window and its reset."""
+    """A Codex account like an account: who, the plan, one row per window and credit pool."""
     plan = f" · {reading.plan}" if reading.plan else ""
-    lines: list[Content] = [
-        Content.assemble(
-            ("  ", _CALM),
-            (scrub(reading.alias), "bold"),
-            (f"  {scrub(reading.email or '—')}  Codex{scrub(plan)}", "dim"),
-        )
-    ]
+    lines: list[Content] = [_header(reading.alias, f"{reading.email or '—'}  Codex{plan}")]
     usage = reading.usage
     if usage is None:
         text = (
@@ -183,39 +132,19 @@ def codex_content(reading: launch.CodexReading, *, now_s: float) -> Content:
         return Content("\n").join(lines)
     if reading.note:
         lines.append(Content.styled(f"  {scrub(reading.note)}", _ELEVATED))
-    for window in usage.windows:
-        percent = round(window.used_percent)
-        reset = ""
-        if window.resets_at_s is not None:
-            reset = _relative(
-                datetime.fromtimestamp(window.resets_at_s, UTC).isoformat(timespec="seconds"),
-                now_s,
-            )
-        lines.append(
-            Content.styled(
-                f"  {scrub(window.label):<{LABEL_WIDTH}}{_bar(percent)} {percent:>3}%  {reset}",
-                _ELEVATED if usage.limit_reached or percent >= 100 else _CALM,
-            )
-        )
-    spend = usage.spend
-    if spend is not None:
-        percent = round(codex_usage.spend_percent(spend))
-        title = scrub(codex_usage.spend_title(spend))
-        reset = ""
-        if spend.resets_at_s is not None:
-            reset = _relative(
-                datetime.fromtimestamp(spend.resets_at_s, UTC).isoformat(timespec="seconds"),
-                now_s,
-            )
-        lines.append(
-            Content.styled(
-                f"  {title:<{max(LABEL_WIDTH, len(title) + 1)}}"
-                f"{_bar(percent)} {percent:>3}%  {reset}",
-                _ELEVATED if usage.limit_reached or percent >= 100 else _CALM,
-            )
-        )
-    if not usage.windows and spend is None:
+    limits = display.codex_limits(reading)
+    lines += [_limit_line(limit, now_s) for limit in limits]
+    if not limits:
         lines.append(Content.styled("  no limits reported", "dim"))
+    return Content("\n").join(lines)
+
+
+def antigravity_content(entry: antigravity.Entry, *, now_s: float) -> Content:
+    """An Antigravity account like the others: one row per model group and window, share used."""
+    lines: list[Content] = [_header(entry["alias"], antigravity.NAME)]
+    if entry["message"]:
+        lines.append(Content.styled(f"  {scrub(entry['message'])}", _ELEVATED))
+    lines += [_limit_line(limit, now_s) for limit in display.antigravity_limits(entry)]
     return Content("\n").join(lines)
 
 
@@ -396,7 +325,7 @@ class Dashboard(App[None]):
         for seen in codex_seen:
             self.panels[seen.alias].update(codex_content(seen, now_s=now_s), layout=rebuilt)
         for entry in agy_seen:
-            content = Content("\n".join(antigravity.human_lines(entry)))
+            content = antigravity_content(entry, now_s=now_s)
             self.panels[entry["alias"]].update(content, layout=rebuilt)
         self.query_one("#footer", Static).update(
             footer_content(

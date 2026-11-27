@@ -218,7 +218,8 @@ def _status_codex(root: Path) -> list[dict[str, object]]:
         held = codex_usage.usage_from_payload(cached.payload)
         entry["fetched_at"] = cached.fetched_at
         entry["windows"] = [
-            {"label": w.label, "percent": round(w.used_percent)} for w in held.windows
+            {"label": w.label, "percent": round(w.used_percent), "resets_at_s": w.resets_at_s}
+            for w in held.windows
         ]
         if held.spend is not None:
             entry["spend"] = {

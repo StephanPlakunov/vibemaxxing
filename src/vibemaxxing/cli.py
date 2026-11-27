@@ -27,10 +27,10 @@ from vibemaxxing import (
     broker,
     childenv,
     codex,
-    codex_usage,
     credentials,
     cursor,
     cursor_translate,
+    display,
     envelope,
     history,
     keychain,
@@ -193,7 +193,9 @@ def default_context() -> Context:
 # --- rendering ---------------------------------------------------------------
 
 
-def _render_accounts(views: Sequence[AccountView], *, now_s: float, dry: float | None) -> str:
+def _render_accounts(
+    views: Sequence[AccountView], *, now_s: float, dry: float | None, colour: bool = False
+) -> str:
     if not views:
         return "no accounts yet — run: vibe add\n"
     lines: list[str] = []
@@ -201,16 +203,15 @@ def _render_accounts(views: Sequence[AccountView], *, now_s: float, dry: float |
         marker = "*" if view.active else " "
         who = view.identity.email or view.identity.display_name or "—"
         plan = view.plan or "—"
-        lines.append(f"{marker} {view.alias}  {who}  {plan}")
-        if view.message:
-            lines.append(f"    {view.message}")
         summary = view.summary
-        if summary is not None and not summary.rows:
-            lines.append("    no limits reported")
-        for row in summary.rows if summary else ():
-            percent = "—" if row.percent is None else f"{row.percent}%"
-            flag = "" if row.severity in (None, "normal") else f"  ({row.severity})"
-            lines.append(f"    {row.label:<24}{percent:>5}{flag}")
+        lines += display.block(
+            f"{marker} {view.alias}  {who}  {plan}",
+            [view.message] if view.message else [],
+            display.claude_limits(view),
+            now_s=now_s,
+            colour=colour,
+            empty="no limits reported" if summary is not None else None,
+        )
         lines.append("")
     plural = "" if len(views) == 1 else "s"
     tail = f"pool  {envelope.pool_weeks(views)} account-weeks across {len(views)} account{plural}"
@@ -608,71 +609,58 @@ def _collect_and_record(ctx: Context) -> tuple[list[AccountView], float | None]:
     return views, None if forecast is None else forecast.total_seconds()
 
 
-def _money(cents: int) -> str:
-    return f"${cents / 100:,.2f}"
-
-
-def _render_cursor(reading: launch.CursorReading) -> list[str]:
-    """One Cursor seat: who, the two numbers Cursor bills by, and whether routing may use it."""
+def _render_cursor(reading: launch.CursorReading, *, now_s: float, colour: bool) -> list[str]:
+    """One Cursor seat: who, then its included usage and on-demand budget as rows."""
     who = reading.email or "—"
-    lines = [f"  {reading.alias}  {who}  Cursor{f' · team {reading.team}' if reading.team else ''}"]
+    header = f"  {reading.alias}  {who}  Cursor{f' · team {reading.team}' if reading.team else ''}"
     if not reading.logged_in:
-        lines.append(f"    not logged in — run: {cursor.AGENT_LOGIN}")
-        return lines
-    usage = reading.usage
-    if usage is None:
-        lines.append(f"    usage: unknown ({reading.note}); see cursor.com/dashboard")
-        return lines
-    if reading.note:
-        lines.append(f"    {reading.note}")
-    if usage.included_percent is not None:
-        lines.append(f"    {'Included + bonus':<24}{usage.included_percent:>6.1f}%")
-    used, cap = usage.on_demand_used_cents, usage.on_demand_limit_cents
-    if used is not None:
-        of = f" of {_money(cap)}" if cap else " (off)" if cap == 0 else " (no limit reported)"
-        lines.append(f"    {'On-demand':<24}{_money(used)}{of}")
-    if usage.cycle_end_s is not None:
-        end = datetime.fromtimestamp(usage.cycle_end_s).strftime("%a %d %b %H:%M")
-        lines.append(f"    resets {end}")
-    return lines
+        return [header, f"    not logged in — run: {cursor.AGENT_LOGIN}"]
+    if reading.usage is None:
+        return [header, f"    usage: unknown ({reading.note}); see cursor.com/dashboard"]
+    return display.block(
+        header,
+        [reading.note] if reading.note else [],
+        display.cursor_limits(reading),
+        now_s=now_s,
+        colour=colour,
+    )
 
 
-def _render_codex(reading: launch.CodexReading) -> list[str]:
-    """One Codex account: who, the plan, and each usage window the plan reports."""
+def _render_codex(reading: launch.CodexReading, *, now_s: float, colour: bool) -> list[str]:
+    """One Codex account: who, the plan, then each window and credit pool as rows."""
     who = reading.email or "—"
     plan = f" · {reading.plan}" if reading.plan else ""
-    lines = [f"  {reading.alias}  {who}  Codex{plan}"]
+    header = f"  {reading.alias}  {who}  Codex{plan}"
     if reading.state in ("needs_login", "api_key"):
-        lines.append(f"    {reading.note}")
-        return lines
+        return [header, f"    {reading.note}"]
     usage = reading.usage
     if usage is None:
-        lines.append(f"    usage: unknown ({reading.note})")
-        return lines
-    if reading.note:
-        lines.append(f"    {reading.note}")
-    for window in usage.windows:
-        reset = ""
-        if window.resets_at_s is not None:
-            end = datetime.fromtimestamp(window.resets_at_s).strftime("%a %d %b %H:%M")
-            reset = f"  resets {end}"
-        lines.append(f"    {window.label:<24}{round(window.used_percent):>5}%{reset}")
-    if usage.spend is not None:
-        spend = usage.spend
-        end = ""
-        if spend.resets_at_s is not None:
-            day = datetime.fromtimestamp(spend.resets_at_s)
-            end = f" (resets {day.day} {day:%b})"
-        lines.append(f"    {codex_usage.spend_title(spend)}{end}")
-    if not usage.windows and usage.spend is None:
-        lines.append("    no limits reported")
-    if usage.limit_reached:
-        lines.append("    limit reached")
+        return [header, f"    usage: unknown ({reading.note})"]
+    lines = display.block(
+        header,
+        [reading.note] if reading.note else [],
+        display.codex_limits(reading),
+        now_s=now_s,
+        colour=colour,
+    )
     if usage.credits_unlimited:
         lines.append("    credits: unlimited")
     elif usage.credits_balance is not None:
         lines.append(f"    credits: {usage.credits_balance}")
     return lines
+
+
+def _render_antigravity(entry: antigravity.Entry, *, now_s: float, colour: bool) -> list[str]:
+    """One Antigravity account: each model group's windows as rows, the share used."""
+    limits = display.antigravity_limits(entry)
+    return display.block(
+        f"  {entry['alias']}  {antigravity.NAME}",
+        [entry["message"]] if entry["message"] else [],
+        limits,
+        now_s=now_s,
+        colour=colour,
+        empty=None if entry["message"] else "no limits reported",
+    )
 
 
 def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
@@ -681,13 +669,27 @@ def cmd_list(args: argparse.Namespace, ctx: Context) -> int:
     codex_seen = ctx.codex_readings()
     agy_seen = ctx.antigravity_entries()
     views, dry = _collect_and_record(ctx)
-    human = _render_accounts(views, now_s=ctx.now_s, dry=dry)
+    colour = not args.json and display.use_colour(sys.stdout)
+    now_s = ctx.now_s
+    human = _render_accounts(views, now_s=now_s, dry=dry, colour=colour)
     for problem in broker.problems(ctx.root):
         human += f"broker problem: {problem}\n"
     if readings or codex_seen or agy_seen:
-        shown = [line for reading in readings for line in (*_render_cursor(reading), "")]
-        shown += [line for reading in codex_seen for line in (*_render_codex(reading), "")]
-        shown += [line for entry in agy_seen for line in (*antigravity.human_lines(entry), "")]
+        shown = [
+            line
+            for reading in readings
+            for line in (*_render_cursor(reading, now_s=now_s, colour=colour), "")
+        ]
+        shown += [
+            line
+            for reading in codex_seen
+            for line in (*_render_codex(reading, now_s=now_s, colour=colour), "")
+        ]
+        shown += [
+            line
+            for entry in agy_seen
+            for line in (*_render_antigravity(entry, now_s=now_s, colour=colour), "")
+        ]
         if views:
             head, _, tail = human.rpartition("\n\npool")
             human = head + "\n\n" + "\n".join(shown) + "\npool" + tail

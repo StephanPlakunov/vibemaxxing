@@ -778,7 +778,7 @@ def test_list_shows_the_credit_limit_not_no_limits_reported(
     assert rig.main("list") == 0
 
     out = capsys.readouterr().out
-    assert "Credits used 0 of 5,100 (resets 1 Dec)" in out
+    assert "Credits " in out and "   0%  0 of 5,100 credits  resets in " in out
     assert "no limits reported" not in out
 
 
@@ -806,7 +806,8 @@ def test_the_codex_panel_shows_the_credit_limit_as_one_bar() -> None:
 
     text = tui.codex_content(reading(usage=usage), now_s=1_795_000_000.0).plain
 
-    assert "Credits used 510 of 5,100 █" in text and " 10%" in text and "in 13d" in text
+    assert "Credits " in text and "█" in text and " 10%  510 of 5,100 credits" in text
+    assert "in 13d" in text
     assert "no limits reported" not in text
 
 
@@ -827,7 +828,7 @@ def test_the_status_line_says_the_credit_limit_and_marks_old_numbers(
     assert "zvoove-codex: 0%?" in statusline.render(document, now_s=rig.now_s + 3600)
 
 
-def test_the_status_line_shows_windows_for_a_plan_that_has_them(
+def test_the_status_line_shows_the_most_used_window_of_a_plan_that_has_them(
     rig: Rig, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from vibemaxxing import auto, statusline
@@ -839,6 +840,5 @@ def test_the_status_line_shows_windows_for_a_plan_that_has_them(
 
     auto.publish_status(rig.root, live=None, now_s=rig.now_s)
 
-    assert "zvoove-codex: 5h 12% weekly 34%" in statusline.render(
-        statusline.read(rig.root), now_s=rig.now_s
-    )
+    # 5h 12%, weekly 34%: the weekly window is the one that stops work first.
+    assert "zvoove-codex: 34%" in statusline.render(statusline.read(rig.root), now_s=rig.now_s)

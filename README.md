@@ -213,12 +213,27 @@ times, and when they were fetched. `vibe statusline` prints one line from that f
 request, about 25 ms.
 
 ```
-▶ work · main: 5h 100% (resets 19:30) wk 93% (resets Mon 00:00) · work: 5h 28% (resets 23:10)
+▶ main · main: 98% (resets Mon 00:00) · agy: 99% (resets Thu 22:50) · cursor: 33% (on-demand spent) · codex: 100% (resets Tue 01:00) · claude: 100%
 ```
 
-Times are local: `HH:MM` today, weekday and time otherwise. A row whose window has rolled
-over since it was read is left out, and numbers older than 15 minutes get a `?`. To show it
-in Claude Code, add this to `~/.claude/settings.json`:
+**Every account has the same shape: `alias: N%`**, the share USED of the limit that decides
+whether work can start on it, then in brackets what else matters:
+
+| account | the percent is |
+| --- | --- |
+| Claude subscription | the more used of the 5-hour and the weekly (all models) window |
+| Claude enterprise seat | the monthly spend against its cap |
+| Cursor | the INCLUDED usage (included + bonus); on-demand is not the number, because included usage stays usable when on-demand is gone |
+| Codex | the most used of its windows and its credit pool |
+| Antigravity | the least used model group (Gemini, Claude/GPT), at the more used of that group's 5-hour and weekly window: work can start on whichever group has room |
+
+In brackets: `resets WHEN` once the percent is 90% or more (when the provider reports a reset;
+an enterprise seat's monthly spend has none), and for Cursor `on-demand spent` once on-demand
+has reached its cap. Times are local: `HH:MM` today, weekday and time otherwise. A window that
+has rolled over since it was read is left out, `?` after the percent means the numbers are
+older than 15 minutes, a bare `?` means there are none, `-` that the account reported no limit,
+and `needs login` that the login has lapsed. Order: Claude subscriptions, Antigravity, Cursor,
+Codex, then enterprise seats. To show it in Claude Code, add this to `~/.claude/settings.json`:
 
 ```json
 {"statusLine": {"type": "command", "command": "vibe statusline"}}
@@ -243,18 +258,34 @@ session is always the seat:
 ### See what is left
 
 ```
-$ vibe list
-* work      you@example.com   max 20x
-    Session                   34%
-    Weekly · all models       61%
-    Weekly · Fable            12%
+$ vibe usage
+  claude  you@corp.example  enterprise
+    Monthly spend           ████████████████████ 100%  $125.03 of $125
 
-  side      side@example.com  max
-    Session                    2%
-    Weekly · all models        9%
+* main  you@example.com  max 20x
+    Weekly · all models     ████████████████████  98%  resets in 2d
+    Weekly · Fable          ░░░░░░░░░░░░░░░░░░░░   0%  resets in 2d
 
-pool  1.36 account-weeks across 2 accounts
+  cursor  you@corp.example  Cursor
+    Included + bonus        ███████░░░░░░░░░░░░░  33%  resets in 6d
+    On-demand               ████████████████████ 100%  $750.17 of $750  resets in 6d
+
+  codex  you@corp.example  Codex · self_serve_business_usage_based
+    Credits                 ████████████████████ 100%  5,100 of 5,100 credits  resets in 3d
+
+  agy  Antigravity
+    5h · Gemini             ██████████████████░░  88%  resets in 35m
+    Weekly · Gemini         ████████████████████  99%  resets in 6d
+    Weekly · Claude/GPT     ████████████████████ 100%  resets in 6d
+
+pool  0.02 account-weeks across 2 accounts
 ```
+
+Every limit of every account type is one row of the same shape: label, a bar, the percent
+USED, the amount for a dollar or credit limit (`$750.17 of $750`), and when it resets. On a
+terminal the row is yellow from 80% (or when the provider flags it) and red at 100%; `NO_COLOR`
+turns that off. Antigravity reports what is left; vibe shows it as used, like the rest. The
+terminal dashboard (`vibe`) draws the same rows.
 
 **account-weeks** is the pooled number: one account with a fresh weekly limit is `1.00`.
 Two accounts each 50% spent is also `1.00`. It answers "how much Claude do I have left in
@@ -331,9 +362,9 @@ run a program that relies on Claude Code hooks for its safety policy on Cursor. 
 The seat appears wherever the Claude accounts do. `vibe` (the TUI) and the web dashboard
 (`vibe usage web`) show it as one more entry: included allowance plus bonus, on-demand against the
 limit Cursor reports (no limit shown when it reports none), and when the cycle resets (it is not in the pool or the week chart).
-`vibe statusline` appends a compact segment, e.g. `cursor: 0.1% $0/$250`; `?` means no numbers, numbers
-older than 15 minutes, or a finished cycle, and `spent (resets Wed 00:00)` means the seat is at
-its on-demand limit (`vibe run cursor` refuses then). The status line and the TUI never make a request or read a Keychain on a redraw: the
+`vibe statusline` shows the seat like every other account, by its included usage: `cursor: 33%`,
+`cursor: 33% (on-demand spent)` once on-demand is at its cap; `?` means no numbers, numbers older
+than 15 minutes, or a finished cycle. The status line and the TUI never make a request or read a Keychain on a redraw: the
 line reads `~/.vibemaxxing/status.json`, which `vibe list`, the TUI, the web page and the background
 tick (`vibe auto tick`, via launchd) keep current; the tick re-reads a seat's usage only when its cached
 numbers are older than three minutes. Unknown usage is shown as unknown, never as a number. If your
@@ -418,7 +449,7 @@ and the credits balance. Rules:
   `auth.json` to read; `vibe add` says so. An API-key login has no plan usage: the row says that.
 - The endpoint is the CLI's own and not a documented API. An answer in another shape reads as
   "unknown", never as a number.
-- Not on the status line yet.
+- On the status line as `codex: N%`, the most used of its windows and credit pool.
 
 ## Antigravity accounts
 

@@ -119,7 +119,10 @@ def test_cli_tick_and_statusline(
     assert cli.main(["list"], context=ctx) == 0
     listed = capsys.readouterr().out
     assert "antigravity  Antigravity" in listed
-    assert "Gemini wk: 91.25% left" in listed
+    # Rows like every other account's: label, bar, the share USED (100 - 91.25), the reset.
+    weekly = next(line for line in listed.splitlines() if "Weekly · Gemini" in line)
+    assert "█" in weekly and weekly.split("█", 1)[0].strip() == "Weekly · Gemini"
+    assert "   9%" in weekly and "left" not in listed
     assert "agy-fixture@example.com" not in listed
 
     assert cli.main(["usage", "--json"], context=ctx) == 0
@@ -133,7 +136,8 @@ def test_cli_tick_and_statusline(
     capsys.readouterr()
     assert cli.main(["statusline"], context=later) == 0
     assert capsys.readouterr().out.strip() == (
-        "antigravity: Gemini 4h55m 40% wk 9%, Claude/GPT 1h04m 100% wk 0%"
+        # Gemini (5h 40%, wk 9%) still has room; Claude/GPT's 5-hour window is used up.
+        "antigravity: 40%"
     )
     assert stub.calls == [NOW, NOW + 60]
 
