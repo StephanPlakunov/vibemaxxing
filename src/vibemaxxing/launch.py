@@ -607,18 +607,10 @@ def _ceiling_notes(svc: Services, alias: str) -> list[str]:
     """Refuse a Cursor run at the money limit; warn when the usage cannot be read.
 
     The reading is fresh (two minutes, thirty seconds close to the limit). A seat whose on-demand
-    spend has reached the limit Cursor reports is spent only once its included usage is used up
-    too: below 100% included the run goes ahead, and says on-demand is gone. An unknown reading
+    spend has reached the limit Cursor reports is spent. An unknown reading
     does not stop a run the person asked for by name, but it is said.
     """
     reading = read_cursor(svc, alias)
-    included = None if reading.usage is None else reading.usage.included_percent
-    if reading.logged_in and reading.availability.ok is False and included is not None:
-        if included < 100:
-            return [
-                f"note: Cursor's on-demand is used up ({reading.availability.why}); "
-                f"included usage is at {round(included)}%, running on that"
-            ]
     if reading.logged_in and reading.availability.ok is False:
         raise UsageError(
             f"Cursor is at its on-demand limit: {reading.availability.why}",
