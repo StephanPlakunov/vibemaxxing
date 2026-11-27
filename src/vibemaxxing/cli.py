@@ -1722,17 +1722,26 @@ def account_shorthand(argv: Sequence[str]) -> list[str]:
     always wins, so an account called `list` is started with `vibe run list`.
     """
     items = list(argv)
-    first = next((index for index, token in enumerate(items) if not token.startswith("-")), None)
-    if first is None or items[first] in _commands():
-        return items
-
-    def _prefix_ok(token: str) -> bool:
+    root_options = ("--json",)  # also accepted by the root parser, so it stays in front of `run`
+    root: list[str] = []
+    flags: list[str] = []
+    index = 0
+    while index < len(items) and items[index].startswith("-"):
+        token = items[index]
         name = token.split("=", 1)[0]
-        return name in _RUN_FLAGS and name not in ("-h", "--help")
-
-    if any(not _prefix_ok(token) for token in items[:first]):
-        return items  # `--version` and friends: argparse answers those
-    return [*items[:first], "run", *items[first:]]
+        if name in root_options:
+            root.append(token)
+        elif name in _RUN_FLAGS and name not in ("-h", "--help"):
+            flags.append(token)
+            if name in _RUN_VALUE_FLAGS and "=" not in token and index + 1 < len(items):
+                index += 1
+                flags.append(items[index])  # `--needs slack`: the value is no account name
+        else:
+            return items  # `--version` and friends: argparse answers those
+        index += 1
+    if index >= len(items) or items[index] in _commands():
+        return items
+    return [*root, "run", *flags, *items[index:]]
 
 
 def main(argv: Sequence[str] | None = None, *, context: Context | None = None) -> int:

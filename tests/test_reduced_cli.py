@@ -66,8 +66,8 @@ def test_the_usage_web_dashboard_is_gone(tmp_home: Path) -> None:
         (["main", "--", "claude", "-p", "hi"], ["run", "main", "--", "claude", "-p", "hi"]),
         (["cursor", "--dry-run"], ["run", "cursor", "--dry-run"]),
         (["--json", "main", "--dry-run"], ["--json", "run", "main", "--dry-run"]),
-        (["--dry-run", "main"], ["--dry-run", "run", "main"]),
-        (["--json", "--dry-run", "main"], ["--json", "--dry-run", "run", "main"]),
+        (["--dry-run", "main"], ["run", "--dry-run", "main"]),
+        (["--json", "--dry-run", "main"], ["--json", "run", "--dry-run", "main"]),
         # A command name always wins; an account named like one starts with `vibe run`.
         (["list"], ["list"]),
         (["run", "main"], ["run", "main"]),
@@ -108,3 +108,10 @@ def test_an_unknown_name_says_there_is_no_such_account(
 
     assert cli.main(["nosuch"], context=context(tmp_home, FakeHttpClient())) != 0
     assert 'no account named "nosuch"' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("given", [["--dry-run", "main"], ["--json", "--dry-run", "main"], ["--trust-workspace", "main"], ["--needs", "slack", "main"]])
+def test_run_flags_before_the_account_parse(given: list[str]) -> None:
+    head, _ = cli.split_run_command(cli.account_shorthand(given))
+    args = cli.build_parser().parse_args(head)
+    assert args.handler is not None
