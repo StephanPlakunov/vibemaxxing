@@ -121,8 +121,9 @@ def test_identity_comes_from_claude_json_and_is_empty_when_absent(tmp_home: Path
 
 
 def test_plan_label_carries_the_multiplier_that_sets_the_budget() -> None:
-    assert plan_label("max", "default_claude_max_20x") == "max 20x"
-    assert plan_label("max", "default_claude_max_5x") == "max 5x"
+    assert plan_label("max", "default_claude_max_20x") == "ultra"
+    assert plan_label("max", "default_claude_max_5x") == "max"
+    assert plan_label("team", "default_claude_team_5x") == "team 5x"
     # No multiplier to read: the bare plan, never an invented number.
     assert plan_label("pro", "default") == "pro"
     assert plan_label("max", None) == "max"

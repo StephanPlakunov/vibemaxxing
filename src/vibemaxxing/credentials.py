@@ -30,6 +30,8 @@ _LOGIN: Final = "claude /login"
 # "default_claude_max_20x" -> 20. The tier string is the only place the plan
 # multiplier appears; subscriptionType is just "max" for a 5x and a 20x alike.
 _TIER_MULTIPLIER: Final = re.compile(r"_(\d+)x$")
+# The names Anthropic sells the Max tiers under since 30 Oct 2026.
+_MAX_RENAMES: Final = {"20": "ultra", "5": "max"}
 
 
 @dataclass(frozen=True)
@@ -179,7 +181,7 @@ def credential_to_blob(
 
 
 def plan_label(subscription_type: str | None, rate_limit_tier: str | None) -> str | None:
-    """The plan as a person reads it: "max 20x", not "max" and a tier nobody sees.
+    """The plan as a person reads it: "ultra" or "team 5x", not "max" and a tier nobody sees.
 
     Two Max accounts on different multipliers have very different weekly budgets,
     so the multiplier is the load-bearing half of "which plan is this account on".
@@ -189,6 +191,12 @@ def plan_label(subscription_type: str | None, rate_limit_tier: str | None) -> st
     if subscription_type is None:
         return None
     match = _TIER_MULTIPLIER.search(rate_limit_tier or "")
+    if subscription_type == "max" and match:
+        # Anthropic renamed the Max plans on 30 Oct 2026: Max 20x is now "Ultra" and
+        # Max 5x is now plain "Max". The tier strings in the API did not change.
+        renamed = _MAX_RENAMES.get(match.group(1))
+        if renamed is not None:
+            return renamed
     return f"{subscription_type} {match.group(1)}x" if match else subscription_type
 
 
