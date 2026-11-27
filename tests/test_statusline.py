@@ -70,13 +70,36 @@ def test_the_line_has_the_documented_shape() -> None:
         account("alt", [("session", 28, _at(22, 23, 10)), ("weekly_all", 70, NOON - 1)]),
     )
 
-    assert statusline.render(doc, now_s=NOON) == (
-        "▶ alt · main: 5h 100% (resets 19:30) wk 93% (resets Mon 00:00)"
-        " · alt: 5h 28% (resets 23:10)"
+    # Every account is one cell: the percent used of the limit that stops work first (here
+    # main's 5-hour window), with its reset once it is at or near 100%.
+    assert statusline.render(doc, now_s=NOON) == "▶ alt · main: 100% (resets 19:30) · alt: 28%"
+
+
+def test_the_weekly_window_decides_when_it_is_the_more_used_one() -> None:
+    doc = document(
+        account("main", [("session", 12, _at(22, 19, 30)), ("weekly_all", 97, _at(26, 0, 0))])
     )
 
+    assert statusline.render(doc, now_s=NOON) == "▶ alt · main: 97% (resets Mon 00:00)"
 
-def test_an_account_with_only_its_weekly_window_shows_the_bare_number() -> None:
+
+def test_the_reset_shows_from_ninety_percent() -> None:
+    def line(percent: int) -> str:
+        doc = document(account("main", [("weekly_all", percent, _at(26, 0, 0))]))
+        return statusline.render(doc, now_s=NOON)
+
+    assert line(89) == "▶ alt · main: 89%"
+    assert line(90) == "▶ alt · main: 90% (resets Mon 00:00)"
+
+
+def test_the_reset_shows_when_the_rounded_percent_reaches_ninety() -> None:
+    doc = document(account("main", [("weekly_all", 89.6, _at(26, 0, 0))]))
+    line = statusline.render(doc, now_s=NOON)
+
+    assert line.startswith("▶ alt · main: 90% (resets ")
+
+
+def test_an_account_with_only_its_weekly_window_shows_its_number() -> None:
     doc = document(account("main", [("weekly_all", 53, _at(26, 0, 0))]))
 
     assert statusline.render(doc, now_s=NOON) == "▶ alt · main: 53%"
@@ -87,8 +110,8 @@ def test_numbers_older_than_fifteen_minutes_get_a_question_mark() -> None:
     old = document(account("alt", rows, fetched_at=NOON - 16 * 60))
     recent = document(account("alt", rows, fetched_at=NOON - 14 * 60))
 
-    assert statusline.render(old, now_s=NOON) == "▶ alt · alt: 5h 28%? (resets 23:10)"
-    assert statusline.render(recent, now_s=NOON) == "▶ alt · alt: 5h 28% (resets 23:10)"
+    assert statusline.render(old, now_s=NOON) == "▶ alt · alt: 28%?"
+    assert statusline.render(recent, now_s=NOON) == "▶ alt · alt: 28%"
 
 
 def test_rows_without_fresh_data_are_left_out() -> None:
@@ -100,7 +123,7 @@ def test_rows_without_fresh_data_are_left_out() -> None:
         live=None,
     )
 
-    assert statusline.render(doc, now_s=NOON) == ("main: 5% · alt: - · side: - · gone: needs login")
+    assert statusline.render(doc, now_s=NOON) == ("main: 5% · alt: - · side: ? · gone: needs login")
 
 
 def test_a_models_own_row_is_not_shown() -> None:
@@ -110,8 +133,8 @@ def test_a_models_own_row_is_not_shown() -> None:
     # An old status file may still carry a policy that named the model: it changes nothing.
     old = dict(plain, policy={"mode": "ordered", "steps": [], "block_models": ["fable"]})
 
-    assert statusline.render(plain, now_s=NOON) == "▶ main · main: 5h 10%"
-    assert statusline.render(old, now_s=NOON) == "▶ main · main: 5h 10%"
+    assert statusline.render(plain, now_s=NOON) == "▶ main · main: 10%"
+    assert statusline.render(old, now_s=NOON) == "▶ main · main: 10%"
 
 
 def test_no_status_yet_is_a_line_not_an_error(tmp_home: Path) -> None:
@@ -219,7 +242,7 @@ def test_statusline_reads_the_file_and_nothing_else(
 
     assert cli.main(["statusline"], context=ctx) == 0
 
-    assert capsys.readouterr().out.startswith("▶ main · alt: 5h 10% (resets ")
+    assert capsys.readouterr().out.startswith("▶ main · alt: 10% · main: 85%")
     assert client.requests == [] and port.log == []
 
 
@@ -252,7 +275,7 @@ def test_the_console_script_answers_statusline_without_loading_the_rest(tmp_home
 
     assert proc.returncode == 0, proc.stderr
     line, loaded = proc.stdout.splitlines()
-    assert line.startswith("▶ main · main: 5h 40% (resets ")
+    assert line == "▶ main · main: 40%"
     assert loaded == "loaded: []"
 
 

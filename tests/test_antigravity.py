@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 from dataclasses import replace
 from datetime import datetime
@@ -12,8 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests.fakes import FakeHttpClient, FakeKeychain
-from tests.test_cursor_display import run_page
-from vibemaxxing import antigravity, cli, statusline, store, web
+from vibemaxxing import antigravity, cli, store
 
 NOW = 1_757_930_000.0
 
@@ -119,7 +117,10 @@ def test_cli_tick_and_statusline(
     assert cli.main(["list"], context=ctx) == 0
     listed = capsys.readouterr().out
     assert "antigravity  Antigravity" in listed
-    assert "Gemini wk: 91.25% left" in listed
+    # Rows like every other account's: label, bar, the share USED (100 - 91.25), the reset.
+    weekly = next(line for line in listed.splitlines() if "Weekly · Gemini" in line)
+    assert "█" in weekly and weekly.split("█", 1)[0].strip() == "Weekly · Gemini"
+    assert "   9%" in weekly and "left" not in listed
     assert "agy-fixture@example.com" not in listed
 
     assert cli.main(["usage", "--json"], context=ctx) == 0
@@ -133,7 +134,8 @@ def test_cli_tick_and_statusline(
     capsys.readouterr()
     assert cli.main(["statusline"], context=later) == 0
     assert capsys.readouterr().out.strip() == (
-        "antigravity: Gemini 4h55m 40% wk 9%, Claude/GPT 1h04m 100% wk 0%"
+        # Gemini (5h 40%, wk 9%) still has room; Claude/GPT's 5-hour window is used up.
+        "antigravity: 40%"
     )
     assert stub.calls == [NOW, NOW + 60]
 
@@ -145,31 +147,3 @@ def test_cli_tick_and_statusline(
     assert not store.usage_path(ctx.root, "antigravity").exists()
     assert cli.main(["remove", "google"], context=ctx) == 0
     assert antigravity.aliases(ctx.root) == []
-
-
-@pytest.mark.parametrize("state", ["ok", "no_usage"])
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-def test_web_displays_each_quota_or_the_empty_state(
-    tmp_home: Path, tmp_path: Path, panel: str, state: str
-) -> None:
-    report = (
-        antigravity.parse_panel(panel, now_s=NOW)
-        if state == "ok"
-        else (antigravity.Reading("no_usage"))
-    )
-    ctx = context(tmp_home / ".vibemaxxing", StubUsage(report))
-    antigravity.write_marker(ctx.root, "google", added_at=NOW)
-
-    snapshot = web.snapshot(ctx)
-    cards, widths, _ = run_page(tmp_path, snapshot)
-    assert len(json.loads(cards)) == 1
-    assert "google" in cards and "Antigravity" in cards
-    if state == "ok":
-        assert "Gemini weekly used" in cards and "Claude/GPT 5h used" in cards
-        assert json.loads(widths) == [["8.75%", "39.5%", "0%", "100%"]]
-    else:
-        assert "no usage reported" in cards
-        assert "%" not in cards
-        assert (
-            statusline.render(statusline.read(ctx.root), now_s=NOW) == "google: no usage reported"
-        )

@@ -12,7 +12,6 @@ from __future__ import annotations
 import base64
 import json
 import sys
-import threading
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from tests.fakes import FakeHttpClient, FakeKeychain, fixture_usage, make_credential, seed_account
-from vibemaxxing import cli, credentials, store, web
+from vibemaxxing import cli, credentials, store
 
 # macOS resolves proxies from the system network configuration, so a Mac with a
 # configured HTTP proxy would route these 127.0.0.1 requests through it.
@@ -35,8 +34,7 @@ FORMS = (
     json.dumps(SENTINEL)[1:-1],
 )
 
-# Every command the criterion names, in both modes. `usage web` is driven
-# separately: it blocks on a socket rather than returning.
+# Every command the criterion names, in both modes.
 INVOCATIONS: tuple[list[str], ...] = (
     ["add"],
     ["add", "--json"],
@@ -160,66 +158,3 @@ def test_no_forced_traceback_emits_a_token(
         _assert_clean(captured.err, f"forced {argv} traceback")
 
     assert _scan_store(root) >= 0
-
-
-def test_web_dashboard_serves_no_token(
-    seeded: tuple[Path, str], tmp_home: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    root, blob = seeded
-    client = FakeHttpClient()
-    client.queue_json(200, fixture_usage())
-    ctx = _context(tmp_home, client, blob)
-    recorder = web.Recorder(store.history_path(root))
-
-    server = web.build_server(0, envelope=lambda: web.snapshot(ctx, recorder))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        host, port = server.socket.getsockname()[:2]
-        assert host == "127.0.0.1"
-        with _LOOPBACK_OPENER.open(f"http://{host}:{port}/api/usage", timeout=5) as response:
-            body = response.read().decode()
-        with _LOOPBACK_OPENER.open(f"http://{host}:{port}/", timeout=5) as response:
-            page = response.read().decode()
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-        recorder.close()
-
-    assert not thread.is_alive(), "the server thread outlived the test"
-    _assert_clean(body, "/api/usage")
-    _assert_clean(page, "/")
-    assert json.loads(body)["accounts"][0]["alias"] == "work"
-
-    captured = capsys.readouterr()
-    _assert_clean(captured.out, "web stdout")
-    _assert_clean(captured.err, "web stderr")
-    assert _scan_store(root), "the store scan matched no files"
-
-
-def test_a_failing_envelope_serves_no_token(tmp_home: Path) -> None:
-    def raiser() -> dict[str, object]:
-        raise RuntimeError(f"exploded holding {SENTINEL}")
-
-    credentials.parse_blob(
-        credentials.credential_to_blob(make_credential(access=SENTINEL))
-    )  # registers the sentinel exactly as a real read would
-    server = web.build_server(0, envelope=raiser)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        host, port = server.socket.getsockname()[:2]
-        try:
-            _LOOPBACK_OPENER.open(f"http://{host}:{port}/api/usage", timeout=5)
-            raise AssertionError("expected a 500")
-        except urllib.error.HTTPError as exc:
-            with exc:
-                body = exc.read().decode()
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-
-    assert "Traceback" not in body
-    _assert_clean(body, "the 500 body")

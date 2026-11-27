@@ -5,6 +5,30 @@ versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - fork `stephan/ordered-failover`
 
+### Changed (vibe-uniform-usage)
+
+- **One row shape for every account.** `vibe` / `vibe usage` / `vibe list` draw every limit of
+  every account type as label, bar, percent USED, the amount for a dollar or credit limit
+  (`$750.17 of $750`) and `resets in Nd`, coloured by level (80%, 100%). Antigravity's rows are
+  bars in percent used now (they were plain text in percent left), its 5-hour window included.
+- **One status line cell for every account:** `alias: N%`, the share used of the limit that
+  decides whether work can start, then `(resets WHEN)` from 90%. Cursor shows its INCLUDED usage
+  (`cursor: 33% (on-demand spent)`), not `spent`. The table is in the README. Scripts that parsed
+  the old per-window text (`Gemini 1h15m 88%`, `5h 40%`) need `vibe --json list` instead.
+- **`vibe` with no arguments prints the usage view** (it opened the Textual dashboard).
+  `vibe --json` is unchanged.
+- **`vibe <account> [-- <cmd>]` is `vibe run <account> [-- <cmd>]`.** `vibe run` keeps working; an
+  account named like a command needs it.
+- **No account is marked active** (`*` / `●`) in the usage view. `--json` still carries `active`.
+- **`vibe cursor` runs while included usage is left** even when on-demand is at its cap (it says
+  so); it is refused only once included usage is at 100% too.
+
+### Removed (vibe-uniform-usage)
+
+- The Textual dashboard (`tui.py`), the web dashboard (`vibe usage web`, `web.py`, `index.html`,
+  `scripts/demo_dashboard.py`, the screenshots) and the `textual` dependency. `vibe usage --once`
+  is accepted and means `vibe usage`.
+
 ### Removed
 
 - **vibe never switches or picks an account by itself any more.** The person switches (`vibe switch`)

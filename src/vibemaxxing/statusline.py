@@ -23,7 +23,10 @@ SCHEMA_VERSION: Final = 1
 # A number this old may have moved: it is shown with a "?".
 STALE_S: Final = 15 * 60
 NO_STATUS: Final = "vibe: no status yet"
-_LABELS: Final = {"session": "5h", "weekly_all": "wk"}
+# The Claude windows that decide whether work can start: the 5-hour one and the weekly one.
+_WINDOW_KINDS: Final = ("session", "weekly_all")
+# At or above this share the account's line also says when its limit resets.
+NEAR_PERCENT: Final = 90.0
 # English, whatever the locale: strftime("%a") follows LC_TIME.
 _WEEKDAYS: Final = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
@@ -83,18 +86,41 @@ def _when(at_s: float, now_s: float) -> str:
     return clock if at.date() == now.date() else f"{_WEEKDAYS[at.weekday()]} {clock}"
 
 
-def _label(row: Mapping[str, object]) -> str | None:
-    kind = row.get("kind")
-    return _LABELS[kind] if isinstance(kind, str) and kind in _LABELS else None
+def _cell(
+    alias: str,
+    percent: float,
+    *,
+    resets_s: float | None,
+    stale: bool,
+    now_s: float,
+    notes: Sequence[str] = (),
+) -> str:
+    """The one shape every account has: ``alias: 97%``, then in brackets what else matters.
 
-
-def _spend(rows: object, fetched: float | None, now_s: float) -> str | None:
-    """An enterprise seat's monthly spend, ``$0.15/$125 (0%)``: its only row, from the payload.
-
-    The share of the limit is in brackets, so it reads like the percent of the other accounts:
-    the percent the provider reports (the one `vibe list` shows), else used / limit.
+    The percent is the share USED of the account's limit that decides whether work can start
+    on it. Its reset is added once it is at or above NEAR_PERCENT, and ``?`` follows a number
+    older than STALE_S.
     """
-    if not isinstance(rows, list) or fetched is None:
+    shown = list(notes)
+    if round(percent) >= NEAR_PERCENT and resets_s is not None and resets_s > now_s:
+        shown.append(f"resets {_when(resets_s, now_s)}")
+    text = f"{alias}: {_plain(round(percent))}%{'?' if stale else ''}"
+    return f"{text} ({', '.join(shown)})" if shown else text
+
+
+def _stale(fetched: float | None, now_s: float) -> bool:
+    return fetched is None or not 0 <= now_s - fetched <= STALE_S
+
+
+def _binding(limits: Sequence[tuple[float, float | None]]) -> tuple[float, float | None] | None:
+    """Of several limits that all apply, the one most used: it is the one that stops work."""
+    return max(limits, key=lambda limit: limit[0]) if limits else None
+
+
+def _spend(rows: object) -> tuple[float, float | None] | None:
+    """An enterprise seat's monthly spend: its only row. The percent the provider reports (the
+    one `vibe usage` shows), else used / limit; no reset is reported."""
+    if not isinstance(rows, list):
         return None
     for row in rows:
         if not isinstance(row, dict) or row.get("kind") != "monthly_spend":
@@ -102,93 +128,68 @@ def _spend(rows: object, fetched: float | None, now_s: float) -> str | None:
         used, limit = _number(row.get("spend_used")), _number(row.get("spend_limit"))
         if used is None or limit is None or limit <= 0:
             return None
-        currency = _text(row.get("currency"))
-        sign = "$" if currency in (None, "USD") else f"{currency} "
-        stale = "" if 0 <= now_s - fetched <= STALE_S else "?"
         reported = _number(row.get("percent"))
-        share = f"{round(reported)}%" if reported is not None else _share(used, limit)
-        # Only the share: every row of the line reads as the percent used (Stephan, 26 Nov).
-        return f"{share}{stale}"
+        return (reported if reported is not None else used / limit * 100), None
     return None
 
 
-def _share(used: float, limit: float) -> str:
-    """How much of ``limit`` is used, as a whole percent (``95%``); ``limit`` is above 0."""
-    return f"{round(used / limit * 100)}%"
-
-
 def _account(entry: Mapping[str, object], now_s: float) -> str | None:
+    """A Claude account: its monthly spend, or the most used of its 5-hour and weekly windows."""
     alias = _text(entry.get("alias"))
     if alias is None:
         return None
     if entry.get("state") == "needs_login":
         return f"{alias}: needs login"
     fetched = _number(entry.get("fetched_at"))
+    if fetched is None:
+        return f"{alias}: ?"
     rows = entry.get("rows")
-    spend = _spend(rows, fetched, now_s)
-    if spend is not None:
-        return f"{alias}: {spend}"
-    cells: list[tuple[str, str, float | None]] = []
-    for row in rows if isinstance(rows, list) and fetched is not None else []:
-        if not isinstance(row, dict):
-            continue
-        label, percent = _label(row), _number(row.get("percent"))
-        resets = _number(row.get("resets_at"))
-        # A row whose window rolled over since it was read says nothing about now.
-        if label is None or percent is None or (resets is not None and resets <= now_s):
-            continue
-        stale = fetched is not None and not 0 <= now_s - fetched <= STALE_S
-        number = f"{round(percent)}%{'?' if stale else ''}"
-        cells.append((label, number, resets))
-    # An account with only its weekly window shows the bare number: nothing to tell it from.
-    if len(cells) == 1 and cells[0][0] == _LABELS["weekly_all"]:
-        return f"{alias}: {cells[0][1]}"
-    shown = [
-        f"{label} {number}" + ("" if resets is None else f" (resets {_when(resets, now_s)})")
-        for label, number, resets in cells
-    ]
-    return f"{alias}: {' '.join(shown) or '-'}"
-
-
-def _dollars(cents: float) -> str:
-    return f"${cents / 100:g}"
+    chosen = _spend(rows)
+    if chosen is None:
+        limits: list[tuple[float, float | None]] = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or row.get("kind") not in _WINDOW_KINDS:
+                continue
+            percent, resets = _number(row.get("percent")), _number(row.get("resets_at"))
+            # A window that rolled over since it was read says nothing about now.
+            if percent is not None and (resets is None or resets > now_s):
+                limits.append((percent, resets))
+        chosen = _binding(limits)
+    if chosen is None:
+        return f"{alias}: -"
+    percent, resets = chosen
+    return _cell(alias, percent, resets_s=resets, stale=_stale(fetched, now_s), now_s=now_s)
 
 
 def _cursor(entry: Mapping[str, object], now_s: float) -> str | None:
-    """One Cursor seat: ``cursor: 0.1% $0/$250``, from the cached numbers only.
-
-    ``?`` when there are none, when they are older than STALE_S, or when the cycle they describe
-    has ended; ``spent`` (with when it resets) once routing counts the seat as used up.
-    """
+    """One Cursor seat: its INCLUDED usage, ``cursor: 33%``; on-demand only as a note once it
+    is used up (``cursor: 33% (on-demand spent)``), since included usage stays usable then."""
     alias = _text(entry.get("alias"))
     if alias is None:
         return None
     fetched = _number(entry.get("fetched_at"))
     cycle_end = _number(entry.get("cycle_end_s"))
     percent = _number(entry.get("included_percent"))
+    if fetched is None or percent is None or (cycle_end is not None and cycle_end <= now_s):
+        return f"{alias}: ?"
     used, cap = (
         _number(entry.get("on_demand_used_cents")),
         _number(entry.get("on_demand_cap_cents")),
     )
-    if fetched is None or (cycle_end is not None and cycle_end <= now_s):
-        return f"{alias}: ?"
-    stale = "?" if not 0 <= now_s - fetched <= STALE_S else ""
-    if entry.get("available") is False:
-        when = "" if cycle_end is None else f" (resets {_when(cycle_end, now_s)})"
-        return f"{alias}: spent{when}{stale}"
-    cells: list[str] = []
-    if percent is not None:
-        cells.append(
-            "incl "
-            + (f"{percent:.1f}%".replace(".0%", "%") if percent < 10 else f"{round(percent)}%")
-        )
-    if used is not None:
-        cells.append(
-            f"on-demand {_share(used, cap)}" if cap else f"on-demand {_dollars(used)}"
-        )
-    if not cells or entry.get("available") is None:
-        return f"{alias}: {' '.join(cells) or '-'}{stale or '?'}"
-    return f"{alias}: {' '.join(cells)}{stale}"
+    if cap is not None and cap > 0:
+        spent = used is not None and used >= cap
+    elif cap == 0:
+        spent = entry.get("available") is False
+    else:
+        spent = entry.get("available") is False and percent < NEAR_PERCENT
+    return _cell(
+        alias,
+        percent,
+        resets_s=cycle_end,
+        stale=_stale(fetched, now_s),
+        now_s=now_s,
+        notes=("on-demand spent",) if spent else (),
+    )
 
 
 def _plain(value: float) -> str:
@@ -196,82 +197,75 @@ def _plain(value: float) -> str:
 
 
 def _codex(entry: Mapping[str, object], now_s: float) -> str | None:
-    """One Codex account from the cached numbers: ``zvoove-codex: 0/5100 cr (0%)`` (the limit the
-    plan reports, in the unit it names, and its share in brackets), or its windows
-    (``5h 12% weekly 34%``). ``?`` when old."""
+    """One Codex account: the most used of its windows and its credit pool."""
     alias = _text(entry.get("alias"))
     if alias is None:
         return None
     fetched = _number(entry.get("fetched_at"))
     if fetched is None:
         return f"{alias}: ?"
-    stale = "" if 0 <= now_s - fetched <= STALE_S else "?"
-    cells: list[str] = []
+    limits: list[tuple[float, float | None]] = []
     spend = entry.get("spend")
     if isinstance(spend, dict):
-        used, limit, unit = (
-            _number(spend.get("used")),
-            _number(spend.get("limit")),
-            _text(spend.get("unit")),
-        )
-        if used is not None and limit is not None and unit is not None:
-            short = "cr" if unit.casefold() == "credit" else unit
-            cells.append(_share(used, limit) if limit > 0 else f"{_plain(used)} {short}")
+        used, limit = _number(spend.get("used")), _number(spend.get("limit"))
+        reported = _number(spend.get("percent"))
+        if reported is None and used is not None and limit is not None and limit > 0:
+            reported = used / limit * 100
+        if reported is not None:
+            resets = _number(spend.get("resets_at_s"))
+            if resets is None or resets > now_s:
+                limits.append((reported, resets))
     windows = entry.get("windows")
     for window in windows if isinstance(windows, list) else []:
         if isinstance(window, dict):
-            label, percent = _text(window.get("label")), _number(window.get("percent"))
-            if label is not None and percent is not None:
-                cells.append(f"{label} {round(percent)}%")
-    if not cells:
-        return f"{alias}: -{stale or '?'}"
-    return f"{alias}: {' '.join(cells)}{stale}"
+            percent, resets = _number(window.get("percent")), _number(window.get("resets_at_s"))
+            if percent is not None and (resets is None or resets > now_s):
+                limits.append((percent, resets))
+    chosen = _binding(limits)
+    if chosen is None:
+        return f"{alias}: -{'?' if _stale(fetched, now_s) else ''}"
+    percent, resets = chosen
+    return _cell(alias, percent, resets_s=resets, stale=_stale(fetched, now_s), now_s=now_s)
 
 
-def _until(resets_at: str | None, now_s: float) -> str | None:
-    """Time left until an ISO reset, as ``3h05m`` or ``42m``; None when unknown or past."""
-    if resets_at is None:
+def _iso_s(value: str | None) -> float | None:
+    if value is None:
         return None
     try:
-        seconds = datetime.fromisoformat(resets_at).timestamp() - now_s
+        return datetime.fromisoformat(value).timestamp()
     except ValueError:
         return None
-    if seconds <= 0:
-        return None
-    minutes = int(seconds // 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m"
 
 
 def _antigravity(entry: Mapping[str, object], now_s: float) -> str | None:
+    """One Antigravity account. Each model group (Gemini, Claude/GPT) has its own 5-hour and
+    weekly windows, and work can start on whichever group has room: the group shown is the
+    least used one, at the most used of its windows."""
     alias = _text(entry.get("alias"))
     if alias is None:
         return None
     fetched = _number(entry.get("fetched_at"))
-    stale = fetched is None or not 0 <= now_s - fetched <= STALE_S
     windows = entry.get("windows")
-    # Every row reads as the share used; Antigravity has a 5-hour and a weekly window per group.
-    groups: dict[str, list[str]] = {}
+    groups: dict[str, list[tuple[float, float | None]]] = {}
     for window in windows if isinstance(windows, list) else []:
         if isinstance(window, dict):
-            group, period = _text(window.get("group")), _text(window.get("period"))
-            percent = _number(window.get("remaining_percent"))
-            if group is not None and period is not None and percent is not None and 0 <= percent <= 100:
-                used = f"{_plain(round(100 - percent))}%"
-                if period == "wk":
-                    groups.setdefault(group, []).append((1, f"wk {used}"))
-                else:
-                    # The short window shows how long until it resets (Stephan, 26 Nov).
-                    left = _until(_text(window.get("resets_at")), now_s)
-                    groups.setdefault(group, []).append((0, f"{left or period} {used}"))
-    if groups:
-        cells = [
-            f"{group} {' '.join(text for _, text in sorted(limits))}"
-            for group, limits in groups.items()
-        ]
-        return f"{alias}: {', '.join(cells)}" + ("?" if stale else "")
+            group = _text(window.get("group"))
+            left = _number(window.get("remaining_percent"))
+            resets = _iso_s(_text(window.get("resets_at")))
+            if group is None or left is None or not 0 <= left <= 100:
+                continue
+            if resets is None or resets > now_s:
+                groups.setdefault(group, []).append((100 - left, resets))
+    chosen = [_binding(limits) for limits in groups.values()]
+    usable = [limit for limit in chosen if limit is not None]
+    if usable:
+        percent, resets = min(
+            usable,
+            key=lambda limit: (limit[0], limit[1] if limit[1] is not None else float("inf")),
+        )
+        return _cell(alias, percent, resets_s=resets, stale=_stale(fetched, now_s), now_s=now_s)
     message = _text(entry.get("message"))
-    return f"{alias}: {message if message and not stale else '?'}"
+    return f"{alias}: {message if message and not _stale(fetched, now_s) else '?'}"
 
 
 def _broker_mirrors(root: Path) -> dict[str, str] | None:
@@ -378,8 +372,7 @@ def render(
         if isinstance(entry, dict):
             text = _account(entry, now_s)
             if text is not None:
-                fetched = _number(entry.get("fetched_at"))
-                is_spend = _spend(entry.get("rows"), fetched, now_s) is not None
+                is_spend = _spend(entry.get("rows")) is not None
                 (spends if is_spend else plans).append(text)
     parts.extend(plans)
     agy = document.get("antigravity")
