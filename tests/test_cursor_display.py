@@ -107,6 +107,17 @@ def test_a_seat_with_its_on_demand_spent_still_shows_its_included_percent() -> N
     assert line(included_percent=33.1, available=False, on_demand_used_cents=25_017) == (
         "cursor: 33% (on-demand spent)"
     )
+
+
+def test_on_demand_turned_off_still_gets_the_spent_note_even_near_full_included() -> None:
+    text = line(
+        included_percent=95,
+        available=False,
+        on_demand_used_cents=100,
+        on_demand_cap_cents=0,
+    )
+    assert text is not None
+    assert text.startswith("cursor: 95% (on-demand spent")
     both = line(included_percent=100.0, available=False, on_demand_used_cents=25_000)
     assert both is not None and both.startswith("cursor: 100% (on-demand spent, resets ")
     # Below the cap on-demand is not mentioned, whatever routing thinks.

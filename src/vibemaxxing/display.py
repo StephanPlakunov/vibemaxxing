@@ -71,10 +71,10 @@ def relative(resets_at_s: float | None, now_s: float) -> str:
     if left_s <= 0:
         return "resets now"
     if left_s < 3600:
-        return f"resets in {max(1, round(left_s / 60))}m"
+        return f"resets in {max(1, int(left_s // 60))}m"
     if left_s < 86_400:
-        return f"resets in {round(left_s / 3600)}h"
-    return f"resets in {round(left_s / 86_400)}d"
+        return f"resets in {int(left_s // 3600)}h"
+    return f"resets in {int(left_s // 86_400)}d"
 
 
 def iso_to_s(value: str | None) -> float | None:
@@ -158,14 +158,14 @@ def cursor_limits(reading: CursorReading) -> list[Limit]:
         limits.append(Limit("Included + bonus", usage.included_percent, None, resets))
     used, cap = usage.on_demand_used_cents, usage.on_demand_limit_cents
     if used is not None:
-        if cap:
+        if cap is not None and cap > 0:
             amount = f"{money(used / 100)} of {money(cap / 100)}"
             share: float | None = used / cap * 100
         else:
             amount = f"{money(used / 100)}" + (" (off)" if cap == 0 else " (no limit reported)")
             share = None
         # Routing counts the seat as spent: say so even if the share rounds below 100.
-        spent = reading.availability.ok is False and share is not None
+        spent = reading.availability.ok is False and (share is not None or cap == 0)
         limits.append(Limit("On-demand", share, amount, resets, spent))
     return limits
 

@@ -1718,15 +1718,20 @@ def _commands() -> frozenset[str]:
 def account_shorthand(argv: Sequence[str]) -> list[str]:
     """`vibe main [...]` is `vibe run main [...]`: a first word that is no command names an account.
 
-    Only vibe's own root options may come before it (`vibe --json main`); a command name always
-    wins, so an account called `list` is started with `vibe run list`.
+    Root options and `run`'s own flags may come before it (`vibe --dry-run main`); a command name
+    always wins, so an account called `list` is started with `vibe run list`.
     """
     items = list(argv)
     first = next((index for index, token in enumerate(items) if not token.startswith("-")), None)
     if first is None or items[first] in _commands():
         return items
-    if any(token not in ("--json",) for token in items[:first]):
-        return items  # `--version`, `-h` and friends: argparse answers those
+
+    def _prefix_ok(token: str) -> bool:
+        name = token.split("=", 1)[0]
+        return name in _RUN_FLAGS and name not in ("-h", "--help")
+
+    if any(not _prefix_ok(token) for token in items[:first]):
+        return items  # `--version` and friends: argparse answers those
     return [*items[:first], "run", *items[first:]]
 
 

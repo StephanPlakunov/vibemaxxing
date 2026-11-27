@@ -686,7 +686,7 @@ def test_the_codex_panel_shows_the_credit_limit_as_one_bar() -> None:
     text = _panel(reading(usage=usage), now_s=1_795_000_000.0)
 
     assert "Credits " in text and "█" in text and " 10%  510 of 5,100 credits" in text
-    assert "in 13d" in text
+    assert "in 12d" in text
     assert "no limits reported" not in text
 
 

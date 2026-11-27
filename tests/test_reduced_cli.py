@@ -66,6 +66,8 @@ def test_the_usage_web_dashboard_is_gone(tmp_home: Path) -> None:
         (["main", "--", "claude", "-p", "hi"], ["run", "main", "--", "claude", "-p", "hi"]),
         (["cursor", "--dry-run"], ["run", "cursor", "--dry-run"]),
         (["--json", "main", "--dry-run"], ["--json", "run", "main", "--dry-run"]),
+        (["--dry-run", "main"], ["--dry-run", "run", "main"]),
+        (["--json", "--dry-run", "main"], ["--json", "--dry-run", "run", "main"]),
         # A command name always wins; an account named like one starts with `vibe run`.
         (["list"], ["list"]),
         (["run", "main"], ["run", "main"]),

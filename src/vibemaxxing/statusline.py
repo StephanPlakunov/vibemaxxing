@@ -102,7 +102,7 @@ def _cell(
     older than STALE_S.
     """
     shown = list(notes)
-    if percent >= NEAR_PERCENT and resets_s is not None and resets_s > now_s:
+    if round(percent) >= NEAR_PERCENT and resets_s is not None and resets_s > now_s:
         shown.append(f"resets {_when(resets_s, now_s)}")
     text = f"{alias}: {_plain(round(percent))}%{'?' if stale else ''}"
     return f"{text} ({', '.join(shown)})" if shown else text
@@ -176,8 +176,10 @@ def _cursor(entry: Mapping[str, object], now_s: float) -> str | None:
         _number(entry.get("on_demand_used_cents")),
         _number(entry.get("on_demand_cap_cents")),
     )
-    if cap:
+    if cap is not None and cap > 0:
         spent = used is not None and used >= cap
+    elif cap == 0:
+        spent = entry.get("available") is False
     else:
         spent = entry.get("available") is False and percent < NEAR_PERCENT
     return _cell(
@@ -210,7 +212,9 @@ def _codex(entry: Mapping[str, object], now_s: float) -> str | None:
         if reported is None and used is not None and limit is not None and limit > 0:
             reported = used / limit * 100
         if reported is not None:
-            limits.append((reported, _number(spend.get("resets_at_s"))))
+            resets = _number(spend.get("resets_at_s"))
+            if resets is None or resets > now_s:
+                limits.append((reported, resets))
     windows = entry.get("windows")
     for window in windows if isinstance(windows, list) else []:
         if isinstance(window, dict):
@@ -255,7 +259,10 @@ def _antigravity(entry: Mapping[str, object], now_s: float) -> str | None:
     chosen = [_binding(limits) for limits in groups.values()]
     usable = [limit for limit in chosen if limit is not None]
     if usable:
-        percent, resets = min(usable, key=lambda limit: limit[0])
+        percent, resets = min(
+            usable,
+            key=lambda limit: (limit[0], limit[1] if limit[1] is not None else float("inf")),
+        )
         return _cell(alias, percent, resets_s=resets, stale=_stale(fetched, now_s), now_s=now_s)
     message = _text(entry.get("message"))
     return f"{alias}: {message if message and not _stale(fetched, now_s) else '?'}"

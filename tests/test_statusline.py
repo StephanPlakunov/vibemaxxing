@@ -92,6 +92,13 @@ def test_the_reset_shows_from_ninety_percent() -> None:
     assert line(90) == "▶ alt · main: 90% (resets Mon 00:00)"
 
 
+def test_the_reset_shows_when_the_rounded_percent_reaches_ninety() -> None:
+    doc = document(account("main", [("weekly_all", 89.6, _at(26, 0, 0))]))
+    line = statusline.render(doc, now_s=NOON)
+
+    assert line.startswith("▶ alt · main: 90% (resets ")
+
+
 def test_an_account_with_only_its_weekly_window_shows_its_number() -> None:
     doc = document(account("main", [("weekly_all", 53, _at(26, 0, 0))]))
 

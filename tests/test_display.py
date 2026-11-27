@@ -268,6 +268,38 @@ def test_a_codex_window_that_rolled_over_is_left_out() -> None:
     assert "codex: 20%" in statusline.render(doc, now_s=NOW).split(" · ")
 
 
+def test_a_codex_spend_pool_that_rolled_over_is_left_out() -> None:
+    doc = status_document()
+    codex = doc["codex"][0]  # type: ignore[index]
+    assert isinstance(codex, dict)
+    codex["spend"] = {
+        "percent": 100,
+        "used": 5100,
+        "limit": 5100,
+        "resets_at_s": NOW - 1,
+    }
+    codex["windows"] = [{"label": "weekly", "percent": 20, "resets_at_s": NOW + DAY}]
+
+    assert "codex: 20%" in statusline.render(doc, now_s=NOW).split(" · ")
+
+
+def test_on_demand_off_is_flagged_when_routing_refuses_the_seat() -> None:
+    usage = CursorUsage(33, 100, 0, NOW + 6 * DAY)
+    reading = launch.CursorReading("cursor", True, None, None, usage, "", availability(usage))
+    on_demand = next(l for l in display.cursor_limits(reading) if l.label == "On-demand")
+
+    assert on_demand.percent is None
+    assert on_demand.flagged
+    assert on_demand.amount is not None and "(off)" in on_demand.amount
+
+
+def test_relative_countdowns_floor_partial_units() -> None:
+    assert display.relative(NOW + 5400, NOW) == "resets in 1h"
+    assert display.relative(NOW + 3599, NOW) == "resets in 59m"
+    assert display.relative(NOW + 2 * DAY + DAY // 2, NOW) == "resets in 2d"
+    assert display.relative(NOW + 86_400 - 1, NOW) == "resets in 23h"
+
+
 def test_antigravity_with_every_group_used_up_shows_the_first_reset_of_the_best_group() -> None:
     entry = {
         "alias": "agy",
@@ -291,3 +323,42 @@ def test_antigravity_with_every_group_used_up_shows_the_first_reset_of_the_best_
     text = statusline._antigravity(entry, NOW)
 
     assert text is not None and text.startswith("agy: 100% (resets ")
+
+
+def test_tied_antigravity_groups_pick_the_earliest_reset() -> None:
+    hour = 3600
+    entry = {
+        "alias": "agy",
+        "fetched_at": NOW - 30,
+        "windows": [
+            {
+                "group": "Gemini",
+                "period": "wk",
+                "remaining_percent": 0.0,
+                "resets_at": _iso(NOW + 6 * DAY),
+            },
+            {
+                "group": "Gemini",
+                "period": "5h",
+                "remaining_percent": 0.0,
+                "resets_at": _iso(NOW + 5 * hour),
+            },
+            {
+                "group": "Claude/GPT",
+                "period": "wk",
+                "remaining_percent": 100.0,
+                "resets_at": _iso(NOW + 6 * DAY),
+            },
+            {
+                "group": "Claude/GPT",
+                "period": "5h",
+                "remaining_percent": 0.0,
+                "resets_at": _iso(NOW + hour),
+            },
+        ],
+    }
+
+    text = statusline._antigravity(entry, NOW)
+
+    assert text is not None
+    assert f"resets {statusline._when(NOW + hour, NOW)}" in text
